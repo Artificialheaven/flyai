@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FlyAI</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="theme-dark">
+  <div id="app">
+    <!-- 移动端抽屉遮罩 -->
+    <div id="overlay" class="hidden"></div>
+
+    <!-- 左栏：会话列表 -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="logo"><span class="dot"></span>FlyAI</span>
+        <button id="btn-new-session" class="icon-btn" title="新建会话">＋</button>
+      </div>
+      <div id="session-list" class="session-list"></div>
+      <div class="sidebar-footer">
+        <div class="user-row">
+          <span id="user-name" class="user-name"></span>
+          <button id="btn-logout" class="footer-btn small-btn">退出</button>
+        </div>
+        <div class="btn-row">
+          <button id="btn-lore" class="footer-btn">🧩 内容</button>
+          <button id="btn-settings" class="footer-btn">⚙️ 设置</button>
+        </div>
+        <button id="btn-users" class="footer-btn hidden">👥 用户管理</button>
+        <button id="btn-theme" class="footer-btn">🌗 切换主题</button>
+      </div>
+    </aside>
+
+    <!-- 主区 -->
+    <main id="main">
+      <div id="topbar">
+        <button id="btn-nav" class="icon-btn nav-btn" title="会话列表">☰</button>
+        <div id="session-meta" class="meta"></div>
+        <span id="provider-bar" class="chip provider"></span>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="input-wrap">
+        <button id="btn-jump-bottom" class="btn-jump-bottom hidden" title="跳到底部">⬇</button>
+        <div class="input-area">
+          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <button id="btn-send">发送</button>
+          <button id="btn-stop" class="hidden">停止</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <dialog id="settings-dialog">
+    <div class="dialog-body">
+      <h3>设置</h3>
+      <p class="sub">提供商与工具配置</p>
+
+      <h4>提供商</h4>
+      <div id="provider-list"></div>
+      <button id="btn-add-provider" class="btn small">＋ 新增提供商</button>
+
+      <h4>工具</h4>
+      <label class="f-label">最大工具迭代轮数
+        <input type="number" id="set-max-iters" value="8" min="1" max="50" />
+      </label>
+      <label class="f-label">工具超时（秒）
+        <input type="number" id="set-timeout" value="60" min="1" />
+      </label>
+      <label class="f-label">文件读取白名单目录（每行一个）
+        <textarea id="set-read-dirs" rows="3"></textarea>
+      </label>
+      <div id="plugin-checks"></div>
+
+      <h4>角色扮演</h4>
+      <label class="f-label toggle"><input type="checkbox" id="set-rp-format" /> 启用对话格式规范（动作/内心/对白 / 空行分段 / 样式区分）</label>
+      <label class="f-label toggle"><input type="checkbox" id="set-attr-enabled" /> 启用属性跟踪（好感度、金钱等，AI 每回合可修改）</label>
+      <label class="f-label toggle"><input type="checkbox" id="set-attr-ai" /> AI 自行提供属性增减值（关闭则仅供展示）</label>
+
+      <div class="dialog-actions">
+        <button id="btn-config-cancel" class="btn">取消</button>
+        <button id="btn-config-save" class="btn primary">保存</button>
+      </div>
+      <div id="config-msg" class="msg-bar"></div>
+    </div>
+  </dialog>
+
+  <!-- 内容管理弹窗 -->
+  <dialog id="lore-dialog">
+    <div class="dialog-body" id="lore-body"></div>
+  </dialog>
+
+  <!-- 属性数值查看弹窗（点击 AI 头像打开） -->
+  <dialog id="attr-dialog">
+    <div class="dialog-body">
+      <h3>🧮 属性数值</h3>
+      <p class="sub">AI 每回合通过 update_attributes 更新。</p>
+      <div id="attr-body" class="attr-viewer"></div>
+      <div class="dialog-actions">
+        <button id="btn-attr-close" class="btn primary">关 闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- AI 属性生成确认弹窗 -->
+  <dialog id="attrgen-dialog">
+    <div class="dialog-body">
+      <h3>✨ AI 建议属性</h3>
+      <p class="sub">AI 依据角色设定提议的属性，可增删改后添加进角色卡。</p>
+      <div id="attrgen-body" class="attrgen-list"></div>
+      <div class="dialog-actions">
+        <button id="btn-attrgen-cancel" class="btn ghost">取消</button>
+        <button id="btn-attrgen-add" class="btn">＋ 加一条</button>
+        <button id="btn-attrgen-confirm" class="btn primary">确认添加</button>
+      </div>
+      <div id="attrgen-msg" class="msg-bar"></div>
+    </div>
+  </dialog>
+
+  <!-- 压缩导出确认弹窗 -->
+  <dialog id="export-dialog">
+    <div class="dialog-body">
+      <h3>☁ 压缩对话并导出</h3>
+      <p id="export-sub" class="sub">AI 正在把对话历史归纳进角色卡与世界观并分类…</p>
+      <div id="export-body" class="export-summary"></div>
+      <div class="dialog-actions">
+        <button id="btn-export-close" class="btn ghost">关 闭</button>
+        <button id="btn-export-publish" class="btn hidden">💾 角色卡入角色库</button>
+        <button id="btn-export-download" class="btn primary hidden">⬇ 下载压缩对话包</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 用户管理弹窗（仅管理员） -->
+  <dialog id="user-dialog">
+    <div class="dialog-body">
+      <h3>👥 用户管理</h3>
+      <p class="sub">创建 / 删除用户。登录仅验密，普通用户需在此由管理员创建。</p>
+      <div id="user-list" class="user-list"></div>
+      <label class="f-label">新用户名<input type="text" id="user-new-name" placeholder="请输入新用户名" /></label>
+      <label class="f-label">密码<input type="password" id="user-new-password" placeholder="密码（可留空）" /></label>
+      <div id="user-msg" class="msg-bar"></div>
+      <div class="dialog-actions">
+        <button id="btn-user-cancel" class="btn ghost">取消</button>
+        <button id="btn-user-create" class="btn primary">创建用户</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "file_reader",
+  "version": "1.0.0",
+  "description": "读取白名单目录内的文本文件",
+  "author": "flyai"
+}

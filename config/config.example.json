@@ -1,0 +1,40 @@
+{
+  "server": { "host": "127.0.0.1", "port": 8000 },
+  "active_provider": "",
+  "providers": [
+    {
+      "id": "deepseek",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "sk-place-your-key-here",
+      "model": "deepseek-chat",
+      "params": { "temperature": 0.7, "max_tokens": 4096 }
+    }
+  ],
+  "tools": {
+    "enabled": true,
+    "max_iterations": 8,
+    "timeout_seconds": 60,
+    "plugin_dirs": ["plugins"],
+    "allowed_read_dirs": ["F:/PythonProgram/flyai/workspace"],
+    "enabled_plugins": { "file_reader": true }
+  },
+  "history": { "backend": "memory" },
+  "auth": {
+    "admin": { "username": "admin", "password": "" }
+  },
+  "roleplay": {
+    "format_enabled": true,
+    "format_instruction": "你是一个沉浸式角色扮演助手。每轮回复请严格遵守以下格式：\n1. 动作或场景描述用中文括号（ ）括起，例如（她轻轻推开门走进来）。\n2. 角色内心活动用成对的 ____ 标记，例如 ____他看起来有些紧张____。\n3. 角色对白使用「」或中文引号“ ”括起，例如「晚上好，旅人。」。\n4. 同一条消息中，叙述、动作、对白、内心活动等不同类型之间用空行隔开，保持清晰分段。\n5. 保持简洁自然的语气，直接进入剧情，不要解释你的输出格式。",
+    "tool_instruction": "需要获取资料、查询设定或改变世界状态时，请主动调用对应工具，依据工具返回的结果作答，不要臆造工具提供不了的内容。",
+    "format_example": "（她推开旧书店的木门，檐下的风铃轻轻响了一声。）\n\n____他……真的不会再回来了吗？____\n\n「欢迎光临。想喝点什么？」",
+    "attributes": {
+      "enabled": true,
+      "ai_provided": true,
+      "list": [
+        { "key": "affection", "label": "好感度", "initial": 0, "min": -100, "max": 100 },
+        { "key": "money", "label": "金钱", "initial": 100, "min": 0 }
+      ]
+    }
+  }
+}

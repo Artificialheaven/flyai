@@ -1,0 +1,61 @@
+"""R7 一次性补全 helper 与 AI JSON 解析（纯逻辑）。"""
+
+import os
+import sys
+import asyncio
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import pytest
+
+from flyai.providers.base import StreamEvent, StreamEventType
+from flyai.providers.complete import complete
+from flyai.schemas import Message
+from flyai.lore.gen import _extract_json
+
+
+class _FakeProvider:
+    def __init__(self, events):
+        self._events = iter(events)
+
+    async def stream_chat(self, messages, tool_specs, **kwargs):
+        for ev in self._events:
+            yield ev
+
+
+def _run(coro):
+    try:
+        return asyncio.get_event_loop().run_until_complete(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def test_complete_concats_content_ignores_thinking():
+    p = _FakeProvider([
+        StreamEvent(StreamEventType.THINKING_DELTA, "思考内"),
+        StreamEvent(StreamEventType.CONTENT_DELTA, "大家好"),
+        StreamEvent(StreamEventType.CONTENT_DELTA, "，世界"),
+    ])
+    out = _run(complete(p, [Message(role="user", content="hi")], system_prompt="sys"))
+    assert out == "大家好，世界"
+
+
+def test_extract_json_object():
+    assert _extract_json('{"a": 1}') == {"a": 1}
+
+
+def test_extract_json_fenced():
+    assert _extract_json('```json\n[{"key": "x"}]\n```') == [{"key": "x"}]
+
+
+def test_extract_json_with_prose():
+    assert _extract_json('结果如下：{"character": {"name": "A"}}。') == {"character": {"name": "A"}}
+
+
+def test_extract_json_garbage_raises():
+    with pytest.raises(ValueError):
+        _extract_json("完全不是 JSON 的内容")
