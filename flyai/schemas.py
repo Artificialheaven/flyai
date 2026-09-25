@@ -52,6 +52,8 @@ class Message:
     name: Optional[str] = None
     # role=tool 时的执行结果状态（true 成功 / false 失败 / None 未知旧数据）
     ok: Optional[bool] = None
+    # 群聊中 AI 自评「无需发言」时标记隐藏：仍存历史，但不展示
+    hidden: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,6 +65,7 @@ class Message:
             "tool_call_id": self.tool_call_id,
             "name": self.name,
             "ok": self.ok,
+            "hidden": self.hidden,
         }
 
     @classmethod
@@ -77,4 +80,5 @@ class Message:
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
             ok=data.get("ok"),
+            hidden=bool(data.get("hidden", False)),
         )

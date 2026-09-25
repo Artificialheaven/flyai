@@ -28,6 +28,11 @@ logger = logging.getLogger("flyai.chat")
 router = APIRouter(prefix="/api", tags=["chat"])
 
 
+def _is_marker(text: str, markers) -> bool:
+    t = (text or "").strip()
+    return t in markers or t == ""
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
@@ -163,6 +168,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
         audience_names.append(spk.name)
     audience_names.append("你")
 
+    # 群聊（≥2 个 AI）才启用「AI 自评是否需要发言」；私聊单 AI 必回
+    allow_skip = len(speakers) > 1
+    skip_marker = ("略", "「略」", "（略）", "[略]", "[跳过]", "(skip)")
+
     # 追加用户消息到该窗口
     history.append(Message(role="user", content=req.message))
     sc.store.save(session)
@@ -207,9 +216,24 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                 ):
                     yield sse_event(ev, data)
                 # 给本次追加的 assistant 回复打上发言者标记，供后续上下文与展示
+                # 群聊里若该 AI 自评「无需发言」（内容为空或略过标记），标记隐藏但不删除，
+                # 且通知前端不展示这块输出。
+                skipped = False
                 for m in history[before:]:
-                    if m.role == "assistant":
-                        m.name = spk.name
+                    if m.role != "assistant":
+                        continue
+                    m.name = spk.name
+                    if (
+                        allow_skip
+                        and not skipped
+                        and (m.content is None or _is_marker(m.content or "", skip_marker))
+                    ):
+                        m.hidden = True
+                        skipped = True
+                if skipped:
+                    yield sse_event(
+                        "speaker_skip", {"member_id": spk.id, "name": spk.name}
+                    )
             sc.store.save(session)
         except ProviderError as exc:
             logger.warning("provider 错误: %s", exc)

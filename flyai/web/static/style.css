@@ -374,3 +374,22 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
 .mem-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .mem-head .avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; }
 .mem-memory, .mem-attrs { width: 100%; margin-top: 6px; box-sizing: border-box; }
+
+/* ==== Beta：可折叠 AI 发言卡 ==== */
+.as-header { display: flex; align-items: center; gap: 8px; width: 100%; background: var(--bg-3); border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; margin-bottom: 6px; cursor: pointer; text-align: left; color: var(--text); box-sizing: border-box; }
+.as-header.hidden { display: none; }
+.as-header .avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.as-id { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; flex: 1; }
+.as-status { color: var(--accent); font-size: 12px; }
+.msg.assistant.thinking .as-status { animation: aspulse 1.2s ease-in-out infinite; }
+@keyframes aspulse { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+.as-chev { color: var(--muted); }
+.as-body.hidden { display: none; }
+
+/* ==== Beta：房间窗口导航（左侧栏） ==== */
+.session-item.back, .session-item.add, .session-item.thread-item { padding: 9px 12px; border-radius: 10px; cursor: pointer; color: var(--text); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-item.back { font-weight: 600; color: var(--accent); border: 1px solid var(--border); }
+.session-item.back:hover, .session-item.add:hover, .session-item.thread-item:hover { background: var(--bg-hover); }
+.session-item.thread-item.active { background: var(--accent); color: #fff; }
+.session-item.add { border: 1px dashed var(--border); opacity: .9; }
+.room-head { padding: 6px 4px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); margin: 4px 0; }

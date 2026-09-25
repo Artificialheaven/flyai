@@ -231,6 +231,59 @@ async def _drain(resp):
             pass
 
 
+class _FakeSkipProvider:
+    """群聊里某 AI 自评无需发言，回「略」。"""
+    async def stream_chat(self, messages, tool_specs, **kwargs):
+        yield StreamEvent(StreamEventType.CONTENT_DELTA, "略")
+
+
+def test_group_ai_decline_marks_hidden(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.sessions.models import Thread as T  # noqa
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, chars = _room(["c1", "c2"], ["初", "两个"])
+    ais = [s.members[1], s.members[2]]
+    g = Thread(kind="group", title="群", member_ids=[m.id for m in ais])
+    s.threads.append(g)
+    store.save(s)
+
+    state, sc = _make_state_and_scope(tmp_path, chars)
+    sc.store = store
+    provider = _FakeSkipProvider()
+    req = SimpleNamespace(message="散会了大家", thread_id=g.id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    _run(_drain(resp))
+
+    s2 = store.get(s.id)
+    g2 = s2.thread(g.id)
+    # 两条 AI 都被判定「略」→ 各一条隐藏的 assistant 记录（历史仍保留）
+    tails = [m for m in g2.messages if m.role == "assistant"]
+    assert len(tails) == 2
+    assert all(m.hidden for m in tails)
+    assert all(m.name == n for m, n in zip(tails, ["初", "两个"]))
+
+
+def test_dm_single_ai_never_skipped(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, _ = _room(["c1"])
+    store.save(s)
+    state, sc = _make_state_and_scope(tmp_path, [Character(id="c1", name="初")])
+    sc.store = store
+    provider = _FakeSkipProvider()  # 回「略」但 dm 是单 AI，不允许跳过
+    req = SimpleNamespace(message="在吗", thread_id=s.threads[0].id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    _run(_drain(resp))
+    s2 = store.get(s.id)
+    t = s2.thread(s.threads[0].id)
+    last = [m for m in t.messages if m.role == "assistant"][-1]
+    assert not last.hidden
+
+
 def test_group_fanout_each_ai_marks_own_reply(tmp_path):
     from flyai.api.routes_chat import _chat_in_thread
     from flyai.sessions.models import Thread as T  # noqa

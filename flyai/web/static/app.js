@@ -19,6 +19,7 @@ var state = {
   // beta：多 AI 群聊
   roomMembers: [],    // 当前房间参与者（session.members）
   roomThreads: [],    // 当前房间窗口（session.threads + 群聊）
+  roomView: false,    // 左侧栏是否处于「房间窗口导航」状态
   currentThreadId: null,
   currentSpeaker: null, // {member_id,name,character_id} 流式当前发言者
 };
@@ -551,11 +552,16 @@ function defaultToolReq() {
 
 /* ==== 会话 ==== */
 function renderSessionList() {
+  if (state.roomView) { renderRoomNav(); return; }
+  renderSessions();
+}
+/* 顶层：会话/房间列表 */
+function renderSessions() {
   el.sessionList.innerHTML = "";
   state.sessions.forEach(function (s) {
     var item = document.createElement("div");
     item.className = "session-item" + (s.id === state.currentSessionId ? " active" : "");
-    item.textContent = s.title || "新会话";
+    item.textContent = (s.title || "新会话") + (s.threads && s.threads.length ? " 👥" : "");
     item.addEventListener("click", function () { selectSession(s.id); });
     var del = document.createElement("span");
     del.className = "del";
@@ -564,6 +570,49 @@ function renderSessionList() {
     item.appendChild(del);
     el.sessionList.appendChild(item);
   });
+}
+/* 房间内：左侧栏展示该房间的各窗口（每 AI 私聊 + 群聊 + 建群/记忆），顶部返回键 */
+function renderRoomNav() {
+  el.sessionList.innerHTML = "";
+  var back = document.createElement("div");
+  back.className = "session-item back";
+  back.textContent = "← 返回会话";
+  back.addEventListener("click", backToSessions);
+  el.sessionList.appendChild(back);
+  var s = currentSession();
+  var head = document.createElement("div");
+  head.className = "room-head";
+  head.textContent = (s && s.title) || "群聊房间";
+  el.sessionList.appendChild(head);
+  state.roomThreads.forEach(function (t) {
+    var item = document.createElement("div");
+    item.className = "session-item thread-item" + (t.id === state.currentThreadId ? " active" : "");
+    item.textContent = (t.kind === "group" ? "👥 " : "💬 ") + (t.title || "窗口");
+    item.addEventListener("click", function () { loadThread(t.id); });
+    el.sessionList.appendChild(item);
+  });
+  var aiCount = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).length;
+  if (aiCount >= 2) {
+    var add = document.createElement("div");
+    add.className = "session-item add";
+    add.textContent = "＋ 建群聊";
+    add.addEventListener("click", openGroupDialog);
+    el.sessionList.appendChild(add);
+  }
+  if ((state.roomMembers || []).length) {
+    var mem = document.createElement("div");
+    mem.className = "session-item add";
+    mem.textContent = "🧠 记忆";
+    mem.addEventListener("click", openMemDialog);
+    el.sessionList.appendChild(mem);
+  }
+}
+function backToSessions() {
+  state.roomView = false;
+  clearMessages();
+  if (el.threads) el.threads.classList.add("hidden");
+  renderSessionList();
+  renderSessionMeta();
 }
 
 function effectiveChar() {
@@ -590,6 +639,25 @@ function isScoped() {
 function renderSessionMeta() {
   var s = currentSession();
   if (!s) { el.sessionMeta.innerHTML = '<span class="chip">新建会话以开始</span>'; return; }
+
+  if (roomMode()) {
+    // 房间：不显示「绑定单个角色」的选择器，仅展示成员与世界观
+    var names = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).map(function (m) { return m.name; });
+    var world = effectiveWorld();
+    var worldChip = document.createElement("span");
+    worldChip.className = "chip";
+    worldChip.innerHTML = "🌍 世界观 " + worldSelectOptions("world", world ? world.id : "", "无世界观");
+    el.sessionMeta.innerHTML = "";
+    var roomChip = document.createElement("span");
+    roomChip.className = "chip";
+    roomChip.innerHTML = "👥 多AI房间" + (names.length ? " · " + escapeHtml(names.join("、")) : "");
+    el.sessionMeta.appendChild(roomChip);
+    el.sessionMeta.appendChild(worldChip);
+    el.sessionMeta.appendChild(makeMetaActions(null, false));
+    var selW = el.sessionMeta.querySelector('select[data-world]');
+    if (selW) selW.addEventListener("change", function () { updateSessionBinding("world_id", selW.value); });
+    return;
+  }
 
   var char = effectiveChar();
   var world = effectiveWorld();
@@ -763,14 +831,15 @@ function selectSession(id) {
     if (sess) { sess.character_id = s.character_id; sess.world_id = s.world_id; sess.title = s.title; }
     state.currentAttrs = s.attributes || null;
     state.scopeCache[id] = { char: s.character || null, world: s.world || null, scoped: !!s.scoped };
-    // beta：多 AI 房间
+    // beta：多 AI 房间；有窗口时左侧栏切换为该房间的窗口导航
     state.roomMembers = s.members || [];
     state.roomThreads = s.threads || [];
     state.currentSpeaker = null;
     state.currentThreadId = null;
-    renderThreads();
+    state.roomView = state.roomThreads.length > 0;
+    renderSessionList();
     renderSessionMeta();
-    if (state.roomThreads.length) {
+    if (state.roomView) {
       loadThread(state.roomThreads[0].id);
     } else {
       renderHistory(s.messages || []);
@@ -783,34 +852,12 @@ function memberOf(idOrName) {
     return m.id === idOrName || m.name === idOrName || !idOrName;
   });
 }
+function roomMode() {
+  return !!(state.roomThreads && state.roomThreads.length);
+}
 
 function renderThreads() {
-  if (!el.threads) return;
-  el.threads.innerHTML = "";
-  var isRoom = state.roomThreads.length > 0 && state.currentSessionId;
-  el.threads.classList.toggle("hidden", !isRoom);
-  if (!isRoom) return;
-  state.roomThreads.forEach(function (t) {
-    var tab = document.createElement("button");
-    tab.className = "thread-tab" + (t.id === state.currentThreadId ? " active" : "");
-    tab.textContent = (t.kind === "group" ? "👥 " : "💬 ") + (t.title || "窗口");
-    tab.title = t.kind === "group" ? "群聊窗口" : "私聊窗口";
-    tab.addEventListener("click", function () { loadThread(t.id); });
-    el.threads.appendChild(tab);
-  });
-  var aiCount = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).length;
-  if (aiCount >= 2) {
-    var add = document.createElement("button");
-    add.className = "thread-tab add"; add.textContent = "＋建群聊";
-    add.addEventListener("click", openGroupDialog);
-    el.threads.appendChild(add);
-  }
-  if ((state.roomMembers || []).length) {
-    var mem = document.createElement("button");
-    mem.className = "thread-tab add"; mem.textContent = "🧠 记忆";
-    mem.addEventListener("click", openMemDialog);
-    el.threads.appendChild(mem);
-  }
+  renderSessionList();  // 房间窗口改由左侧栏渲染（renderRoomNav），此函数仅作统一入口
 }
 
 function loadThread(tid) {
@@ -1053,6 +1100,11 @@ function characterEditor(c, scoped) {
   scoped = !!scoped;
   var id = c ? c.id : "";
   el.loreBody.innerHTML = characterEditorHtml(c, scoped);
+  // 从顶部动作条（副本编辑 / 新建）进来时对话框可能尚未打开，需先展示
+  if (el.loreDialog && !el.loreDialog.open) {
+    safeCloseDialogs();
+    el.loreDialog.showModal();
+  }
   bindEditorCommon("character", id, function (payload) {
     if (scoped) {
       return fetchJSON("/api/sessions/" + state.currentSessionId + "/character", {
@@ -1283,6 +1335,7 @@ function renderHistory(messages) {
   clearMessages();
   var openToolRegion = null;
   messages.forEach(function (m) {
+    if (m.hidden) return;  // 群聊自评「无需发言」：不展示但保留在历史
     if (m.role === "user") { openToolRegion = null; el.messages.appendChild(makeUserBubble(m.content || "")); }
     else if (m.role === "assistant") { openToolRegion = appendAssistantMsg(m); }
     else if (m.role === "tool") {
@@ -1306,35 +1359,76 @@ function makeAssistantContainer() {
   var inner = document.createElement("div");
   inner.className = "assistant-wrap";
   wrap.appendChild(inner);
-  var speakerEl = document.createElement("div");
-  speakerEl.className = "assistant-speaker hidden";
-  inner.appendChild(speakerEl);
+
+  // 可折叠卡片头：显示 AI 头像/名字 + 思考中状态；点它展开/收起正文
+  var head = document.createElement("button");
+  head.type = "button";
+  head.className = "as-header hidden";
+  var idEl = document.createElement("span"); idEl.className = "as-id";
+  var statusEl = document.createElement("span"); statusEl.className = "as-status";
+  var chev = document.createElement("span"); chev.className = "as-chev"; chev.textContent = "▾";
+  head.appendChild(idEl); head.appendChild(statusEl); head.appendChild(chev);
+  inner.appendChild(head);
+
+  var body = document.createElement("div");
+  body.className = "as-body";
   var thinkingEl = document.createElement("details");
   thinkingEl.className = "thinking hidden";
   var summary = document.createElement("summary");
   summary.textContent = "思考过程";
   var thinkingDiv = document.createElement("div");
   thinkingEl.appendChild(summary); thinkingEl.appendChild(thinkingDiv);
-  inner.appendChild(thinkingEl);
+  body.appendChild(thinkingEl);
   var toolRegion = document.createElement("div");
   toolRegion.className = "tool-cards";
-  inner.appendChild(toolRegion);
+  body.appendChild(toolRegion);
   var contentEl = document.createElement("div");
   contentEl.className = "assistant-content";
-  inner.appendChild(contentEl);
-  return { container: wrap, speakerEl: speakerEl, thinkingEl: thinkingEl, thinkingDiv: thinkingDiv, toolRegion: toolRegion, contentEl: contentEl, rawContent: "" };
+  body.appendChild(contentEl);
+  inner.appendChild(body);
+
+  var a = {
+    container: wrap, head: head, idEl: idEl, statusEl: statusEl, chev: chev, bodyEl: body,
+    thinkingEl: thinkingEl, thinkingDiv: thinkingDiv, toolRegion: toolRegion, contentEl: contentEl,
+    rawContent: "", speakerName: "", open: true,
+  };
+  a.setOpen = function (open) {
+    a.open = !!open;
+    a.bodyEl.classList.toggle("hidden", !a.open);
+    a.chev.textContent = a.open ? "▾" : "▸";
+  };
+  a.setSpeaker = function (name, member) {
+    a.speakerName = name || "AI";
+    a.head.classList.remove("hidden");
+    var ch = member && member.character_id ? characterOf(member.character_id) : null;
+    a.idEl.innerHTML =
+      makeAvatarHtml(ch || member || null, true) +
+      '<span class="spk-name">' + escapeHtml(a.speakerName) + "</span>";
+  };
+  a.setThinking = function (on) {
+    a.statusEl.textContent = on ? "AI 思考中…" : "";
+    a.container.classList.toggle("thinking", !!on);
+  };
+  head.addEventListener("click", function () { a.setOpen(!a.open); });
+  return a;
 }
-function setSpeakerInner(a, speaker) {
-  var member = speaker && speaker.member_id ? memberOf(speaker.member_id) : null;
-  var ch = member && characterOf(member.character_id);
-  a.speakerEl.innerHTML =
-    makeAvatarHtml(ch || member || null, true) +
-    '<span class="spk-name">' + escapeHtml(speaker ? (speaker.name || "AI") : "AI") + "</span>";
+function ensureAssistant() {
+  if (state.currentAssistant) return state.currentAssistant;
+  var a = makeAssistantContainer();
+  el.messages.appendChild(a.container);
+  state.currentAssistant = a;
+  if (roomMode() && !a.speakerName) a.head.classList.remove("hidden");
+  scrollToBottom();
+  return a;
 }
 function appendAssistantMsg(m) {
   var a = makeAssistantContainer();
   el.messages.appendChild(a.container);
-  if (m.name) { a.speakerEl.classList.remove("hidden"); setSpeakerInner(a, { name: m.name }); }
+  if (m.name) {
+    a.setSpeaker(m.name, memberOf(m.name));
+    a.setThinking(false);
+    a.setOpen(true);  // 历史记录默认展开可直接阅读
+  }
   if (m.thinking) { a.thinkingEl.classList.remove("hidden"); a.thinkingEl.open = false; a.thinkingDiv.textContent = m.thinking; }
   if (m.content) setAssistantContent(a, m.content);
   if (m.tool_calls) m.tool_calls.forEach(function (c) { appendToolCallCard(a.toolRegion, c, false); });
@@ -1354,18 +1448,17 @@ function onSend() {
     el.input.disabled = true;
     el.messages.appendChild(makeUserBubble(text));
     el.input.value = "";
-    var a = makeAssistantContainer();
-    el.messages.appendChild(a.container);
-    state.currentAssistant = a;
+    // 每个 AI 各自一条卡片：流式期间按 speaker 事件新建，不预建占位
+    state.currentAssistant = null;
+    state.currentSpeaker = null;
     scrollToBottom();
     state.abortController = new AbortController();
-    state.currentSpeaker = null;
-    var a = state.currentAssistant;
-    if (a) { a.speakerEl.innerHTML = '<span class="spk-name">…</span>'; a.speakerEl.classList.remove("hidden"); }
+    var tid = state.currentThreadId ||
+      ((state.roomThreads && state.roomThreads.length) ? state.roomThreads[0].id : undefined);
     var payload = {
       message: text,
       session_id: state.currentSessionId,
-      thread_id: state.currentThreadId || undefined,
+      thread_id: tid,
       provider_id: (state.config && state.config.active_provider) || "",
       tools_enabled: true,
     };
@@ -1379,6 +1472,7 @@ function onSend() {
       return readSSE(resp.body, {
         message_start: onMsgStart,
         speaker: onSpeaker,
+        speaker_skip: onSpeakerSkip,
         thinking_delta: onThinkingDelta,
         content_delta: onContentDelta,
         tool_calls: onToolCalls,
@@ -1447,24 +1541,37 @@ function onMsgStart(data) {
   }
 }
 function onSpeaker(data) {
+  // 上一位发言者的卡片先收尾（收起），再为当前 AI 新建一张卡，避免多 AI 串进同一条消息
+  var prev = state.currentAssistant;
+  if (prev && prev.speakerName) { prev.setThinking(false); if (!prev.revealed) prev.setOpen(false); }
   state.currentSpeaker = data || null;
+  state.currentAssistant = null;
+  var a = ensureAssistant();
+  a.setSpeaker((data && data.name) || "AI", memberOf(data && data.member_id));
+  a.setOpen(true);
+  a.setThinking(true);
+}
+function onSpeakerSkip(data) {
+  // 该 AI 自评无需发言：把这块输出整卡移除（仍保存在历史中，reload 不展示）
   var a = state.currentAssistant;
-  if (a) { a.speakerEl.classList.remove("hidden"); setSpeakerInner(a, state.currentSpeaker); }
+  if (a) { a.setOpen(false); a.setThinking(false); a.container.remove(); }
+  state.currentAssistant = null;
+  state.currentSpeaker = null;
 }
 function onAttributes(data) {
   if (data && data.attributes) { state.currentAttrs = data.attributes; }
 }
 function onThinkingDelta(data) {
-  var a = state.currentAssistant; if (!a) return;
+  var a = ensureAssistant(); if (!a) return;
   a.thinkingEl.classList.remove("hidden"); a.thinkingEl.open = true; a.thinkingDiv.textContent += data.text;
 }
 function onContentDelta(data) {
-  var a = state.currentAssistant; if (!a) return;
+  var a = ensureAssistant(); if (!a) return;
   setAssistantContent(a, a.rawContent + (data.text || ""));
   scrollToBottom();  // 不强制：用户上翻时停留在原位
 }
 function onToolCalls(data) {
-  var a = state.currentAssistant; if (!a) return;
+  var a = ensureAssistant(); if (!a) return;
   (data.calls || []).forEach(function (c) { appendToolCallCard(a.toolRegion, c, true); });
 }
 function appendToolCallCard(region, call, streaming) {
@@ -1506,7 +1613,13 @@ function onStreamError(data) { addErrorBar(data.message || "发生错误"); }
 function onDone() { finalizeTurn(); }
 function finalizeTurn() {
   var a = state.currentAssistant;
-  if (a) { a.thinkingEl.open = false; }
+  if (a) {
+    a.thinkingEl.open = false;
+    a.setThinking(false);
+    if (a.speakerName) a.setOpen(false);  // 群聊发言结束后折叠，点击头部展开
+  }
+  state.currentAssistant = null;
+  state.currentSpeaker = null;
   state.busy = false;
   el.btnSend.disabled = false;
   el.btnStop.classList.add("hidden");
