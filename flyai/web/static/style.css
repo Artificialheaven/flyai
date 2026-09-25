@@ -358,3 +358,19 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
 .user-list .user-row.item { justify-content: space-between; padding: 8px 10px; border-radius: 8px; }
 .user-list .user-row.item:hover { background: var(--bg-hover); }
 .user-list .user-name { color: var(--text); }
+/* ==== Beta：多 AI 群聊 ==== */
+.threads { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.threads.hidden { display: none; }
+.thread-tab { background: var(--bg-3); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.thread-tab:hover { background: var(--bg-hover); }
+.thread-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.thread-tab.add { border-style: dashed; opacity: .9; }
+.assistant-speaker { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 12px; color: var(--muted); }
+.assistant-speaker .avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.assistant-speaker .spk-name { font-weight: 600; }
+.pick-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; background: var(--bg-3); }
+.check-line { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.mem-block { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; background: var(--bg-3); }
+.mem-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.mem-head .avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; }
+.mem-memory, .mem-attrs { width: 100%; margin-top: 6px; box-sizing: border-box; }

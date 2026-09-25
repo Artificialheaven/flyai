@@ -74,3 +74,34 @@ def clear_character_override(session: Session) -> None:
 
 def clear_world_override(session: Session) -> None:
     session.world_override = None
+
+
+# ---- beta 多 AI：按参与者解析有效角色 ----
+
+def member_character(member, lore) -> Optional[Character]:
+    """某个参与者（AI 座位）的有效角色：override 优先，否则库引用。"""
+    if member.override:
+        return Character.from_dict(member.override)
+    if member.character_id:
+        return lore.get_character(member.character_id)
+    return None
+
+
+def primary_thread(session: Session):
+    """返回首个私聊线程（无则 None）。"""
+    for t in session.threads:
+        if t.kind == "dm":
+            return t
+    return None
+
+
+def thread_messages(session: Session, tid: Optional[str] = None):
+    """取某窗口的历史；未指定或用主私聊/兼容字段兜底。"""
+    if tid:
+        t = session.thread(tid)
+        if t is not None:
+            return t.messages
+    pt = primary_thread(session)
+    if pt is not None and pt.messages:
+        return pt.messages
+    return session.messages

@@ -39,6 +39,7 @@
         <div id="session-meta" class="meta"></div>
         <span id="provider-bar" class="chip provider"></span>
       </div>
+      <div id="threads" class="threads hidden"></div>
       <div id="messages" class="messages"></div>
       <div class="input-wrap">
         <button id="btn-jump-bottom" class="btn-jump-bottom hidden" title="跳到底部">⬇</button>
@@ -144,6 +145,47 @@
       <div class="dialog-actions">
         <button id="btn-user-cancel" class="btn ghost">取消</button>
         <button id="btn-user-create" class="btn primary">创建用户</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 新建对话 / 房间（选多个角色即多 AI 群聊房间） -->
+  <dialog id="newchat-dialog">
+    <div class="dialog-body">
+      <h3>新建对话</h3>
+      <p class="sub">勾选一个或多个角色：单个=私聊，多个=多 AI 群聊房间（每个角色一条私聊窗口）。</p>
+      <label class="f-label">标题<input type="text" id="newchat-title" placeholder="（可选）" /></label>
+      <div id="newchat-pick" class="pick-list"></div>
+      <div id="newchat-msg" class="msg-bar"></div>
+      <div class="dialog-actions">
+        <button id="btn-newchat-cancel" class="btn ghost">取消</button>
+        <button id="btn-newchat-create" class="btn primary">创建</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 群聊：把多个 AI 放进同一窗口 -->
+  <dialog id="group-dialog">
+    <div class="dialog-body">
+      <h3>👥 创建群聊</h3>
+      <p class="sub">选择两个以上的 AI 参与者，放进同一窗口轮流发言。</p>
+      <div id="group-pick" class="pick-list"></div>
+      <div id="group-msg" class="msg-bar"></div>
+      <div class="dialog-actions">
+        <button id="btn-group-cancel" class="btn ghost">取消</button>
+        <button id="btn-group-create" class="btn primary">创建群聊</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 参与者记忆与属性 -->
+  <dialog id="mem-dialog">
+    <div class="dialog-body">
+      <h3>🧠 参与者记忆与属性</h3>
+      <p id="mem-title" class="sub"></p>
+      <div id="mem-body"></div>
+      <div class="dialog-actions">
+        <button id="btn-mem-close" class="btn primary">完成</button>
       </div>
     </div>
   </dialog>

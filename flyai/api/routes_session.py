@@ -247,6 +247,8 @@ def _session_dict(s, with_messages: bool = False, lore=None):
         "updated_at": s.updated_at,
         "attributes": s.attributes,
         "scoped": is_character_scoped(s),
+        "members": [m.to_dict() for m in s.members],
+        "threads": [t.to_dict() for t in s.threads],
     }
     if with_messages:
         d["messages"] = [m.to_dict() for m in s.messages]

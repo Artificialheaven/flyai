@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from ..config import PROJECT_ROOT
 from ..schemas import Message
-from .models import Session
+from .models import RoomMember, Session, Thread
 from .store import SessionStore
 
 
@@ -40,7 +40,7 @@ class JsonSessionStore(SessionStore):
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
         msg_data = data.get("messages", [])
-        return Session(
+        s = Session(
             id=data.get("id", sid),
             title=data.get("title", "新会话"),
             provider_id=data.get("provider_id", ""),
@@ -52,7 +52,19 @@ class JsonSessionStore(SessionStore):
             attributes=data.get("attributes", {}),
             character_override=data.get("character_override"),
             world_override=data.get("world_override"),
+            members=[RoomMember.from_dict(m) for m in data.get("members", [])],
+            threads=[Thread.from_dict(t) for t in data.get("threads", [])],
         )
+        # 旧单 AI 会话（beta 前）：迁移为一个用户座位 + 一个 AI 参与者 + 一条私聊线程
+        if not s.members and not s.threads:
+            if s.character_id or s.messages:
+                s.members = [RoomMember(name="你", is_user=True)]
+                ai = RoomMember(name="AI", character_id=s.character_id, override=s.character_override)
+                s.members.append(ai)
+                t = Thread(kind="dm", title="私聊", member_ids=[ai.id], messages=s.messages)
+                s.threads = [t]
+                s.messages = []
+        return s
 
     def list(self) -> List[Session]:
         out = []
@@ -87,6 +99,8 @@ class JsonSessionStore(SessionStore):
             "attributes": session.attributes,
             "character_override": session.character_override,
             "world_override": session.world_override,
+            "members": [m.to_dict() for m in session.members],
+            "threads": [t.to_dict() for t in session.threads],
         }
         p = self._path(session.id)
         tmp = p.with_suffix(".json.tmp")
@@ -101,5 +115,7 @@ class JsonSessionStore(SessionStore):
         s = self.get(sid)
         if s:
             s.messages = []
+            for t in s.threads:
+                t.messages = []
             s.title = "新会话"
             self.save(s)

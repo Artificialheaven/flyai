@@ -16,6 +16,11 @@ var state = {
   userId: null,
   userName: "",
   scopeCache: {},   // sessionId -> {char, world, scoped}（有效角色/世界观，含副本）
+  // beta：多 AI 群聊
+  roomMembers: [],    // 当前房间参与者（session.members）
+  roomThreads: [],    // 当前房间窗口（session.threads + 群聊）
+  currentThreadId: null,
+  currentSpeaker: null, // {member_id,name,character_id} 流式当前发言者
 };
 
 var el = {};
@@ -54,7 +59,8 @@ function clearAuth() {
   state.role = "";
   state.currentSessionId = null;
   state.currentAttrs = null;
-  try { clearMessages(); } catch (e) {}
+  state.roomMembers = []; state.roomThreads = []; state.currentThreadId = null; state.currentSpeaker = null;
+  try { clearMessages(); if (el.threads) el.threads.classList.add("hidden"); } catch (e) {}
 }
 function bootstrap() {
   var saved = localStorage.getItem("flyai-uid");
@@ -186,12 +192,29 @@ function cacheElements() {
   el.userMsg = document.getElementById("user-msg");
   el.btnUserCreate = document.getElementById("btn-user-create");
   el.btnUserCancel = document.getElementById("btn-user-cancel");
+  // beta：多 AI 群聊
+  el.threads = document.getElementById("threads");
+  el.newchatDialog = document.getElementById("newchat-dialog");
+  el.newchatPick = document.getElementById("newchat-pick");
+  el.newchatTitle = document.getElementById("newchat-title");
+  el.newchatMsg = document.getElementById("newchat-msg");
+  el.btnNewchatCancel = document.getElementById("btn-newchat-cancel");
+  el.btnNewchatCreate = document.getElementById("btn-newchat-create");
+  el.groupDialog = document.getElementById("group-dialog");
+  el.groupPick = document.getElementById("group-pick");
+  el.groupMsg = document.getElementById("group-msg");
+  el.btnGroupCancel = document.getElementById("btn-group-cancel");
+  el.btnGroupCreate = document.getElementById("btn-group-create");
+  el.memDialog = document.getElementById("mem-dialog");
+  el.memTitle = document.getElementById("mem-title");
+  el.memBody = document.getElementById("mem-body");
+  el.btnMemClose = document.getElementById("btn-mem-close");
 }
 
 function bindEvents() {
   el.btnSend.addEventListener("click", onSend);
   el.btnStop.addEventListener("click", onStop);
-  el.btnNew.addEventListener("click", onNewSession);
+  el.btnNew.addEventListener("click", openNewChatDialog);
   el.btnSettings.addEventListener("click", openSettings);
   el.btnLore.addEventListener("click", openLoreDialog);
   el.btnTheme.addEventListener("click", toggleTheme);
@@ -210,6 +233,12 @@ function bindEvents() {
   if (el.messages) el.messages.addEventListener("scroll", updateJumpBtn);
   if (el.btnUserCreate) el.btnUserCreate.addEventListener("click", createUser);
   if (el.btnUserCancel) el.btnUserCancel.addEventListener("click", function () { el.userDialog.close(); });
+  // beta：多 AI 群聊
+  if (el.btnNewchatCancel) el.btnNewchatCancel.addEventListener("click", function () { if (el.newchatDialog) el.newchatDialog.close(); });
+  if (el.btnNewchatCreate) el.btnNewchatCreate.addEventListener("click", confirmNewChat);
+  if (el.btnGroupCancel) el.btnGroupCancel.addEventListener("click", function () { if (el.groupDialog) el.groupDialog.close(); });
+  if (el.btnGroupCreate) el.btnGroupCreate.addEventListener("click", confirmGroup);
+  if (el.btnMemClose) el.btnMemClose.addEventListener("click", function () { if (el.memDialog) el.memDialog.close(); });
   if (el.btnAttrClose) el.btnAttrClose.addEventListener("click", function () { if (el.attrDialog) el.attrDialog.close(); });
   if (el.btnAttrgenCancel) el.btnAttrgenCancel.addEventListener("click", function () { if (el.attrgenDialog) el.attrgenDialog.close(); });
   if (el.btnAttrgenAdd) el.btnAttrgenAdd.addEventListener("click", function () { addAttrRow(el.attrgenBody); });
@@ -250,8 +279,8 @@ function initDialogs() {
     d.addEventListener("input", markDirty);
     d.addEventListener("change", markDirty);
   });
-  // 轻量弹窗（属性查看 / 属性生成 / 压缩导出）：点击空白直接关闭
-  [el.attrDialog, el.attrgenDialog, el.exportDialog].forEach(function (d) {
+  // 轻量弹窗（属性查看 / 属性生成 / 压缩导出 / 新建对话 / 群聊 / 记忆）：点击空白直接关闭
+  [el.attrDialog, el.attrgenDialog, el.exportDialog, el.newchatDialog, el.groupDialog, el.memDialog].forEach(function (d) {
     if (!d) return;
     d.addEventListener("click", function (e) { if (e.target === d) d.close(); });
   });
@@ -673,20 +702,54 @@ function updateSessionBinding(field, value) {
   }).catch(function (e) { addErrorBar("设置失败: " + e.message); });
 }
 
-function onNewSession() {
+function openNewChatDialog() {
   if (state.busy) return;
-  fetchJSON("/api/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  }).then(function (s) {
-    state.currentSessionId = s.id;
-    state.currentAttrs = null;
-    return refreshSessions();
-  }).then(function () {
-    selectSession(state.currentSessionId);
-    el.input.focus();
+  el.newchatPick.innerHTML = "";
+  el.newchatTitle.value = "";
+  el.newchatMsg.textContent = "";
+  var chars = state.characters || [];
+  if (!chars.length) {
+    el.newchatMsg.textContent = "角色库还没有角色卡片，请先在「🧩 内容」里创建。";
+    el.newchatMsg.className = "msg-bar err";
+  }
+  chars.forEach(function (c) {
+    var lbl = document.createElement("label");
+    lbl.className = "f-label toggle check-line";
+    var cb = document.createElement("input"); cb.type = "checkbox"; cb.value = c.id;
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(" " + escapeHtml(c.name || "未命名")));
+    el.newchatPick.appendChild(lbl);
   });
+  safeCloseDialogs();
+  el.newchatDialog.showModal();
+}
+
+function confirmNewChat() {
+  var title = el.newchatTitle.value.trim();
+  var ids = [];
+  el.newchatPick.querySelectorAll("input:checked").forEach(function (cb) { ids.push(cb.value); });
+  el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
+  var doCreate = function (url, body) {
+    return fetchJSON(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (s) {
+        state.currentSessionId = s.id;
+        state.currentAttrs = null;
+        el.newchatDialog.close();
+        return refreshSessions();
+      }).then(function () {
+        selectSession(state.currentSessionId);
+        el.input.focus();
+      });
+  };
+  if (ids.length >= 1) {
+    // 多 AI 房间：每个角色一条私聊窗口，后续可建群聊
+    doCreate("/api/rooms", { title: title, character_ids: ids })
+      .catch(function (e) { el.newchatMsg.textContent = "创建房间失败: " + e.message; el.newchatMsg.className = "msg-bar err"; });
+  } else {
+    // 单 AI 对话（沿用旧接口）
+    doCreate("/api/sessions", { title: title })
+      .catch(function (e) { el.newchatMsg.textContent = "创建失败: " + e.message; el.newchatMsg.className = "msg-bar err"; });
+  }
 }
 
 function selectSession(id) {
@@ -700,9 +763,147 @@ function selectSession(id) {
     if (sess) { sess.character_id = s.character_id; sess.world_id = s.world_id; sess.title = s.title; }
     state.currentAttrs = s.attributes || null;
     state.scopeCache[id] = { char: s.character || null, world: s.world || null, scoped: !!s.scoped };
+    // beta：多 AI 房间
+    state.roomMembers = s.members || [];
+    state.roomThreads = s.threads || [];
+    state.currentSpeaker = null;
+    state.currentThreadId = null;
+    renderThreads();
     renderSessionMeta();
-    renderHistory(s.messages || []);
+    if (state.roomThreads.length) {
+      loadThread(state.roomThreads[0].id);
+    } else {
+      renderHistory(s.messages || []);
+    }
   }).catch(function (e) { addErrorBar("加载会话失败: " + e.message); });
+}
+
+function memberOf(idOrName) {
+  return (state.roomMembers || []).find(function (m) {
+    return m.id === idOrName || m.name === idOrName || !idOrName;
+  });
+}
+
+function renderThreads() {
+  if (!el.threads) return;
+  el.threads.innerHTML = "";
+  var isRoom = state.roomThreads.length > 0 && state.currentSessionId;
+  el.threads.classList.toggle("hidden", !isRoom);
+  if (!isRoom) return;
+  state.roomThreads.forEach(function (t) {
+    var tab = document.createElement("button");
+    tab.className = "thread-tab" + (t.id === state.currentThreadId ? " active" : "");
+    tab.textContent = (t.kind === "group" ? "👥 " : "💬 ") + (t.title || "窗口");
+    tab.title = t.kind === "group" ? "群聊窗口" : "私聊窗口";
+    tab.addEventListener("click", function () { loadThread(t.id); });
+    el.threads.appendChild(tab);
+  });
+  var aiCount = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).length;
+  if (aiCount >= 2) {
+    var add = document.createElement("button");
+    add.className = "thread-tab add"; add.textContent = "＋建群聊";
+    add.addEventListener("click", openGroupDialog);
+    el.threads.appendChild(add);
+  }
+  if ((state.roomMembers || []).length) {
+    var mem = document.createElement("button");
+    mem.className = "thread-tab add"; mem.textContent = "🧠 记忆";
+    mem.addEventListener("click", openMemDialog);
+    el.threads.appendChild(mem);
+  }
+}
+
+function loadThread(tid) {
+  if (!state.currentSessionId) return;
+  state.currentThreadId = tid;
+  state.currentSpeaker = null;
+  renderThreads();
+  fetchJSON("/api/rooms/" + state.currentSessionId + "/threads/" + tid).then(function (t) {
+    var idx = -1;
+    state.roomThreads.forEach(function (x, i) { if (x.id === tid) idx = i; });
+    if (idx >= 0) state.roomThreads[idx] = t; else state.roomThreads.push(t);
+    renderHistory(t.messages || []);
+  }).catch(function (e) { addErrorBar("加载窗口失败: " + e.message); });
+}
+
+function openGroupDialog() {
+  el.groupPick.innerHTML = "";
+  el.groupMsg.textContent = ""; el.groupMsg.className = "msg-bar";
+  var ais = (state.roomMembers || []).filter(function (m) { return !m.is_user; });
+  ais.forEach(function (m) {
+    var lbl = document.createElement("label");
+    lbl.className = "f-label toggle check-line";
+    var cb = document.createElement("input"); cb.type = "checkbox"; cb.value = m.id;
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(" " + escapeHtml(m.name)));
+    el.groupPick.appendChild(lbl);
+  });
+  if (!state.currentSessionId || !ais.length) {
+    el.groupMsg.textContent = "房间内还没有 AI 参与者。";
+    el.groupMsg.className = "msg-bar err"; return;
+  }
+  safeCloseDialogs();
+  el.groupDialog.showModal();
+}
+
+function confirmGroup() {
+  var ids = [];
+  el.groupPick.querySelectorAll("input:checked").forEach(function (cb) { ids.push(cb.value); });
+  if (ids.length < 2) { el.groupMsg.textContent = "至少选择两个 AI 参与者"; el.groupMsg.className = "msg-bar err"; return; }
+  fetchJSON("/api/rooms/" + state.currentSessionId + "/groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ member_ids: ids, title: "" }),
+  }).then(function (t) {
+    state.roomThreads.push(t);
+    el.groupDialog.close();
+    renderThreads();
+    loadThread(t.id);
+  }).catch(function (e) { el.groupMsg.textContent = e.message; el.groupMsg.className = "msg-bar err"; });
+}
+
+function openMemDialog() {
+  el.memBody.innerHTML = "";
+  var ais = (state.roomMembers || []).filter(function (m) { return !m.is_user; });
+  el.memTitle.textContent = "房间号 " + (state.currentSessionId || "").slice(0, 8) + " · 各参与者在本房间的记忆（各窗口共享）与属性";
+  ais.forEach(function (m) {
+    var ch = characterOf(m.character_id);
+    var wrap = document.createElement("div");
+    wrap.className = "mem-block";
+    wrap.innerHTML = '<div class="mem-head">' + makeAvatarHtml(ch || m, true) + ' <b>' + escapeHtml(m.name) + "</b></div>";
+    var memBox = document.createElement("textarea");
+    memBox.className = "mem-memory"; memBox.rows = 2;
+    memBox.placeholder = "该 AI 在本房间的记忆（各窗口共享）"; memBox.value = m.memory || "";
+    var attrBox = document.createElement("textarea");
+    attrBox.className = "mem-attrs"; attrBox.rows = 2;
+    attrBox.placeholder = '属性 JSON，如 {"魅力":80,"好感度":50}';
+    try { attrBox.value = JSON.stringify(m.attributes || {}, null, 2); } catch (e) { attrBox.value = ""; }
+    var save = document.createElement("button"); save.className = "btn small"; save.textContent = "保存";
+    var msg = document.createElement("div"); msg.className = "msg-bar";
+    var sp = document.createElement("div"); sp.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:6px";
+    sp.appendChild(save); sp.appendChild(msg);
+    wrap.appendChild(memBox); wrap.appendChild(attrBox); wrap.appendChild(sp);
+    save.addEventListener("click", function () {
+      var attrs = {};
+      try { attrs = JSON.parse(attrBox.value || "{}"); } catch (e) {
+        msg.textContent = "属性 JSON 解析失败"; msg.className = "msg-bar err"; return;
+      }
+      if (!Array.isArray(attrs)) {
+        fetchJSON("/api/rooms/" + state.currentSessionId + "/members/" + m.id, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ memory: memBox.value, attributes: attrs }),
+        }).then(function (mm) {
+          m.memory = mm.memory; m.attributes = mm.attributes;
+          msg.textContent = "已保存"; msg.className = "msg-bar ok";
+        }).catch(function (e) { msg.textContent = e.message; msg.className = "msg-bar err"; });
+      } else {
+        msg.textContent = "属性请提交对象，而非数组"; msg.className = "msg-bar err";
+      }
+    });
+    el.memBody.appendChild(wrap);
+  });
+  safeCloseDialogs();
+  el.memDialog.showModal();
 }
 
 function onDeleteSession(id) {
@@ -1105,6 +1306,9 @@ function makeAssistantContainer() {
   var inner = document.createElement("div");
   inner.className = "assistant-wrap";
   wrap.appendChild(inner);
+  var speakerEl = document.createElement("div");
+  speakerEl.className = "assistant-speaker hidden";
+  inner.appendChild(speakerEl);
   var thinkingEl = document.createElement("details");
   thinkingEl.className = "thinking hidden";
   var summary = document.createElement("summary");
@@ -1118,11 +1322,19 @@ function makeAssistantContainer() {
   var contentEl = document.createElement("div");
   contentEl.className = "assistant-content";
   inner.appendChild(contentEl);
-  return { container: wrap, thinkingEl: thinkingEl, thinkingDiv: thinkingDiv, toolRegion: toolRegion, contentEl: contentEl, rawContent: "" };
+  return { container: wrap, speakerEl: speakerEl, thinkingEl: thinkingEl, thinkingDiv: thinkingDiv, toolRegion: toolRegion, contentEl: contentEl, rawContent: "" };
+}
+function setSpeakerInner(a, speaker) {
+  var member = speaker && speaker.member_id ? memberOf(speaker.member_id) : null;
+  var ch = member && characterOf(member.character_id);
+  a.speakerEl.innerHTML =
+    makeAvatarHtml(ch || member || null, true) +
+    '<span class="spk-name">' + escapeHtml(speaker ? (speaker.name || "AI") : "AI") + "</span>";
 }
 function appendAssistantMsg(m) {
   var a = makeAssistantContainer();
   el.messages.appendChild(a.container);
+  if (m.name) { a.speakerEl.classList.remove("hidden"); setSpeakerInner(a, { name: m.name }); }
   if (m.thinking) { a.thinkingEl.classList.remove("hidden"); a.thinkingEl.open = false; a.thinkingDiv.textContent = m.thinking; }
   if (m.content) setAssistantContent(a, m.content);
   if (m.tool_calls) m.tool_calls.forEach(function (c) { appendToolCallCard(a.toolRegion, c, false); });
@@ -1147,9 +1359,13 @@ function onSend() {
     state.currentAssistant = a;
     scrollToBottom();
     state.abortController = new AbortController();
+    state.currentSpeaker = null;
+    var a = state.currentAssistant;
+    if (a) { a.speakerEl.innerHTML = '<span class="spk-name">…</span>'; a.speakerEl.classList.remove("hidden"); }
     var payload = {
       message: text,
       session_id: state.currentSessionId,
+      thread_id: state.currentThreadId || undefined,
       provider_id: (state.config && state.config.active_provider) || "",
       tools_enabled: true,
     };
@@ -1162,6 +1378,7 @@ function onSend() {
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       return readSSE(resp.body, {
         message_start: onMsgStart,
+        speaker: onSpeaker,
         thinking_delta: onThinkingDelta,
         content_delta: onContentDelta,
         tool_calls: onToolCalls,
@@ -1228,6 +1445,11 @@ function onMsgStart(data) {
   if (data.attributes && Object.keys(data.attributes).length) {
     state.currentAttrs = data.attributes;
   }
+}
+function onSpeaker(data) {
+  state.currentSpeaker = data || null;
+  var a = state.currentAssistant;
+  if (a) { a.speakerEl.classList.remove("hidden"); setSpeakerInner(a, state.currentSpeaker); }
 }
 function onAttributes(data) {
   if (data && data.attributes) { state.currentAttrs = data.attributes; }

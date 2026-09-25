@@ -125,6 +125,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_gen import router as gen_router
     from .api.routes_lore import router as lore_router
     from .api.routes_plugins import router as plugins_router
+    from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
 
     app.include_router(auth_router)
@@ -133,6 +134,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(gen_router)
     app.include_router(lore_router)
     app.include_router(plugins_router)
+    app.include_router(room_router)
     app.include_router(session_router)
 
     # 静态资源与头像上传目录（挂载目录需先存在；各用户上传在 /uploads/<uid>/...）

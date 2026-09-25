@@ -87,6 +87,65 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
+def build_member_system_prompt(
+    name: str,
+    memory: str,
+    attributes: Optional[dict],
+    audience: Optional[List[str]],
+    character: Character = None,
+    world: World = None,
+    base: str = "",
+    roleplay: Optional[RoleplaySettings] = None,
+) -> str:
+    """Beta：为群聊中单个 AI 参与者构建系统提示词。
+
+    在 build_system_prompt 的基础上叠加该 AI 的本窗口记忆、属性与在场名单，
+    让每个 AI 在自己的角色卡/副本下、按自己的人物设定发言。
+    """
+    parts: List[str] = []
+
+    if character:
+        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆对话。")
+        if character.intro:
+            parts.append(f"【角色简介】\n{character.intro}")
+        if character.background:
+            parts.append(f"【角色经历】\n{character.background}")
+        parts.append(
+            "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
+        )
+
+    if world and world.content:
+        parts.append(f"【世界观】\n{world.content}")
+
+    if audience:
+        names = "、".join(audience)
+        parts.append(
+            f"【在场】你正与{names}同处一个聊天窗口并轮流发言。"
+            "回复要符合你的角色，无需替他人说话，也不要重复别人说过的话。"
+        )
+
+    if memory:
+        parts.append(f"【你在这个聊天里的记忆】\n{memory}")
+
+    if attributes:
+        try:
+            import json
+
+            lines = "；".join(
+                f"{k}={v}" for k, v in attributes.items() if not str(k).startswith("_")
+            )
+        except Exception:
+            lines = ""
+        if lines:
+            parts.append(f"【你的属性】\n{lines}")
+
+    if not parts:
+        return base
+    if base:
+        parts.append(base)
+    return "\n\n".join(parts)
+
+
 def _requirements_block(
     character: Optional[Character],
     world: Optional[World],
