@@ -17,6 +17,9 @@
         <span class="logo"><span class="dot"></span>FlyAI</span>
         <button id="btn-new-session" class="icon-btn" title="新建会话">＋</button>
       </div>
+      <div class="search-wrap">
+        <input type="search" id="session-search" placeholder="搜索会话…" autocomplete="off" />
+      </div>
       <div id="session-list" class="session-list"></div>
       <div class="sidebar-footer">
         <div class="user-row">
@@ -27,8 +30,10 @@
           <button id="btn-lore" class="footer-btn">🧩 内容</button>
           <button id="btn-settings" class="footer-btn">⚙️ 设置</button>
         </div>
+        <button id="btn-batch-delete" class="footer-btn">🗑 批量删除</button>
         <button id="btn-users" class="footer-btn hidden">👥 用户管理</button>
         <button id="btn-theme" class="footer-btn">🌗 切换主题</button>
+        <p class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">冀ICP备2025098938号-2</a></p>
       </div>
     </aside>
 
@@ -36,14 +41,20 @@
     <main id="main">
       <div id="topbar">
         <button id="btn-nav" class="icon-btn nav-btn" title="会话列表">☰</button>
+        <span id="topbar-title" class="topbar-title"></span>
         <div id="session-meta" class="meta"></div>
         <span id="provider-bar" class="chip provider"></span>
+        <button id="btn-topbar-toggle" type="button" class="icon-btn topbar-toggle" title="折叠顶栏">⌃</button>
       </div>
       <div id="threads" class="threads hidden"></div>
       <div id="messages" class="messages"></div>
       <div class="input-wrap">
         <button id="btn-jump-bottom" class="btn-jump-bottom hidden" title="跳到底部">⬇</button>
+        <div id="attach-preview" class="attach-preview hidden"></div>
         <div class="input-area">
+          <button id="btn-sd" type="button" class="icon-btn engine-btn hidden" title="使用本地 Stable Diffusion 生图（Anything V5）">SD</button>
+          <button id="btn-attach" class="icon-btn attach-btn hidden" title="发送图片">📎</button>
+          <input type="file" id="image-file" accept="image/*" multiple class="hidden" />
           <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
           <button id="btn-send">发送</button>
           <button id="btn-stop" class="hidden">停止</button>
@@ -56,34 +67,145 @@
   <dialog id="settings-dialog">
     <div class="dialog-body">
       <h3>设置</h3>
-      <p class="sub">提供商与工具配置</p>
+      <p id="settings-sub" class="sub"></p>
 
-      <h4>提供商</h4>
-      <div id="provider-list"></div>
-      <button id="btn-add-provider" class="btn small">＋ 新增提供商</button>
+      <!-- ===== 普通用户视图：我的模型 + 共享模型 ===== -->
+      <div id="settings-user" class="settings-user" hidden>
+        <h4>我的 LLM 模型</h4>
+        <p class="sub">仅你自己可见可用，可随时增删改。</p>
+        <div id="my-provider-list" class="model-cards"></div>
+        <button id="btn-add-my-provider" class="btn small">＋ 添加自己的模型</button>
 
-      <h4>工具</h4>
-      <label class="f-label">最大工具迭代轮数
-        <input type="number" id="set-max-iters" value="8" min="1" max="50" />
-      </label>
-      <label class="f-label">工具超时（秒）
-        <input type="number" id="set-timeout" value="60" min="1" />
-      </label>
-      <label class="f-label">文件读取白名单目录（每行一个）
-        <textarea id="set-read-dirs" rows="3"></textarea>
-      </label>
-      <div id="plugin-checks"></div>
+        <h4>共享 LLM 模型</h4>
+        <p class="sub">管理员共享的模型，达到「要求等级」即可选用。</p>
+        <div id="shared-provider-list" class="model-cards"></div>
 
-      <h4>角色扮演</h4>
-      <label class="f-label toggle"><input type="checkbox" id="set-rp-format" /> 启用对话格式规范（动作/内心/对白 / 空行分段 / 样式区分）</label>
-      <label class="f-label toggle"><input type="checkbox" id="set-attr-enabled" /> 启用属性跟踪（好感度、金钱等，AI 每回合可修改）</label>
-      <label class="f-label toggle"><input type="checkbox" id="set-attr-ai" /> AI 自行提供属性增减值（关闭则仅供展示）</label>
+        <h4>我的生图模型</h4>
+        <div id="my-image-list" class="model-cards"></div>
+        <button id="btn-add-my-image" class="btn small">＋ 添加自己的生图模型</button>
 
-      <div class="dialog-actions">
-        <button id="btn-config-cancel" class="btn">取消</button>
-        <button id="btn-config-save" class="btn primary">保存</button>
+        <h4>共享生图模型</h4>
+        <div id="shared-image-list" class="model-cards"></div>
+
+        <div class="dialog-actions">
+          <button id="btn-user-settings-close" class="btn primary">关 闭</button>
+        </div>
+        <div id="user-config-msg" class="msg-bar"></div>
       </div>
-      <div id="config-msg" class="msg-bar"></div>
+
+      <!-- ===== 管理员视图：全局配置 ===== -->
+      <div id="settings-admin" class="settings-admin" hidden>
+        <h4>提供商</h4>
+        <p class="sub">归属用户的模型只有本人可见；勾选共享并设置等级后，等级达标的用户才能看到。</p>
+        <div id="provider-list"></div>
+        <button id="btn-add-provider" class="btn small">＋ 新增提供商</button>
+
+        <h4>工具</h4>
+        <label class="f-label">最大工具迭代轮数
+          <input type="number" id="set-max-iters" value="8" min="1" max="50" />
+        </label>
+        <label class="f-label">工具超时（秒）
+          <input type="number" id="set-timeout" value="60" min="1" />
+        </label>
+        <label class="f-label">文件读取白名单目录（每行一个）
+          <textarea id="set-read-dirs" rows="3"></textarea>
+        </label>
+        <div id="plugin-checks"></div>
+
+        <h4>角色扮演</h4>
+        <label class="f-label toggle"><input type="checkbox" id="set-rp-format" /> 启用对话格式规范（动作/内心/对白 / 空行分段 / 样式区分）</label>
+        <label class="f-label toggle"><input type="checkbox" id="set-attr-enabled" /> 启用属性跟踪（好感度、金钱等，AI 每回合可修改）</label>
+        <label class="f-label toggle"><input type="checkbox" id="set-attr-ai" /> AI 自行提供属性增减值（关闭则仅供展示）</label>
+
+        <h4>嵌入检索（RAG 记忆）</h4>
+        <p class="sub">配置后 query_chat_memory 使用语义检索；留空则回退关键词检索。</p>
+        <label class="f-label">Base URL
+          <input type="text" id="set-emb-base" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label class="f-label">API Key
+          <input type="password" id="set-emb-key" />
+        </label>
+        <label class="f-label">模型
+          <input type="text" id="set-emb-model" placeholder="text-embedding-3-small" />
+        </label>
+        <label class="f-label">返回条数 top_k
+          <input type="number" id="set-emb-topk" value="4" min="1" max="20" />
+        </label>
+
+        <h4>AI 生图</h4>
+        <p class="sub">生图模型支持归属与共享，规则同 LLM 提供商。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-img-enabled" /> 启用 AI 生图工具</label>
+        <label class="f-label">默认尺寸
+          <select id="set-img-size">
+            <option value="1K">1K</option>
+            <option value="2K" selected>2K</option>
+            <option value="4K">4K</option>
+          </select>
+        </label>
+        <div id="image-model-list"></div>
+        <button id="btn-add-image-model" class="btn small">＋ 新增生图模型</button>
+
+        <h4>Stable Diffusion（本地 SD WebUI · Anything V5）</h4>
+        <p class="sub">开启后对话输入区出现「SD」开关。选中后生图不走云端模型：由内置 AI 自动生成英文 danbooru 标签提示词与全部采样参数，经 Gradio API 调用本机 WebUI（无需 --api 启动）。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-sd-enabled" /> 启用 Stable Diffusion 引擎</label>
+        <label class="f-label">WebUI 地址
+          <input type="text" id="set-sd-base" placeholder="http://127.0.0.1:7860" />
+        </label>
+        <label class="f-label">文生图 fn_index（WebUI 版本不同时可能变化）
+          <input type="number" id="set-sd-fnindex" value="99" min="0" />
+        </label>
+        <label class="f-label">兜底宽 / 高（8 的倍数，256~1024）
+          <span class="num-pair">
+            <input type="number" id="set-sd-width" value="512" step="8" min="256" max="1024" />
+            <input type="number" id="set-sd-height" value="768" step="8" min="256" max="1024" />
+          </span>
+        </label>
+        <label class="f-label">兜底步数 / CFG
+          <span class="num-pair">
+            <input type="number" id="set-sd-steps" value="28" min="1" max="150" />
+            <input type="number" id="set-sd-cfg" value="7.0" step="0.5" min="1" max="30" />
+          </span>
+        </label>
+        <label class="f-label">采样器 / 调度器
+          <span class="num-pair">
+            <input type="text" id="set-sd-sampler" value="DPM++ 2M" />
+            <input type="text" id="set-sd-schedule" value="Karras" />
+          </span>
+        </label>
+        <label class="f-label">兜底负向提示词
+          <textarea id="set-sd-negative" rows="2"></textarea>
+        </label>
+
+        <h4>P 站搜图</h4>
+        <p class="sub">AI 按角色名搜索 Pixiv 插画，视觉模型筛选质量后展示精选原图；候选缩略图以毛玻璃遮盖。访问需可用的出站代理。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-px-enabled" /> 启用 P 站搜图</label>
+        <label class="f-label">出站代理
+          <input type="text" id="set-px-proxy" placeholder="http://127.0.0.1:7897" />
+        </label>
+        <label class="f-label toggle"><input type="checkbox" id="set-px-r18" /> 允许 R-18 内容（默认关闭，仅返回全龄向）</label>
+        <label class="f-label">候选数量
+          <input type="number" id="set-px-num" value="15" min="5" max="30" />
+        </label>
+
+        <h4>联网搜索</h4>
+        <p class="sub">AI 先搜索得到结果列表，自行判断相关性，再用网页抓取工具读取选定页面。国内直连 Bing，无需代理。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-ws-enabled" /> 启用联网搜索</label>
+        <label class="f-label">代理（海外服务器填写，留空国内直连）
+          <input type="text" id="set-ws-proxy" placeholder="http://127.0.0.1:7897" />
+        </label>
+        <label class="f-label">结果条数
+          <input type="number" id="set-ws-num" value="8" min="3" max="10" />
+        </label>
+        <label class="f-label">单页正文字数上限
+          <input type="number" id="set-ws-pagechars" value="6000" min="1000" step="1000" />
+        </label>
+
+        <div class="dialog-actions">
+          <button id="btn-config-cancel" class="btn">取消</button>
+          <button id="btn-config-save" class="btn primary">保存</button>
+        </div>
+        <div id="config-msg" class="msg-bar"></div>
+      </div>
     </div>
   </dialog>
 
@@ -137,10 +259,13 @@
   <dialog id="user-dialog">
     <div class="dialog-body">
       <h3>👥 用户管理</h3>
-      <p class="sub">创建 / 删除用户。登录仅验密，普通用户需在此由管理员创建。</p>
+      <p class="sub">创建 / 删除用户，设置权限等级（0-255，越大越高）。登录仅验密，普通用户需在此由管理员创建。</p>
       <div id="user-list" class="user-list"></div>
       <label class="f-label">新用户名<input type="text" id="user-new-name" placeholder="请输入新用户名" /></label>
       <label class="f-label">密码<input type="password" id="user-new-password" placeholder="密码（可留空）" /></label>
+      <label class="f-label">权限等级（0-255）
+        <input type="number" id="user-new-level" value="0" min="0" max="255" />
+      </label>
       <div id="user-msg" class="msg-bar"></div>
       <div class="dialog-actions">
         <button id="btn-user-cancel" class="btn ghost">取消</button>
@@ -149,19 +274,41 @@
     </div>
   </dialog>
 
-  <!-- 新建对话 / 房间（选多个角色即多 AI 群聊房间） -->
+  <!-- 新建对话 / 房间：根角色卡按钮 → 副本选择 -->
   <dialog id="newchat-dialog">
     <div class="dialog-body">
+      <div class="dialog-actions">
+        <button id="newchat-back" class="btn hidden">← 返回根角色卡</button>
+      </div>
       <h3>新建对话</h3>
-      <p class="sub">勾选一个或多个角色：单个=私聊，多个=多 AI 群聊房间（每个角色一条私聊窗口）。</p>
+      <p id="newchat-sub" class="sub">选择一个根角色卡，再选择主卡或其副本；可跨根卡多选，多个角色即多 AI 群聊房间。</p>
       <label class="f-label">标题<input type="text" id="newchat-title" placeholder="（可选）" /></label>
-      <div id="newchat-pick" class="pick-list"></div>
+      <div id="newchat-pick" class="pick-body"></div>
+      <div id="newchat-tray" class="pick-tray hidden"></div>
       <div id="newchat-msg" class="msg-bar"></div>
       <div class="dialog-actions">
+        <button id="btn-newchat-plain" class="btn ghost">不使用角色卡（通用助手）</button>
         <button id="btn-newchat-cancel" class="btn ghost">取消</button>
-        <button id="btn-newchat-create" class="btn primary">创建</button>
+        <button id="btn-newchat-create" class="btn primary" disabled>开始对话</button>
       </div>
     </div>
+  </dialog>
+
+  <!-- 通用二次确认弹窗 -->
+  <dialog id="confirm-dialog">
+    <div class="dialog-body">
+      <h3 id="confirm-title">请确认</h3>
+      <div id="confirm-text" class="confirm-text"></div>
+      <div class="dialog-actions">
+        <button id="btn-confirm-cancel" class="btn ghost">取消</button>
+        <button id="btn-confirm-ok" class="btn danger">确认</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 角色卡只读详情 -->
+  <dialog id="card-detail-dialog">
+    <div class="dialog-body" id="card-detail-body"></div>
   </dialog>
 
   <!-- 群聊：把多个 AI 放进同一窗口 -->
@@ -189,6 +336,19 @@
       </div>
     </div>
   </dialog>
+
+  <!-- 全屏图片查看器 -->
+  <div id="img-viewer" class="img-viewer hidden">
+    <div class="iv-stage" id="iv-stage">
+      <img class="iv-img" id="iv-img" alt="放大查看的图片" />
+    </div>
+    <div class="iv-topbar">
+      <button type="button" class="iv-btn" id="iv-info" title="查看提示词">📝 <span>提示词</span></button>
+      <button type="button" class="iv-btn" id="iv-download" title="下载图片">⬇ <span>下载</span></button>
+      <button type="button" class="iv-btn" id="iv-close" title="关闭（Esc）">✕ <span>关闭</span></button>
+    </div>
+    <div class="iv-panel" id="iv-panel"></div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

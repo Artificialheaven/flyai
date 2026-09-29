@@ -51,6 +51,49 @@ async def test_query_lore_missing_service():
     assert r.ok is False
 
 
+class _FakeLoreEmbedder:
+    """确定性向量：含「苹果」的特征1、含「武器」的特征2，偏置保证非零。"""
+    def __init__(self, top_k=1, fail=False):
+        from types import SimpleNamespace
+        self.cfg = SimpleNamespace(top_k=top_k)
+        self.fail = fail
+
+    async def embed(self, texts):
+        if self.fail:
+            raise RuntimeError("嵌入服务崩溃")
+        rows = []
+        for t in texts:
+            row = [0.0, 0.0, 1.0]
+            if "苹果" in t:
+                row[0] += 1
+            if "武器" in t:
+                row[1] += 1
+            rows.append(row)
+        return rows
+
+
+@pytest.mark.asyncio
+async def test_query_lore_rag_ranks_by_content():
+    # 关键词「苹果」不在任何标题里，只有内容里出现 → 只有语义检索才能命中
+    c = Character(name="爱丽丝", table=[LoreEntry("武器", "短剑"), LoreEntry("喜欢的食物", "苹果派")])
+    w = World(name="艾尔", table=[])
+    querier = LoreQuerier(c, w)
+    ctx = ToolContext(services={"lore": querier, "embedder": _FakeLoreEmbedder(top_k=1)})
+    r = await QueryLoreTool().run({"kind": "character", "keyword": "苹果"}, ctx)
+    assert r.ok
+    assert "苹果派" in r.output and "短剑" not in r.output
+
+
+@pytest.mark.asyncio
+async def test_query_lore_rag_falls_back_to_title_keyword_on_error():
+    c = Character(name="爱丽丝", table=[LoreEntry("武器", "短剑"), LoreEntry("喜欢的食物", "苹果派")])
+    w = World(name="艾尔", table=[])
+    querier = LoreQuerier(c, w)
+    ctx = ToolContext(services={"lore": querier, "embedder": _FakeLoreEmbedder(fail=True)})
+    r = await QueryLoreTool().run({"kind": "character", "keyword": "武器"}, ctx)
+    assert r.ok and "短剑" in r.output  # 嵌入失败 → 回退标题关键词
+
+
 def test_build_system_prompt_with_character_and_world():
     c = Character(name="爱丽丝", intro="一个冒险家", background="来自东部")
     w = World(name="艾尔大陆", content="魔法与剑的世界")

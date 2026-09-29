@@ -12,6 +12,7 @@ from ..config import PROJECT_ROOT
 from ..schemas import Message
 from .models import RoomMember, Session, Thread
 from .store import SessionStore
+from .versions import heal_thread
 
 
 class JsonSessionStore(SessionStore):
@@ -54,8 +55,10 @@ class JsonSessionStore(SessionStore):
             world_override=data.get("world_override"),
             members=[RoomMember.from_dict(m) for m in data.get("members", [])],
             threads=[Thread.from_dict(t) for t in data.get("threads", [])],
+            pinned=bool(data.get("pinned", False)),
         )
         # 旧单 AI 会话（beta 前）：迁移为一个用户座位 + 一个 AI 参与者 + 一条私聊线程
+        migrated = False
         if not s.members and not s.threads:
             if s.character_id or s.messages:
                 s.members = [RoomMember(name="你", is_user=True)]
@@ -64,25 +67,41 @@ class JsonSessionStore(SessionStore):
                 t = Thread(kind="dm", title="私聊", member_ids=[ai.id], messages=s.messages)
                 s.threads = [t]
                 s.messages = []
+                migrated = True
+        # 自愈：流式中途被硬 kill 留下的孤儿/半成品回复
+        for t in s.threads:
+            heal_thread(t)
+        # 迁移必须落盘：否则每次 get() 都会生成新的随机线程 id，
+        # GET 会话返回的线程随后按 id 加载会 404「窗口不存在」
+        if migrated:
+            self.save(s)
         return s
 
     def list(self) -> List[Session]:
-        out = []
+        # (文件 mtime_ns, session)：updated_at 只有秒级精度，同秒内保存的会话
+        # 靠纳秒 mtime 分出真实先后，避免顺序随 glob 结果翻转
+        entries = []
         for p in self._dir.glob("*.json"):
             try:
+                mtime_ns = p.stat().st_mtime_ns
                 with open(p, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                out.append(Session(
+                s = Session(
                     id=data.get("id", p.stem),
                     title=data.get("title", "新会话"),
                     provider_id=data.get("provider_id", ""),
                     created_at=data.get("created_at", ""),
                     updated_at=data.get("updated_at", ""),
                     messages=[],
-                ))
+                    pinned=bool(data.get("pinned", False)),
+                )
             except Exception:
                 continue
-        out.sort(key=lambda s: s.updated_at, reverse=True)
+            entries.append((mtime_ns, s))
+        # 先按落盘时间倒序，再以稳定排序把置顶提至最前
+        entries.sort(key=lambda e: e[0], reverse=True)
+        out = [s for _, s in entries]
+        out.sort(key=lambda s: not s.pinned)
         return out
 
     def save(self, session: Session) -> None:
@@ -101,6 +120,7 @@ class JsonSessionStore(SessionStore):
             "world_override": session.world_override,
             "members": [m.to_dict() for m in session.members],
             "threads": [t.to_dict() for t in session.threads],
+            "pinned": session.pinned,
         }
         p = self._path(session.id)
         tmp = p.with_suffix(".json.tmp")

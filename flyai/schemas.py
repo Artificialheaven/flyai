@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -35,10 +36,30 @@ class ToolCall:
 
 
 @dataclass
+class ImageAttachment:
+    """用户消息附带的一张图片（仅视觉/多模态模型使用）。
+
+    data 为不含 data: 前缀的 base64 字符串；适配器在边界处自行拼装。
+    """
+
+    media_type: str = "image/jpeg"
+    data: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"media_type": self.media_type, "data": self.data}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImageAttachment":
+        return cls(media_type=data.get("media_type", "image/jpeg"), data=data.get("data", ""))
+
+
+@dataclass
 class Message:
     """统一消息。role 为 system/user/assistant/tool 之一。"""
 
     role: str
+    # 消息唯一 id：版本/编辑功能以「用户消息 id」锚定一整轮
+    id: str = ""
     content: Optional[str] = None
     # 思考文本：供前端展示与 OpenAI 适配器透传
     thinking: Optional[str] = None
@@ -54,9 +75,16 @@ class Message:
     ok: Optional[bool] = None
     # 群聊中 AI 自评「无需发言」时标记隐藏：仍存历史，但不展示
     hidden: Optional[bool] = None
+    # user 消息附带的图片（视觉模型）
+    images: Optional[List[ImageAttachment]] = None
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = uuid.uuid4().hex
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "id": self.id,
             "role": self.role,
             "content": self.content,
             "thinking": self.thinking,
@@ -66,6 +94,7 @@ class Message:
             "name": self.name,
             "ok": self.ok,
             "hidden": self.hidden,
+            "images": [i.to_dict() for i in self.images] if self.images else None,
         }
 
     @classmethod
@@ -73,6 +102,7 @@ class Message:
         calls = data.get("tool_calls")
         return cls(
             role=data["role"],
+            id=data.get("id", ""),
             content=data.get("content"),
             thinking=data.get("thinking"),
             thinking_blocks=data.get("thinking_blocks"),
@@ -80,5 +110,11 @@ class Message:
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
             ok=data.get("ok"),
-            hidden=bool(data.get("hidden", False)),
+            # 保留 None：from_dict→to_dict 必须幂等，heal 用签名比对识别孤儿消息
+            hidden=data.get("hidden"),
+            images=(
+                [ImageAttachment.from_dict(i) for i in data.get("images")]
+                if data.get("images")
+                else None
+            ),
         )

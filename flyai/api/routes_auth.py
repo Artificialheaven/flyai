@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..errors import ProviderError  # noqa: F401  (保持错误统一导出)
-from ..user import ADMIN_UID
+from ..user import ADMIN_LEVEL, ADMIN_UID
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -21,9 +21,11 @@ def _admin(request: Request):
     state = request.app.state.flyai
     uid = (request.headers.get("x-user-id") or "").strip()
     if uid == ADMIN_UID:
-        return {"id": ADMIN_UID, "name": state.config.auth.admin.username, "role": "admin"}
+        return {"id": ADMIN_UID, "name": state.config.auth.admin.username,
+                "role": "admin", "level": ADMIN_LEVEL}
     u = state.user_store.get_by_id(uid) if uid else None
-    return {"id": u.id, "name": u.name, "role": "user"} if u else None
+    return ({"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0)}
+            if u else None)
 
 
 def _require_admin(request: Request):
@@ -44,6 +46,11 @@ class LoginPayload(BaseModel):
 class CreateUserPayload(BaseModel):
     name: str
     password: str = ""
+    level: int = 0
+
+
+class UpdateUserPayload(BaseModel):
+    level: int
 
 
 @router.post("/login")
@@ -59,14 +66,15 @@ def login(payload: LoginPayload, request: Request):
         # 管理员：精确比对 config 中的密码
         if payload.password != admin.password:
             raise HTTPException(401, "密码错误")
-        return {"id": ADMIN_UID, "name": admin.username, "role": "admin"}
+        return {"id": ADMIN_UID, "name": admin.username, "role": "admin",
+                "level": ADMIN_LEVEL}
 
     u = state.user_store.get_by_name(name)
     if u is None:
         raise HTTPException(401, "用户不存在（需管理员创建）")
     if not u.check_password(payload.password):
         raise HTTPException(401, "密码错误")
-    return {"id": u.id, "name": u.name, "role": "user"}
+    return {"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0)}
 
 
 @router.get("/names")
@@ -82,7 +90,8 @@ def list_users(request: Request):
     _require_admin(request)
     state = request.app.state.flyai
     return {"users": [
-        {"id": u.id, "name": u.name} for u in state.user_store.list()
+        {"id": u.id, "name": u.name, "level": int(u.level or 0)}
+        for u in state.user_store.list()
     ]}
 
 
@@ -96,8 +105,29 @@ def create_user(payload: CreateUserPayload, request: Request):
         raise HTTPException(400, "请输入用户名")
     if state.user_store.get_by_name(name):
         raise HTTPException(400, f"用户名已存在: {name}")
-    u = state.user_store.create(name, payload.password)
-    return {"id": u.id, "name": u.name}
+    level = max(0, min(int(payload.level or 0), 255))
+    u = state.user_store.create(name, payload.password, level=level)
+    return {"id": u.id, "name": u.name, "level": level}
+
+
+@router.patch("/users/{uid}")
+def update_user(uid: str, payload: UpdateUserPayload, request: Request):
+    """修改用户权限等级（仅管理员，0-255）。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    u = state.user_store.get_by_id(uid)
+    if u is None:
+        raise HTTPException(404, "用户不存在")
+    level = int(payload.level)
+    if level < 0 or level > 255:
+        raise HTTPException(400, "权限等级必须在 0-255 之间")
+    u.level = level
+    state.user_store._save()
+    # 已缓存的作用域同步刷新
+    scope = state._scopes.get(uid)
+    if scope is not None:
+        scope.level = level
+    return {"ok": True, "level": level}
 
 
 @router.delete("/users/{uid}")

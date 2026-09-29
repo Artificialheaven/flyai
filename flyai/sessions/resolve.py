@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..lore.models import Character, World
-from .models import Session
+from .models import RoomMember, Session
 
 # 通过属性的 module+name 判断，避免循环导入
 
@@ -79,11 +79,90 @@ def clear_world_override(session: Session) -> None:
 # ---- beta 多 AI：按参与者解析有效角色 ----
 
 def member_character(member, lore) -> Optional[Character]:
-    """某个参与者（AI 座位）的有效角色：override 优先，否则库引用。"""
+    """某个参与者（AI 座位）的有效角色：override 优先，否则库引用。
+
+    对用户座位同样适用：该座位的 character_id 即「用户扮演的自设（persona）」。
+    """
+    if member is None:
+        return None
     if member.override:
         return Character.from_dict(member.override)
     if member.character_id:
         return lore.get_character(member.character_id)
+    return None
+
+
+def _merge_character_patch(base: dict, patch: dict) -> dict:
+    """把 AI 归纳出的角色字段合并进现有卡 dict（合并而非替换）。"""
+    merged = dict(base)
+    for f in ("intro", "background"):
+        if patch.get(f):
+            merged[f] = str(patch[f]).strip()
+    table = patch.get("table")
+    if isinstance(table, list) and table:
+        merged["table"] = [
+            {"title": str(t.get("title", "")), "content": str(t.get("content", ""))}
+            for t in table
+            if isinstance(t, dict)
+        ]
+    return merged
+
+
+def _merge_world_patch(base: dict, patch: dict) -> dict:
+    merged = dict(base)
+    if patch.get("content"):
+        merged["content"] = str(patch["content"]).strip()
+    table = patch.get("table")
+    if isinstance(table, list) and table:
+        merged["table"] = [
+            {"title": str(t.get("title", "")), "content": str(t.get("content", ""))}
+            for t in table
+            if isinstance(t, dict)
+        ]
+    return merged
+
+
+def apply_room_compression(session: Session, data: dict, lore=None) -> dict:
+    """把房间压缩结果写入成员副本（member.override）与会话世界副本。
+
+    这样房间内 AI 下一轮就能感知压缩后的设定（而非写到成员不读的
+    session.character_override）。返回 {"members": {mid: dict}, "world": dict|None}。
+    """
+    members_out = {}
+    for item in data.get("members", []) or []:
+        if not isinstance(item, dict):
+            continue
+        m = session.member(item.get("member_id"))
+        patch = item.get("character")
+        if m is None or not isinstance(patch, dict):
+            continue
+        cur = member_character(m, lore) if lore is not None else None
+        if cur is not None:
+            base = cur.to_dict()
+        elif m.override:
+            base = dict(m.override)
+        else:
+            base = {"name": m.name}
+        merged = _merge_character_patch(base, patch)
+        m.override = merged
+        members_out[m.id] = merged
+
+    world_out = None
+    wpatch = data.get("world")
+    if isinstance(wpatch, dict):
+        cur_w = effective_world(session, lore) if lore is not None else None
+        base = cur_w.to_dict() if cur_w is not None else (session.world_override or {})
+        world_out = _merge_world_patch(base, wpatch)
+        session.world_override = world_out
+
+    return {"members": members_out, "world": world_out}
+
+
+def user_seat(session: Session) -> Optional[RoomMember]:
+    """返回房间里的用户座位（第一个 is_user 成员）；无则 None。"""
+    for m in session.members:
+        if m.is_user:
+            return m
     return None
 
 

@@ -81,7 +81,7 @@ class PluginLoader:
             info.loaded = False
             info.error = "缺少 __init__.py"
             return
-        before_tools = set(self.registry.all())
+        before_tools = set(t.name for t in self.registry.all())
         try:
             mod_name = f"flyai_plugin_{name}"
             spec = importlib.util.spec_from_file_location(

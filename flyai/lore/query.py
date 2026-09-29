@@ -51,8 +51,12 @@ def build_system_prompt(
     world: World,
     base: str,
     roleplay: Optional[RoleplaySettings] = None,
+    user_character: Optional[Character] = None,
 ) -> str:
-    """把角色卡 + 世界观并入系统提示词。无角色/世界则返回 base。"""
+    """把角色卡 + 世界观并入系统提示词。无角色/世界则返回 base。
+
+    user_character：用户扮演的自设（persona），可选。设置后告诉 AI 用户正以该角色登场。
+    """
     parts: List[str] = []
 
     if character:
@@ -65,6 +69,10 @@ def build_system_prompt(
             "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
         )
 
+    persona = _persona_block(user_character)
+    if persona:
+        parts.append(persona)
+
     if world and world.content:
         parts.append(f"【世界观】\n{world.content}")
         if world.table:
@@ -72,13 +80,20 @@ def build_system_prompt(
                 "世界设定表的更多细节可通过 query_lore(kind='world', keyword=…) 查询。"
             )
 
-    rp = _requirements_block(character, world, roleplay)
-    if rp:
-        parts.append(rp)
+    # 角色卡自定义的系统级提示词（高优先级系统指令）
+    if character and character.system_prompt and character.system_prompt.strip():
+        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
 
-    attr = _attribute_block(character, roleplay)
-    if attr:
-        parts.append(attr)
+    # 无角色卡也无世界观时：以有用助手身份回答，不注入扮演格式/工具要求
+    if character or world:
+        rp = _requirements_block(character, world, roleplay)
+        if rp:
+            parts.append(rp)
+
+    if character:
+        attr = _attribute_block(character, roleplay)
+        if attr:
+            parts.append(attr)
 
     if not parts:
         return base
@@ -96,11 +111,14 @@ def build_member_system_prompt(
     world: World = None,
     base: str = "",
     roleplay: Optional[RoleplaySettings] = None,
+    user_character: Optional[Character] = None,
 ) -> str:
     """Beta：为群聊中单个 AI 参与者构建系统提示词。
 
     在 build_system_prompt 的基础上叠加该 AI 的本窗口记忆、属性与在场名单，
     让每个 AI 在自己的角色卡/副本下、按自己的人物设定发言。
+
+    user_character：用户扮演的自设（persona），可选。设置后告诉 AI 用户正以该角色登场。
     """
     parts: List[str] = []
 
@@ -114,23 +132,35 @@ def build_member_system_prompt(
             "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
         )
 
+    persona = _persona_block(user_character)
+    if persona:
+        parts.append(persona)
+
     if world and world.content:
         parts.append(f"【世界观】\n{world.content}")
 
     if audience:
         names = "、".join(audience)
         parts.append(
-            f"【在场】你正与{names}同处一个聊天窗口并轮流发言。"
-            "回复要符合你的角色，无需替他人说话，也不要重复别人说过的话。"
+            f"【在场】你正与{names}以及用户在一个聊天窗口里自由群聊。"
+            "这是多人轮流发言的场合，每个在场者都要参与进来，请以你的角色自然、主动地回应当前话题与用户的发言。"
+            "不要替别人说话，也不要复读或机械重复别人已经说过的话。"
         )
         parts.append(
-            "【发言自评】若你这轮确实没有值得说的话（例如大家话题与你无关、"
-            "想说的已经被别人说过），就只回复一个字「略」来表示跳过；"
-            "有内容可说时则正常用你的角色发言。绝不强行接话。"
+            "【回应要求】轮到你的回合，请务必以自己的角色开口说点什么——哪怕只是一句简短的感想、"
+            "一个反应、一句反问或一个动作都可以，尽量简短自然，不要长篇大论、不要抢别人的话。"
+            "只有在极少数情况下（例如这条消息纯粹点的是别人的名字、或所聊的是与你完全无关的私人话题），"
+            "你才回复『略』来表示跳过。不要因为在你之前已有人开口就跟着沉默。"
         )
 
     if memory:
         parts.append(f"【你在这个聊天里的记忆】\n{memory}")
+
+    if audience:
+        parts.append(
+            "你拥有跨对话记忆能力：可用工具 query_chat_memory 检索你自己参与的其它聊天窗口来确认过往；"
+            "遇到值得长期记住的新事实（重要信息、约定、状态变化等），用工具 update_chat_memory 把条目写进你的记忆。"
+        )
 
     if attributes:
         try:
@@ -144,11 +174,40 @@ def build_member_system_prompt(
         if lines:
             parts.append(f"【你的属性】\n{lines}")
 
+    # 角色卡（含副本）自定义的系统级提示词
+    if character and character.system_prompt and character.system_prompt.strip():
+        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
+
     if not parts:
         return base
     if base:
         parts.append(base)
     return "\n\n".join(parts)
+
+
+def _persona_block(user_character: Optional[Character]) -> Optional[str]:
+    """组装「用户扮演的自设（persona）」提示片段。无自设返回 None。"""
+    if user_character is None:
+        return None
+    name = user_character.name or "用户"
+    lines = [
+        f"【你对话的用户】用户正在扮演角色「{name}」，把自己当作这个人物本身来对待："
+        f"把用户所说的话都当作「{name}」说的，始终用「{name}」称呼他，并围绕他扮演的这一人物展开互动。"
+    ]
+    if user_character.intro:
+        lines.append(f"【用户简介】\n{user_character.intro}")
+    if user_character.background:
+        lines.append(f"【用户经历】\n{user_character.background}")
+    try:
+        if user_character.attributes:
+            import json
+
+            keys = [a.get("key", "") for a in user_character.attributes if (a or {}).get("key")]
+            if keys:
+                lines.append(f"【用户属性】\n{'、'.join(k for k in keys if k)}")
+    except Exception:
+        pass
+    return "\n\n".join(lines)
 
 
 def _requirements_block(
@@ -188,8 +247,13 @@ def _requirements_block(
 
 
 def _attribute_block(character: Optional[Character], roleplay: Optional[RoleplaySettings]) -> Optional[str]:
-    """组装属性跟踪的系统提示片段，按当前角色解析出的属性定义描述。"""
-    if roleplay is None or not roleplay.attributes.enabled:
+    """组装属性跟踪的系统提示片段，按当前角色解析出的属性定义描述。
+
+    角色卡自带属性时即注入（不看全局开关）；旧卡回退全局 list 时
+    仍需全局 enabled（resolve_attribute_defs 内部已处理）。
+    """
+    own_attrs = bool(character and getattr(character, "attributes", None))
+    if not own_attrs and (roleplay is None or not roleplay.attributes.enabled):
         return None
     defs: List[AttributeDef] = resolve_attribute_defs(character, roleplay)
     if not defs:

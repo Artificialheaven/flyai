@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from ..config import ToolSettings
 from ..providers.base import StreamEventType
-from ..schemas import Message, ToolCall
+from ..schemas import ImageAttachment, Message, ToolCall
 from ..tools.base import ToolContext
 from ..tools.registry import ToolRegistry
 
@@ -25,29 +25,17 @@ DEFAULT_SYSTEM_PROMPT = (
     "根据工具返回的结果再决定下一步或给出最终回答。"
 )
 
-# 格式示范注入：置于消息尾部、紧邻当前回合（仅影响本次请求，不写入会话）。
-# 插在「最后一条用户消息」之前；放在尾部可保持 system+历史前缀逐字节不变，不破坏前缀缓存。
-_FORMAT_DEMO_HINT = "（请严格遵循上面示例所示格式来回复）"
-
-
-def _inject_format_example(request_messages: List[Message], format_example: str) -> None:
-    """把 few-shot 格式示范插到末尾用户消息之前（仅当末尾是用户消息时）。"""
-    if not format_example:
-        return
-    if not request_messages or request_messages[-1].role != "user":
-        return
-    start = len(request_messages) - 1
-    request_messages[start:start] = [
-        Message(role="user", content=_FORMAT_DEMO_HINT),
-        Message(role="assistant", content=format_example),
-    ]
-
-
 # 工具调用状态文案渲染
 _STATUS_RENDERERS = {
     "read_file": lambda a: f"正在读取文件: {a.get('path', '')}",
     "query_lore": lambda a: f"正在查询内容表: {a.get('kind', '')}/{a.get('keyword', '') or '全部'}",
     "update_attributes": lambda a: _render_attr_status(a),
+    "generate_image": lambda a: "正在生成图片…",
+    "edit_image": lambda a: "正在以参考图生成图片…",
+    "search_pixiv": lambda a: f"正在搜索 P 站插画: {a.get('keyword', '')}",
+    "pick_pixiv": lambda a: "正在下载精选原图…",
+    "web_search": lambda a: f"正在联网搜索: {a.get('query', '')}",
+    "web_fetch": lambda a: f"正在抓取网页: {a.get('url', '')}",
 }
 
 
@@ -55,6 +43,39 @@ def _render_attr_status(arguments: Dict[str, Any]) -> str:
     changes = arguments.get("changes") or []
     names = "、".join(str(c.get("key", "")) for c in changes if isinstance(c, dict)) or "属性"
     return f"正在更新属性: {names}"
+
+
+def _provider_supports_vision(provider) -> bool:
+    cfg = getattr(provider, "cfg", None)
+    return bool(getattr(cfg, "vision", False))
+
+
+def _meta_images(meta: Dict[str, Any]) -> Optional[List[ImageAttachment]]:
+    """把 ToolResult.meta 里的图片转为工具消息附件。
+
+    meta.images：多张（如 P 站候选）；meta.image：单张（生图/读图，向后兼容）。
+    """
+    raw_list = meta.get("images")
+    if raw_list:
+        out = []
+        for im in raw_list:
+            if isinstance(im, dict) and im.get("data"):
+                out.append(
+                    ImageAttachment(
+                        media_type=im.get("media_type", "image/jpeg"),
+                        data=im.get("data", ""),
+                    )
+                )
+        return out or None
+    single = meta.get("image")
+    if single and single.get("data"):
+        return [
+            ImageAttachment(
+                media_type=single.get("media_type", "image/jpeg"),
+                data=single.get("data", ""),
+            )
+        ]
+    return None
 
 
 def _render_status(call: ToolCall) -> str:
@@ -73,15 +94,12 @@ async def run_agent_loop(
     registry: ToolRegistry,
     settings: ToolSettings,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    format_example: str = "",
     session_id: str = "",
     services: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
     services: 注入到 ToolContext 的服务（如 {'lore': LoreQuerier}）。
-    format_example: 格式示范（few-shot），注入到本次请求尾部、紧邻当前用户消息之前，
-    仅影响请求、不写入会话，不破坏前缀缓存。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -92,12 +110,15 @@ async def run_agent_loop(
         services=services or {},
     )
 
+    # 整轮（可能含多次 LLM 调用）实际计费 token：各次调用累加
+    usage_in = 0
+    usage_out = 0
+
     for iteration in range(1, settings.max_iterations + 1):
         tool_specs = registry.specs() if settings.enabled else []
         request_messages = list(history)
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
-        _inject_format_example(request_messages, format_example)
 
         thinking_parts: List[str] = []
         content_parts: List[str] = []
@@ -111,17 +132,23 @@ async def run_agent_loop(
                 yield ("content_delta", {"text": ev.text})
             elif ev.type == StreamEventType.TOOL_CALLS:
                 calls = ev.tool_calls
+            elif ev.type == StreamEventType.USAGE and ev.usage:
+                usage_in += int(ev.usage.get("prompt_tokens") or 0)
+                usage_out += int(ev.usage.get("completion_tokens") or 0)
 
         assistant = Message(
             role="assistant",
             content="".join(content_parts) or None,
-            thinking="".join(thinking_parts) or None,
+            # 纯空白思考（如模型只吐一个换行）落库为 None，
+            # 避免历史里出现展开为空的「思考过程」
+            thinking="".join(thinking_parts).strip() or None,
             tool_calls=calls,
         )
         history.append(assistant)
 
         if not calls:
-            yield ("done", {"reason": "stop", "iterations": iteration})
+            yield ("done", {"reason": "stop", "iterations": iteration,
+                            "usage": _usage_payload(usage_in, usage_out)})
             return
 
         # 有工具调用：逐个串行执行，结果回灌历史后继续下一轮
@@ -139,11 +166,16 @@ async def run_agent_loop(
                 },
             )
             result = await registry.execute(call, ctx)
-            preview = (result.output or "")[:200]
+            # 多图标记卡（如 search_pixiv 含十几行候选标记）需完整输出供前端解析，
+            # 普通工具文本也只在 SSE 传输不落库，给到 4000 字符
+            preview = (result.output or "")[:4000]
             yield (
                 "tool_end",
                 {"id": call.id, "name": call.name, "ok": result.ok, "preview": preview},
             )
+            tool_images = None
+            if result.meta and _provider_supports_vision(provider):
+                tool_images = _meta_images(result.meta)
             history.append(
                 Message(
                     role="tool",
@@ -151,6 +183,7 @@ async def run_agent_loop(
                     name=call.name,
                     content=result.output,
                     ok=result.ok,
+                    images=tool_images,
                 )
             )
 
@@ -163,4 +196,13 @@ async def run_agent_loop(
         "error",
         {"message": f"已达到最大工具调用轮数（{settings.max_iterations}），停止执行", "fatal": False},
     )
-    yield ("done", {"reason": "max_iterations", "iterations": settings.max_iterations})
+    yield ("done", {"reason": "max_iterations", "iterations": settings.max_iterations,
+                    "usage": _usage_payload(usage_in, usage_out)})
+
+
+def _usage_payload(usage_in: int, usage_out: int) -> Dict[str, int]:
+    return {
+        "prompt_tokens": usage_in,
+        "completion_tokens": usage_out,
+        "total_tokens": usage_in + usage_out,
+    }

@@ -1,0 +1,6 @@
+{
+  "name": "current_time",
+  "version": "1.0.0",
+  "description": "获取当前日期时间（本地时间 + UTC + 星期）",
+  "author": "flyai"
+}

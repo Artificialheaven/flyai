@@ -19,6 +19,7 @@ from flyai.sessions.resolve import (
     member_character,
     primary_thread,
     thread_messages,
+    user_seat,
 )
 
 
@@ -54,6 +55,24 @@ def test_room_save_get_roundtrip(tmp_path):
     assert [m.name for m in s2.members if not m.is_user] == ["初", "两个"]
     assert [t.kind for t in s2.threads] == ["dm", "dm"]
     assert len(s2.threads[0].member_ids) == 1
+
+
+def test_pinned_roundtrip_and_sort_first(tmp_path):
+    store = JsonSessionStore(tmp_path)
+    older = Session(title="旧")
+    newer = Session(title="新")
+    store.save(older)
+    store.save(newer)
+    # 默认按更新时间倒序：新在前
+    assert [s.title for s in store.list()] == ["新", "旧"]
+    # 旧的置顶：稳定排序后置顶项提到最前，其余仍按时间倒序
+    older.pinned = True
+    store.save(older)
+    listed = store.list()
+    assert [s.title for s in listed] == ["旧", "新"]
+    assert listed[0].pinned is True
+    # 落盘再读，置顶标记保留
+    assert store.get(older.id).pinned is True
 
 
 def test_thread_and_member_lookup():
@@ -125,13 +144,107 @@ def test_member_prompt_includes_memory_attrs_audience():
     assert "爱丽丝" in p and "冒险家" in p
     assert "去森林" in p
     assert "魅力=80" in p
-    assert "鲍勃" in p and "同处一个聊天窗口" in p
+    assert "鲍勃" in p and "聊天窗口" in p
     assert "魔法世界" in p
 
 
 def test_member_prompt_without_lore_returns_base():
     p = build_member_system_prompt(name="x", memory="", attributes=None, audience=None, base="你是助手。")
     assert p == "你是助手。"
+
+
+# ---- R8：用户扮演自设（persona）----
+
+def test_member_prompt_injects_user_persona():
+    c = Character(name="爱丽丝", intro="冒险家")
+    persona = Character(name="勇者小明", intro="一位立志消灭魔王的勇者", background="从小在村子里长大")
+    p = build_member_system_prompt(
+        name="爱丽丝",
+        memory="",
+        attributes=None,
+        audience=["你"],
+        character=c,
+        base="你是助手。",
+        user_character=persona,
+    )
+    assert "你对话的用户" in p
+    assert "勇者小明" in p
+    assert "消灭魔王" in p
+    # persona 不污染 AI 自己的身份
+    assert p.index("你对话的用户") > p.index("爱丽丝")
+
+
+def test_system_prompt_injects_user_persona_legacy():
+    from flyai.lore.query import build_system_prompt
+    persona = Character(id="p1", name="村长", intro="村民们的领袖")
+    p = build_system_prompt(Character(name="旅人"), None, "你是助手。", user_character=persona)
+    assert "你对话的用户" in p and "村长" in p and "村民们的领袖" in p
+
+
+def test_no_user_persona_unchanged():
+    c = Character(name="爱丽丝")
+    base = "你是助手。"
+    p = build_member_system_prompt(
+        name="爱丽丝", memory="", attributes=None, audience=None, character=c, base=base
+    )
+    # 未设自设：不含 persona 块
+    assert "你对话的用户" not in p
+    assert "爱丽丝" in p  # AI 自己的身份仍在
+
+
+def test_user_seat_resolves_persona_character():
+    seat = RoomMember(name="你", is_user=True, character_id="p1")
+    s = Session(title="房间")
+    s.members.append(seat)
+    assert user_seat(s) is seat
+    persona = Character(id="p1", name="村长")
+    assert member_character(seat, _FakeLore([persona])).name == "村长"
+    # 无自设的座位解析为 None
+    empty = RoomMember(name="你", is_user=True)
+    assert member_character(empty, _FakeLore([persona])) is None
+
+
+def test_chat_in_thread_tags_user_message_with_persona(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.sessions.json_store import JsonSessionStore
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, chars = _room(["c1"])
+    # 给用户座位设自设卡 p1
+    s.members[0].character_id = "p1"
+    store.save(s)
+    persona = Character(id="p1", name="村长", intro="村民们的领袖")
+    state, sc = _make_state_and_scope(tmp_path, [chars[0], persona])
+    sc.store = store
+    provider = _FakeProviderReply()
+    req = SimpleNamespace(message="你好", thread_id=s.threads[0].id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    _run(_drain(resp))
+
+    s2 = store.get(s.id)
+    t = s2.thread(s.threads[0].id)
+    assert t.messages[0].role == "user" and t.messages[0].name == "村长"
+
+
+def test_chat_in_thread_user_without_persona_tag_none(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.sessions.json_store import JsonSessionStore
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, _ = _room(["c1"])
+    store.save(s)
+    state, sc = _make_state_and_scope(tmp_path, [Character(id="c1", name="初")])
+    sc.store = store
+    provider = _FakeProviderReply()
+    req = SimpleNamespace(message="你好", thread_id=s.threads[0].id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    _run(_drain(resp))
+
+    s2 = store.get(s.id)
+    t = s2.thread(s.threads[0].id)
+    assert t.messages[0].role == "user" and t.messages[0].name is None
 
 
 def test_member_character_resolves_override_before_lore():
@@ -178,11 +291,12 @@ def _make_state_and_scope(tmp_path, chars):
     state.config = SimpleNamespace(
         roleplay=RoleplaySettings(format_example=""),
         tools=ToolSettings(enabled=False),
+        image_models=[],
     )
     state.registry = ToolRegistry()
     lore = _FakeLore(chars)
     sc = SimpleNamespace(store=JsonSessionStore(tmp_path / "s"), lore=lore,
-                         member=lambda mid: None)
+                         member=lambda mid: None, uid="admin", level=256)
     # 让 session.member / session.thread 可用（sc.member 未被使用，session 自带方法）
     return state, sc
 
@@ -310,3 +424,247 @@ def test_group_fanout_each_ai_marks_own_reply(tmp_path):
     tails = [m for m in g2.messages if m.role == "assistant" and m.content]
     assert [m.name for m in tails] == ["初", "两个"]
     assert len(tails) == 2
+
+
+class _FakeToolThenReply:
+    """先发一轮工具调用（content 为空很正常），再发一段正式回复。
+
+    模拟真实群聊里会查内容表的 AI：中间那条 content 为空的 assistant 只是
+    携带 tool_calls 的工具步，绝不能被当「跳过」处理、把正式回复整卡移除。
+    """
+    def __init__(self):
+        self._n = 0
+
+    async def stream_chat(self, messages, tool_specs, **kwargs):
+        self._n += 1
+        if self._n % 2 == 1:
+            from flyai.schemas import ToolCall
+            yield StreamEvent(
+                StreamEventType.TOOL_CALLS,
+                tool_calls=[ToolCall(id=f"t{self._n}", name="query_lore",
+                                     arguments={"kind": "character", "keyword": "初"})],
+            )
+        else:
+            yield StreamEvent(StreamEventType.CONTENT_DELTA, "查完资料后的正式回复")
+
+
+async def _drain_collect_events(resp):
+    """收集 SSE 事件名，返回去重后的顺序列表。"""
+    names = []
+    body = resp.body_iterator
+    if hasattr(body, "__aiter__"):
+        async for frame in body:
+            if isinstance(frame, str) and "event:" in frame:
+                ev = frame.split("event:", 1)[1].split("\n", 1)[0].strip()
+                names.append(ev)
+    return names
+
+
+class _FakeEmptyThenReply:
+    """每次发言先给一轮空输出（0 字），重试后才给内容。模拟模型『没开口』的退化回复。"""
+    def __init__(self):
+        self._n = 0
+
+    async def stream_chat(self, messages, tool_specs, **kwargs):
+        self._n += 1
+        if self._n % 2 == 1:
+            return  # 空生成器 → run_agent_loop 追加一条空 assistant
+        yield StreamEvent(StreamEventType.CONTENT_DELTA, "终于开口了")
+
+
+def test_empty_reply_is_retried_not_skipped(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.sessions.models import Thread as T  # noqa
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, chars = _room(["c1", "c2"], ["初", "两个"])
+    ais = [s.members[1], s.members[2]]
+    g = Thread(kind="group", title="群", member_ids=[m.id for m in ais])
+    s.threads.append(g)
+    store.save(s)
+
+    state, sc = _make_state_and_scope(tmp_path, chars)
+    sc.store = store
+    provider = _FakeEmptyThenReply()
+    req = SimpleNamespace(message="大家好", thread_id=g.id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    events = _run(_drain_collect_events(resp))
+
+    # 空回复应被重试成正式发言：不跳过、真实回复留下、每 AI 最终恰好一次 done
+    assert "speaker_skip" not in events
+    assert events.count("done") == 2
+    s2 = store.get(s.id)
+    g2 = s2.thread(g.id)
+    real = [m for m in g2.messages if m.role == "assistant" and (m.content or "").strip()]
+    assert [m.name for m in real] == ["初", "两个"]
+    assert all(not m.hidden for m in real)
+    assert len(real) == 2
+
+    # 被舍弃的空回合标记隐藏、留在历史（不删除）
+    blanks = [m for m in g2.messages if m.role == "assistant" and not (m.content or "").strip()]
+    assert blanks and all(m.hidden for m in blanks)
+
+
+# ---- 历史编辑 / 重新生成 ----
+
+def _seed_two_turns(store, s):
+    t = s.threads[0]
+    t.messages = [
+        Message(role="user", content="A"),
+        Message(role="assistant", content="rA", name="初"),
+        Message(role="user", content="B"),
+        Message(role="assistant", content="rB", name="初"),
+    ]
+    store.save(s)
+    return t
+
+
+def _mode_req(tid, message="", edit_id=None, regen_id=None):
+    return SimpleNamespace(
+        message=message, thread_id=tid,
+        edit_message_id=edit_id, regenerate_message_id=regen_id,
+        images=[],
+    )
+
+
+def test_dm_edit_historical_turn_end_to_end(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, _ = _room(["c1"])
+    t = _seed_two_turns(store, s)
+    anchor = t.messages[0].id
+
+    state, sc = _make_state_and_scope(tmp_path, [Character(id="c1", name="初")])
+    sc.store = store
+    resp = _run(_chat_in_thread(
+        state, sc, s, _mode_req(t.id, "A2", edit_id=anchor), _FakeProviderReply()
+    ))
+    _run(_drain(resp))
+
+    t2 = store.get(s.id).thread(t.id)
+    # 新回复进入编辑轮；suffix 轮原样
+    assert [m.content for m in t2.messages] == ["A2", "发言1", "B", "rB"]
+    entry = t2.edits[anchor]
+    assert entry["edit_active"] == 1 and len(entry["edits"]) == 2
+    assert entry["edits"][0]["user"]["content"] == "A"
+
+
+def test_dm_regenerate_end_to_end(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, _ = _room(["c1"])
+    t = _seed_two_turns(store, s)
+    anchor = t.messages[2].id
+
+    state, sc = _make_state_and_scope(tmp_path, [Character(id="c1", name="初")])
+    sc.store = store
+    resp = _run(_chat_in_thread(
+        state, sc, s, _mode_req(t.id, "B", regen_id=anchor), _FakeProviderReply()
+    ))
+    _run(_drain(resp))
+
+    t2 = store.get(s.id).thread(t.id)
+    assert [m.content for m in t2.messages] == ["A", "rA", "B", "发言1"]
+    slot = t2.edits[anchor]["edits"][0]
+    assert len(slot["reply_variants"]) == 2 and slot["reply_active"] == 1
+
+
+def test_group_edit_or_regen_rejected_400(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from fastapi import HTTPException
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, chars = _room(["c1", "c2"], ["初", "两个"])
+    ais = [s.members[1], s.members[2]]
+    g = Thread(kind="group", title="群", member_ids=[m.id for m in ais])
+    s.threads.append(g)
+    store.save(s)
+    state, sc = _make_state_and_scope(tmp_path, chars)
+    sc.store = store
+
+    with pytest.raises(HTTPException) as ei:
+        _run(_chat_in_thread(
+            state, sc, s, _mode_req(g.id, "x", edit_id="whatever"), _FakeProviderReply()
+        ))
+    assert ei.value.status_code == 400
+
+    with pytest.raises(HTTPException) as ri:
+        _run(_chat_in_thread(
+            state, sc, s, _mode_req(g.id, regen_id="whatever"), _FakeProviderReply()
+        ))
+    assert ri.value.status_code == 400
+
+
+def test_patch_switch_and_bad_index(tmp_path):
+    from flyai.api.routes_room import switch_turn
+    from flyai.api.routes_room import TurnSwitch
+    from fastapi import HTTPException
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, _ = _room(["c1"])
+    t = _seed_two_turns(store, s)
+    anchor = t.messages[2].id
+    # 直接造两个 reply variant
+    from flyai.sessions import versions
+    versions.begin_regen(t, anchor)
+    t.messages.append(Message(role="assistant", content="rB2", name="初"))
+    versions.commit_run(t, anchor, 3, versions.MODE_REGEN, (0, 0))
+    store.save(s)
+
+    state, sc = _make_state_and_scope(tmp_path, [Character(id="c1", name="初")])
+    sc.store = store
+    fake_req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        flyai=SimpleNamespace(user=lambda r: sc)
+    )))
+
+    out = switch_turn(s.id, t.id, anchor, TurnSwitch(reply_index=0), fake_req)
+    assert [m["content"] for m in out["messages"]] == ["A", "rA", "B", "rB"]
+
+    with pytest.raises(HTTPException) as ei:
+        switch_turn(s.id, t.id, anchor, TurnSwitch(reply_index=9), fake_req)
+    assert ei.value.status_code == 400
+
+    # 群聊窗口 PATCH → 400
+    g = Thread(kind="group", title="群", member_ids=[m.id for m in s.members[1:2]])
+    s.threads.append(g)
+    store.save(s)  # 路由内重新 get，g 必须已落盘
+    with pytest.raises(HTTPException) as gi:
+        switch_turn(s.id, g.id, anchor, TurnSwitch(reply_index=0), fake_req)
+    assert gi.value.status_code == 400
+
+
+def test_tool_using_ai_not_marked_as_skipped(tmp_path):
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.sessions.models import Thread as T  # noqa
+    from flyai.tools.lore_tool import QueryLoreTool
+
+    store = JsonSessionStore(tmp_path / "s")
+    s, chars = _room(["c1", "c2"], ["初", "两个"])
+    ais = [s.members[1], s.members[2]]
+    g = Thread(kind="group", title="群", member_ids=[m.id for m in ais])
+    s.threads.append(g)
+    store.save(s)
+
+    state, sc = _make_state_and_scope(tmp_path, chars)
+    from flyai.config import ToolSettings
+    state.config.tools = ToolSettings(enabled=True)
+    state.registry.register(QueryLoreTool())
+    sc.store = store
+
+    provider = _FakeToolThenReply()
+    req = SimpleNamespace(message="大家好", thread_id=g.id)
+
+    resp = _run(_chat_in_thread(state, sc, s, req, provider))
+    events = _run(_drain_collect_events(resp))
+
+    # 两个 AI 都以正式回复收尾 → 绝不发 speaker_skip，真实回复留在历史且不隐藏
+    assert "speaker_skip" not in events
+    s2 = store.get(s.id)
+    g2 = s2.thread(g.id)
+    real = [m for m in g2.messages if m.role == "assistant" and m.content]
+    assert [m.name for m in real] == ["初", "两个"]
+    assert all(not m.hidden for m in real)
+    assert len(real) == 2

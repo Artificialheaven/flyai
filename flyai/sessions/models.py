@@ -59,6 +59,8 @@ class Thread:
     title: str = ""
     member_ids: List[str] = field(default_factory=list)
     messages: List[Message] = field(default_factory=list)
+    # 历史编辑/重生成版本：key=锚点用户消息 id，见 sessions/versions.py
+    edits: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.id:
@@ -71,6 +73,7 @@ class Thread:
             "title": self.title,
             "member_ids": list(self.member_ids),
             "messages": [m.to_dict() for m in self.messages],
+            "edits": self.edits,
         }
 
     @classmethod
@@ -82,6 +85,7 @@ class Thread:
             title=d.get("title", ""),
             member_ids=list(d.get("member_ids", []) or []),
             messages=[Message.from_dict(m) for m in d.get("messages", [])],
+            edits=d.get("edits", {}) or {},
         )
 
 
@@ -104,6 +108,7 @@ class Session:
     # beta：多 AI 群聊
     members: List[RoomMember] = field(default_factory=list)
     threads: List[Thread] = field(default_factory=list)
+    pinned: bool = False              # 置顶（侧栏排序优先）
 
     def __post_init__(self):
         if not self.id:

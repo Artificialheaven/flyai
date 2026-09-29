@@ -8,14 +8,16 @@ import uuid
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from ..sessions.resolve import (
+    apply_room_compression,
     clear_character_override,
     effective_character,
     effective_world,
     fork_character,
     is_character_scoped,
+    member_character,
     set_character_override,
     set_world_override,
 )
@@ -31,6 +33,8 @@ class SessionCreate(BaseModel):
 
 
 class SessionUpdate(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
     character_id: Optional[str] = None
     world_id: Optional[str] = None
 
@@ -60,11 +64,17 @@ def create_session(req: SessionCreate, request: Request):
 
 @router.patch("/sessions/{sid}")
 def update_session(sid: str, req: SessionUpdate, request: Request):
-    """切换会话绑定的角色/世界观（角色扮演开关）。"""
+    """重命名/置顶，或切换会话绑定的角色/世界观（角色扮演开关）。"""
     sc = request.app.state.flyai.user(request)
     s = sc.store.get(sid)
     if s is None:
         raise HTTPException(404, "会话不存在")
+    if req.title is not None:
+        title = req.title.strip()
+        if title:
+            s.title = title[:60]
+    if req.pinned is not None:
+        s.pinned = bool(req.pinned)
     # 校验存在性
     if req.character_id is not None and req.character_id and not sc.lore.get_character(req.character_id):
         raise HTTPException(400, "角色不存在")
@@ -95,6 +105,22 @@ def delete_session(sid: str, request: Request):
     sc = request.app.state.flyai.user(request)
     sc.store.delete(sid)
     return {"ok": True}
+
+
+class BatchDeleteBody(BaseModel):
+    ids: List[str] = []
+
+
+@router.post("/sessions/batch-delete")
+def batch_delete_sessions(body: BatchDeleteBody, request: Request):
+    """批量删除会话：逐个删除，不存在的跳过。返回实际删除数。"""
+    sc = request.app.state.flyai.user(request)
+    deleted = 0
+    for sid in body.ids or []:
+        if sc.store.get(sid) is not None:
+            sc.store.delete(sid)
+            deleted += 1
+    return {"ok": True, "deleted": deleted}
 
 
 @router.post("/sessions/{sid}/clear")
@@ -188,20 +214,46 @@ def session_character_export(sid: str, request: Request):
     )
 
 
+def _export_card(c, fallback_uid) -> dict:
+    """角色卡导出 dict：补 Author+ID 复合标识。旧卡 author 为空时以导出名下属 uid 兜底。"""
+    d = c.to_dict()
+    author = d.get("author") or fallback_uid
+    d["ref"] = f"{author}:{d['id']}"
+    return d
+
+
 @router.get("/sessions/{sid}/export")
 def session_export(sid: str, request: Request):
-    """导出对话包：历史消息 + 所用角色卡 + 世界观。"""
+    """导出对话包：全部窗口的完整文本（含工具调用/结果）+ 角色卡（Author+ID）+ 世界观。"""
     sc = request.app.state.flyai.user(request)
     s = _must_get_session(sc, sid)
     char = effective_character(s, sc.lore)
     world = effective_world(s, sc.lore)
+
+    # 房间：收集每个 AI 成员的有效角色卡，按 ref 去重
+    cards = {}
+    for m in s.members:
+        if m.is_user:
+            continue
+        c = member_character(m, sc.lore)
+        if c is None:
+            continue
+        d = _export_card(c, sc.uid)
+        cards.setdefault(d["ref"], d)
+    if char is not None:
+        d = _export_card(char, sc.uid)
+        cards.setdefault(d["ref"], d)
+
     data = {
         "session": {"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at, "attributes": s.attributes},
         "character": char.to_dict() if char else None,
         "world": world.to_dict() if world else None,
         "messages": [m.to_dict() for m in s.messages],
+        "members": [m.to_dict() for m in s.members],
+        "threads": [t.to_dict() for t in s.threads],
+        "characters": list(cards.values()),
     }
-    body = {"type": "flyai-conversation", "version": 1, "name": s.title, "data": data}
+    body = {"type": "flyai-conversation", "version": 2, "name": s.title, "data": data}
     return JSONResponse(
         content=body,
         headers={"Content-Disposition": f'attachment; filename="conversation-{s.id[:8]}.json"'},
@@ -210,16 +262,37 @@ def session_export(sid: str, request: Request):
 
 @router.post("/sessions/{sid}/compress")
 async def session_compress(sid: str, request: Request):
-    """AI 压缩对话历史进角色卡与世界观（自动分类），写入会话副本后返回。"""
-    from ..lore.gen import compress_conversation
+    """AI 压缩对话历史。
+
+    - 房间：按窗口/发言者归纳，结果写入各成员副本（member.override）。
+    - 旧单 AI：归纳进角色卡与世界观，写会话级副本；无角色卡时以空白卡为底。
+    """
+    from ..lore.gen import compress_conversation, compress_room
 
     state = request.app.state.flyai
     sc = state.user(request)
     s = _must_get_session(sc, sid)
+
+    if s.members:
+        try:
+            data = await compress_room(state, s, sc.lore)
+        except Exception as exc:
+            raise HTTPException(500, f"压缩失败: {exc}")
+        applied = apply_room_compression(s, data, sc.lore)
+        sc.store.save(s)
+        return {
+            "room": True,
+            "members": applied["members"],
+            "world": applied["world"],
+            "scoped": True,
+        }
+
     char = effective_character(s, sc.lore)
     world = effective_world(s, sc.lore)
     if char is None:
-        raise HTTPException(400, "会话未绑定角色，无法压缩")
+        from ..lore.models import Character
+
+        char = Character(author=sc.uid)
     try:
         new_char, new_world = await compress_conversation(state, s, char, world)
     except Exception as exc:
@@ -240,6 +313,7 @@ def _session_dict(s, with_messages: bool = False, lore=None):
     d = {
         "id": s.id,
         "title": s.title,
+        "pinned": s.pinned,
         "provider_id": s.provider_id,
         "character_id": s.character_id,
         "world_id": s.world_id,

@@ -15,6 +15,9 @@ var state = {
   currentAttrs: null,
   userId: null,
   userName: "",
+  userLevel: 0,     // 权限等级 0-255；admin 256
+  imageModelId: "", // 普通用户选用的生图模型（localStorage 持久化）
+  sdEngine: false,  // 是否使用本地 Stable Diffusion 生图（localStorage 持久化）
   scopeCache: {},   // sessionId -> {char, world, scoped}（有效角色/世界观，含副本）
   // beta：多 AI 群聊
   roomMembers: [],    // 当前房间参与者（session.members）
@@ -22,6 +25,22 @@ var state = {
   roomView: false,    // 左侧栏是否处于「房间窗口导航」状态
   currentThreadId: null,
   currentSpeaker: null, // {member_id,name,character_id} 流式当前发言者
+  pendingImages: [],    // 待发送图片 [{media_type, data(base66)}]
+  newChat: null,        // 选卡临时态 {selected: {id: card}, rootId: ""}
+  loreNav: "",          // 内容菜单角色卡两级导航：""=根卡列表，否则为根卡 id
+  // 历史编辑/重生成
+  turnNodes: {},        // anchor -> {userEl, editing}
+  streamInsertBefore: null,  // 旧轮流式：新回复插在该节点之前；null=追加到底
+  turnEditAnchor: null,     // 处于编辑/重生成流式中的轮 anchor
+  // 批量删除会话
+  batchMode: false,
+  batchPicked: {},          // 选中的会话 id -> true
+  // 侧栏搜索 / 滚动跟随 / 失败恢复
+  sessionQuery: "",
+  stickBottom: true,        // 用户贴底时新内容才自动滚动
+  pendingSend: null,        // 本次已发送 {text, images}，请求失败时回填
+  draftTimer: null,
+  tokenTotals: {},          // 会话 id -> 本次页面会话累计总 token
 };
 
 var el = {};
@@ -49,7 +68,8 @@ function goLogin() {
 }
 function renderUserBadge() {
   if (el.userName) {
-    el.userName.textContent = "👤 " + (state.userName || "……") + (state.role === "admin" ? "（管理员）" : "");
+    var tag = state.role === "admin" ? "（管理员 Lv256）" : "（Lv" + state.userLevel + "）";
+    el.userName.textContent = "👤 " + (state.userName || "……") + tag;
   }
   if (el.btnUsers) el.btnUsers.classList.toggle("hidden", state.role !== "admin");
 }
@@ -68,9 +88,13 @@ function bootstrap() {
   if (!saved) { goLogin(); return; }  // 不登录不能进
   state.userId = saved;
   state.role = localStorage.getItem("flyai-role") || "user";
+  state.imageModelId = localStorage.getItem("flyai-image-model") || "";
+  state.sdEngine = localStorage.getItem("flyai-sd-engine") === "sd";
+  state.topbarCollapsed = localStorage.getItem("flyai-topbar-collapsed") === "1";
   fetchJSON("/api/auth/me").then(function (res) {
     state.userName = res.name;
     state.role = res.role || "user";
+    state.userLevel = parseInt(res.level, 10) || 0;
     localStorage.setItem("flyai-role", state.role);
     renderUserBadge();
     init();
@@ -100,6 +124,19 @@ function renderUserList() {
       name.className = "user-name";
       name.textContent = u.name;
       row.appendChild(name);
+      // 等级：改完即 PATCH
+      var levelWrap = document.createElement("label");
+      levelWrap.className = "user-level";
+      levelWrap.textContent = "Lv ";
+      var level = document.createElement("input");
+      level.type = "number";
+      level.min = "0"; level.max = "255";
+      level.value = String(u.level == null ? 0 : u.level);
+      level.addEventListener("change", function () {
+        changeUserLevel(u.id, level);
+      });
+      levelWrap.appendChild(level);
+      row.appendChild(levelWrap);
       var del = document.createElement("button");
       del.className = "btn small";
       del.textContent = "删除";
@@ -108,6 +145,23 @@ function renderUserList() {
       el.userList.appendChild(row);
     });
   }).catch(function (e) { el.userList.textContent = "加载失败: " + e.message; });
+}
+function changeUserLevel(uid, input) {
+  var v = parseInt(input.value, 10);
+  if (isNaN(v)) v = 0;
+  el.userMsg.textContent = ""; el.userMsg.className = "msg-bar";
+  fetchJSON("/api/auth/users/" + encodeURIComponent(uid), {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ level: v }),
+  }).then(function (r) {
+    input.value = String(r.level);
+    el.userMsg.textContent = "等级已更新为 " + r.level;
+    el.userMsg.className = "msg-bar ok";
+  }).catch(function (e) {
+    el.userMsg.textContent = "等级修改失败: " + e.message;
+    el.userMsg.className = "msg-bar err";
+  });
 }
 function deleteUser(uid, name, row, btn) {
   if (!confirm("确定删除用户「" + name + "」？其角色卡/世界观/会话数据也会被一并移除。")) return;
@@ -122,15 +176,18 @@ function deleteUser(uid, name, row, btn) {
 function createUser() {
   var name = el.userNameInput.value.trim();
   var password = el.userPasswordInput.value;
+  var level = parseInt(el.userLevelInput.value, 10);
+  if (isNaN(level)) level = 0;
   el.userMsg.textContent = ""; el.userMsg.className = "msg-bar";
   if (!name) { el.userMsg.textContent = "请输入用户名"; el.userMsg.className = "msg-bar err"; return; }
   fetchJSON("/api/auth/users", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: name, password: password }),
+    body: JSON.stringify({ name: name, password: password, level: level }),
   }).then(function () {
     el.userMsg.textContent = "已创建用户「" + name + "」"; el.userMsg.className = "msg-bar ok";
     el.userNameInput.value = ""; el.userPasswordInput.value = "";
+    el.userLevelInput.value = "0";
     renderUserList();
     el.userNameInput.focus();
   }).catch(function (e) {
@@ -140,14 +197,23 @@ function createUser() {
 
 function cacheElements() {
   el.sessionList = document.getElementById("session-list");
+  el.sessionSearch = document.getElementById("session-search");
+  el.searchWrap = document.querySelector(".search-wrap");
   el.messages = document.getElementById("messages");
   el.sessionMeta = document.getElementById("session-meta");
+  el.topbar = document.getElementById("topbar");
+  el.topbarTitle = document.getElementById("topbar-title");
+  el.btnTopbarToggle = document.getElementById("btn-topbar-toggle");
   el.input = document.getElementById("input");
   el.btnSend = document.getElementById("btn-send");
   el.btnStop = document.getElementById("btn-stop");
+  el.btnAttach = document.getElementById("btn-attach");
+  el.imageFile = document.getElementById("image-file");
+  el.attachPreview = document.getElementById("attach-preview");
   el.btnNew = document.getElementById("btn-new-session");
   el.btnSettings = document.getElementById("btn-settings");
   el.btnLore = document.getElementById("btn-lore");
+  el.btnBatchDelete = document.getElementById("btn-batch-delete");
   el.btnTheme = document.getElementById("btn-theme");
   el.providerBar = document.getElementById("provider-bar");
   el.dialog = document.getElementById("settings-dialog");
@@ -157,6 +223,45 @@ function cacheElements() {
   el.setTimeout = document.getElementById("set-timeout");
   el.setReadDirs = document.getElementById("set-read-dirs");
   el.pluginChecks = document.getElementById("plugin-checks");
+  el.setEmbBase = document.getElementById("set-emb-base");
+  el.setEmbKey = document.getElementById("set-emb-key");
+  el.setEmbModel = document.getElementById("set-emb-model");
+  el.setEmbTopk = document.getElementById("set-emb-topk");
+  el.setImgEnabled = document.getElementById("set-img-enabled");
+  el.setImgSize = document.getElementById("set-img-size");
+  el.imageModelList = document.getElementById("image-model-list");
+  el.btnAddImageModel = document.getElementById("btn-add-image-model");
+  // Stable Diffusion 引擎
+  el.btnSd = document.getElementById("btn-sd");
+  el.setSdEnabled = document.getElementById("set-sd-enabled");
+  el.setSdBase = document.getElementById("set-sd-base");
+  el.setSdFnindex = document.getElementById("set-sd-fnindex");
+  el.setSdWidth = document.getElementById("set-sd-width");
+  el.setSdHeight = document.getElementById("set-sd-height");
+  el.setSdSteps = document.getElementById("set-sd-steps");
+  el.setSdCfg = document.getElementById("set-sd-cfg");
+  el.setSdSampler = document.getElementById("set-sd-sampler");
+  el.setSdSchedule = document.getElementById("set-sd-schedule");
+  el.setSdNegative = document.getElementById("set-sd-negative");
+  el.settingsSub = document.getElementById("settings-sub");
+  el.settingsUser = document.getElementById("settings-user");
+  el.settingsAdmin = document.getElementById("settings-admin");
+  el.myProviderList = document.getElementById("my-provider-list");
+  el.sharedProviderList = document.getElementById("shared-provider-list");
+  el.myImageList = document.getElementById("my-image-list");
+  el.sharedImageList = document.getElementById("shared-image-list");
+  el.btnAddMyProvider = document.getElementById("btn-add-my-provider");
+  el.btnAddMyImage = document.getElementById("btn-add-my-image");
+  el.btnUserSettingsClose = document.getElementById("btn-user-settings-close");
+  el.userConfigMsg = document.getElementById("user-config-msg");
+  el.setPxEnabled = document.getElementById("set-px-enabled");
+  el.setPxProxy = document.getElementById("set-px-proxy");
+  el.setPxR18 = document.getElementById("set-px-r18");
+  el.setPxNum = document.getElementById("set-px-num");
+  el.setWsEnabled = document.getElementById("set-ws-enabled");
+  el.setWsProxy = document.getElementById("set-ws-proxy");
+  el.setWsNum = document.getElementById("set-ws-num");
+  el.setWsPagechars = document.getElementById("set-ws-pagechars");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");
@@ -190,6 +295,7 @@ function cacheElements() {
   el.userList = document.getElementById("user-list");
   el.userNameInput = document.getElementById("user-new-name");
   el.userPasswordInput = document.getElementById("user-new-password");
+  el.userLevelInput = document.getElementById("user-new-level");
   el.userMsg = document.getElementById("user-msg");
   el.btnUserCreate = document.getElementById("btn-user-create");
   el.btnUserCancel = document.getElementById("btn-user-cancel");
@@ -199,8 +305,19 @@ function cacheElements() {
   el.newchatPick = document.getElementById("newchat-pick");
   el.newchatTitle = document.getElementById("newchat-title");
   el.newchatMsg = document.getElementById("newchat-msg");
+  el.newchatBack = document.getElementById("newchat-back");
+  el.newchatSub = document.getElementById("newchat-sub");
+  el.newchatTray = document.getElementById("newchat-tray");
   el.btnNewchatCancel = document.getElementById("btn-newchat-cancel");
   el.btnNewchatCreate = document.getElementById("btn-newchat-create");
+  el.btnNewchatPlain = document.getElementById("btn-newchat-plain");
+  el.confirmDialog = document.getElementById("confirm-dialog");
+  el.confirmTitle = document.getElementById("confirm-title");
+  el.confirmText = document.getElementById("confirm-text");
+  el.btnConfirmCancel = document.getElementById("btn-confirm-cancel");
+  el.btnConfirmOk = document.getElementById("btn-confirm-ok");
+  el.cardDetailDialog = document.getElementById("card-detail-dialog");
+  el.cardDetailBody = document.getElementById("card-detail-body");
   el.groupDialog = document.getElementById("group-dialog");
   el.groupPick = document.getElementById("group-pick");
   el.groupMsg = document.getElementById("group-msg");
@@ -210,33 +327,140 @@ function cacheElements() {
   el.memTitle = document.getElementById("mem-title");
   el.memBody = document.getElementById("mem-body");
   el.btnMemClose = document.getElementById("btn-mem-close");
+  // 全屏图片查看器
+  el.imgViewer = document.getElementById("img-viewer");
+  el.ivStage = document.getElementById("iv-stage");
+  el.ivImg = document.getElementById("iv-img");
+  el.ivPanel = document.getElementById("iv-panel");
+  el.ivInfo = document.getElementById("iv-info");
+  el.ivDownload = document.getElementById("iv-download");
+  el.ivClose = document.getElementById("iv-close");
 }
 
 function bindEvents() {
   el.btnSend.addEventListener("click", onSend);
   el.btnStop.addEventListener("click", onStop);
+  // 点用户气泡以外的任意区域：收起亮出的 ✏️
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest || !e.target.closest(".msg.user")) deactivateEditEntries();
+  });
+  // 点击消息内任意图片：打开全屏查看器（用户上传图 / 生成图）
+  el.messages.addEventListener("click", function (e) {
+    var img = (e.target && e.target.closest)
+      ? e.target.closest("img.gen-img, img.chat-img")
+      : null;
+    if (img) {
+      e.preventDefault();
+      openImageViewer(img.currentSrc || img.src, img._imgMeta || null);
+    }
+  });
+  el.ivClose.addEventListener("click", closeImageViewer);
+  el.ivInfo.addEventListener("click", function (e) {
+    e.stopPropagation();
+    toggleImageInfo();
+  });
+  el.ivDownload.addEventListener("click", function (e) {
+    e.stopPropagation();
+    downloadViewerImage();
+  });
+  // 点图片外的黑色区域关闭
+  el.ivStage.addEventListener("click", function (e) {
+    if (e.target === el.ivStage) closeImageViewer();
+  });
+  // Esc：先关信息面板，再关查看器
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape" || el.imgViewer.classList.contains("hidden")) return;
+    e.preventDefault();
+    if (el.ivPanel.classList.contains("open")) toggleImageInfo();
+    else closeImageViewer();
+  });
+  el.btnAttach.addEventListener("click", function () { el.imageFile.click(); });
+  el.imageFile.addEventListener("change", function () {
+    addImageFiles(el.imageFile.files);
+    el.imageFile.value = "";  // 允许再次选择同一个文件
+  });
+  // 剪贴板粘贴图片
+  document.addEventListener("paste", function (e) {
+    var items = (e.clipboardData || {}).items;
+    if (!items) return;
+    var files = [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image/") === 0) {
+        var f = items[i].getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) addImageFiles(files);
+  });
+  // 拖拽：整页拦截防止浏览器直接打开文件；仅视觉模型处理
+  var dragDepth = 0;
+  document.addEventListener("dragenter", function (e) {
+    if (!visionEnabled()) return;
+    var types = e.dataTransfer && e.dataTransfer.types;
+    if (types && Array.prototype.indexOf.call(types, "Files") >= 0) {
+      dragDepth++;
+      el.messages.classList.add("drag-over");
+    }
+  });
+  document.addEventListener("dragleave", function () {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) el.messages.classList.remove("drag-over");
+  });
+  document.addEventListener("dragover", function (e) { e.preventDefault(); });
+  document.addEventListener("drop", function (e) {
+    e.preventDefault();
+    dragDepth = 0;
+    el.messages.classList.remove("drag-over");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      addImageFiles(e.dataTransfer.files);
+    }
+  });
+  if (el.sessionSearch) el.sessionSearch.addEventListener("input", function () {
+    state.sessionQuery = el.sessionSearch.value;
+    if (!state.batchMode && !state.roomView) renderSessions();
+    else if (state.batchMode) renderBatchSessions();
+  });
   el.btnNew.addEventListener("click", openNewChatDialog);
   el.btnSettings.addEventListener("click", openSettings);
   el.btnLore.addEventListener("click", openLoreDialog);
+  el.btnBatchDelete.addEventListener("click", openBatchMode);
   el.btnTheme.addEventListener("click", toggleTheme);
   el.btnAddProvider.addEventListener("click", addProviderRow);
+  if (el.btnAddImageModel) el.btnAddImageModel.addEventListener("click", addImageModelRow);
+  if (el.btnSd) el.btnSd.addEventListener("click", toggleSdEngine);
+  if (el.btnTopbarToggle) el.btnTopbarToggle.addEventListener("click", toggleTopbar);
+  if (el.btnAddMyProvider) el.btnAddMyProvider.addEventListener("click", addMyProvider);
+  if (el.btnAddMyImage) el.btnAddMyImage.addEventListener("click", addMyImage);
+  if (el.btnUserSettingsClose) el.btnUserSettingsClose.addEventListener("click", function () {
+    el.dialog.close();
+    renderProviderBar();
+  });
   el.btnConfigSave.addEventListener("click", saveConfig);
   el.btnConfigCancel.addEventListener("click", function () { if (guardDiscard()) { clearDirty(); el.dialog.close(); } });
   el.input.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); onSend(); }
     if (e.key === "Escape") { el.input.blur(); }
   });
+  el.input.addEventListener("input", function () { scheduleDraftSave(); autosizeInput(); });
   if (el.btnNav) el.btnNav.addEventListener("click", toggleNav);
   if (el.overlay) el.overlay.addEventListener("click", closeNav);
   if (el.btnLogout) el.btnLogout.addEventListener("click", doLogout);
   if (el.btnUsers) el.btnUsers.addEventListener("click", openUserDialog);
   if (el.btnJump) el.btnJump.addEventListener("click", jumpBottom);
-  if (el.messages) el.messages.addEventListener("scroll", updateJumpBtn);
+  if (el.messages) el.messages.addEventListener("scroll", onMessagesScroll);
   if (el.btnUserCreate) el.btnUserCreate.addEventListener("click", createUser);
   if (el.btnUserCancel) el.btnUserCancel.addEventListener("click", function () { el.userDialog.close(); });
   // beta：多 AI 群聊
   if (el.btnNewchatCancel) el.btnNewchatCancel.addEventListener("click", function () { if (el.newchatDialog) el.newchatDialog.close(); });
   if (el.btnNewchatCreate) el.btnNewchatCreate.addEventListener("click", confirmNewChat);
+  if (el.newchatBack) el.newchatBack.addEventListener("click", function () { if (state.newChat) renderPickRoots(); });
+  if (el.btnNewchatPlain) el.btnNewchatPlain.addEventListener("click", plainNewChat);
+  if (el.btnConfirmCancel) el.btnConfirmCancel.addEventListener("click", function () { if (el.confirmDialog) el.confirmDialog.close(); });
+  if (el.btnConfirmOk) el.btnConfirmOk.addEventListener("click", function () {
+    var fn = confirmState; confirmState = null;
+    if (el.confirmDialog) el.confirmDialog.close();
+    if (fn) fn();
+  });
   if (el.btnGroupCancel) el.btnGroupCancel.addEventListener("click", function () { if (el.groupDialog) el.groupDialog.close(); });
   if (el.btnGroupCreate) el.btnGroupCreate.addEventListener("click", confirmGroup);
   if (el.btnMemClose) el.btnMemClose.addEventListener("click", function () { if (el.memDialog) el.memDialog.close(); });
@@ -281,7 +505,7 @@ function initDialogs() {
     d.addEventListener("change", markDirty);
   });
   // 轻量弹窗（属性查看 / 属性生成 / 压缩导出 / 新建对话 / 群聊 / 记忆）：点击空白直接关闭
-  [el.attrDialog, el.attrgenDialog, el.exportDialog, el.newchatDialog, el.groupDialog, el.memDialog].forEach(function (d) {
+  [el.attrDialog, el.attrgenDialog, el.exportDialog, el.newchatDialog, el.groupDialog, el.memDialog, el.confirmDialog, el.cardDetailDialog].forEach(function (d) {
     if (!d) return;
     d.addEventListener("click", function (e) { if (e.target === d) d.close(); });
   });
@@ -325,6 +549,8 @@ function init() {
     renderProviderBar();
     renderSessionList();
     renderSessionMeta();
+    updateSdEngineButton();
+    applyTopbarState();
   }).catch(function (e) {
     addErrorBar("初始化失败: " + e.message);
   });
@@ -339,13 +565,43 @@ function fetchJSON(url, opts) {
   });
 }
 
-function activeProviderName() {
+function chosenProviderId() {
   if (!state.config) return "";
-  var p = (state.config.providers || []).find(function (x) { return x.id === state.config.active_provider; });
+  var providers = state.config.providers || [];
+  if (state.role === "admin") {
+    return state.config.active_provider || (providers[0] ? providers[0].id : "");
+  }
+  var local = localStorage.getItem("flyai-provider") || "";
+  if (local && providers.some(function (p) { return p.id === local; })) return local;
+  return providers[0] ? providers[0].id : "";
+}
+function activeProvider() {
+  if (!state.config) return null;
+  var id = chosenProviderId();
+  return (state.config.providers || []).find(function (x) {
+    return x.id === id;
+  }) || null;
+}
+function activeProviderName() {
+  var p = activeProvider();
   return p ? (p.model || p.id) : "未配置提供商";
+}
+function visionEnabled() {
+  var p = activeProvider();
+  return !!(p && p.vision);
 }
 function renderProviderBar() {
   el.providerBar.textContent = "◈ " + activeProviderName();
+  syncAttachVisible();
+}
+// 📎 按钮仅视觉模型可见；切到非视觉模型时清掉待发图片
+function syncAttachVisible() {
+  if (!el.btnAttach) return;
+  el.btnAttach.classList.toggle("hidden", !visionEnabled());
+  if (!visionEnabled() && state.pendingImages.length) {
+    state.pendingImages = [];
+    renderPendingImages();
+  }
 }
 
 /* ==== 属性数值（点击 AI 头像查看，不常驻显示） ==== */
@@ -394,7 +650,7 @@ function downloadConversation() {
   fetch("/api/sessions/" + s.id + "/export", { headers: authHeaders() })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (obj) { downloadJSON(obj, (obj.name || "conversation") + ".json"); })
-    .catch(function (e) { alert("导出对话失败: " + e.message); });
+    .catch(function (e) { showToast("导出对话失败: " + e.message, "err"); });
 }
 function openCompressDialog() {
   var s = currentSession(); if (!s) return;
@@ -406,13 +662,49 @@ function openCompressDialog() {
   if (el.exportDialog.showModal) el.exportDialog.showModal();
   fetchJSON("/api/sessions/" + s.id + "/compress", { method: "POST" }).then(function (res) {
     el.exportSub.textContent = "压缩完成，已写入当前会话副本（库主卡不受影响）。";
-    el.exportBody.innerHTML = renderCompressSummary(res.character, res.world);
+    if (res.room) {
+      el.exportBody.innerHTML = renderRoomCompressSummary(res.members || {}, res.world);
+    } else {
+      el.exportBody.innerHTML = renderCompressSummary(res.character, res.world);
+      if (res.character && res.character.name) el.btnExportPublish.classList.remove("hidden");
+    }
     el.btnExportDownload.classList.remove("hidden");
-    if (res.character && res.character.name) el.btnExportPublish.classList.remove("hidden");
+    // 重新拉取会话：房间成员副本写入后刷新头部与当前窗口，后续对话即可感知压缩设定
+    selectSession(s.id);
   }).catch(function (e) {
     el.exportSub.textContent = "压缩失败";
     el.exportBody.innerHTML = '<div class="msg-bar err">' + escapeHtml(e.message) + "</div>";
   });
+}
+function renderRoomCompressSummary(members, world) {
+  var h = '<div class="cs-block"><b>👥 各参与者压缩结果</b>';
+  var ids = Object.keys(members);
+  if (!ids.length) h += "<div class='sub'>（无）</div>";
+  ids.forEach(function (mid) {
+    var c = members[mid];
+    var seat = (state.roomMembers || []).find(function (m) { return m.id === mid; });
+    var name = (seat && memberDisplayName(seat)) || (c && cardDisplayName(c)) || mid;
+    h += '<div class="cs-member"><div>' + escapeHtml(name) + "</div>";
+    if (c && c.intro) h += "<div class='sub'>简介：" + escapeHtml(c.intro) + "</div>";
+    if (c && c.background) h += "<div class='sub'>经历：" + escapeHtml(c.background) + "</div>";
+    if (c && c.table && c.table.length) {
+      h += "<ul class='cs-list'>" + c.table.map(function (t) {
+        return "<li><b>" + escapeHtml(t.title || "") + "</b>：" + escapeHtml(t.content || "") + "</li>";
+      }).join("") + "</ul>";
+    }
+    h += "</div>";
+  });
+  h += "</div><div class='cs-block'><b>🌍 压缩后的世界观</b>";
+  if (world) {
+    if (world.content) h += "<div class='sub'>" + escapeHtml(world.content) + "</div>";
+    if (world.table && world.table.length) {
+      h += "<ul class='cs-list'>" + world.table.map(function (t) {
+        return "<li><b>" + escapeHtml(t.title || "") + "</b>：" + escapeHtml(t.content || "") + "</li>";
+      }).join("") + "</ul>";
+    }
+  } else h += "<div class='sub'>（无）</div>";
+  h += "</div>";
+  return h;
 }
 function renderCompressSummary(char, world) {
   var h = '<div class="cs-block"><b>📇 压缩后的角色卡</b>';
@@ -438,15 +730,15 @@ function renderCompressSummary(char, world) {
 function publishConversationCharacter() {
   var s = currentSession(); if (!s) return;
   fetchJSON("/api/sessions/" + s.id + "/character/publish", { method: "POST" }).then(function (res) {
-    alert("已保存为角色卡：" + (res.character.name || ""));
-  }).catch(function (e) { alert(e.message); });
+    showToast("已保存为角色卡：" + (res.character.name || ""), "ok");
+  }).catch(function (e) { showToast(e.message, "err"); });
 }
 function forkSessionChar() {
   var s = currentSession(); if (!s) return;
   fetchJSON("/api/sessions/" + s.id + "/character/fork", { method: "POST" }).then(function (res) {
     state.scopeCache[s.id] = { char: res.character, world: state.scopeCache[s.id] && state.scopeCache[s.id].world, scoped: true };
     renderSessionMeta();
-  }).catch(function (e) { alert(e.message); });
+  }).catch(function (e) { showToast(e.message, "err"); });
 }
 function restoreSessionChar() {
   var s = currentSession(); if (!s) return;
@@ -454,14 +746,14 @@ function restoreSessionChar() {
   fetchJSON("/api/sessions/" + s.id + "/character/override", { method: "DELETE" }).then(function (res) {
     state.scopeCache[s.id] = { char: res.character, world: state.scopeCache[s.id] && state.scopeCache[s.id].world, scoped: false };
     renderSessionMeta();
-  }).catch(function (e) { alert(e.message); });
+  }).catch(function (e) { showToast(e.message, "err"); });
 }
 function exportSessionChar() {
   var s = currentSession(); if (!s) return;
   fetch("/api/sessions/" + s.id + "/character/export", { headers: authHeaders() })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (obj) { downloadJSON(obj, ((obj.data && obj.data.name) || "character") + ".json"); })
-    .catch(function (e) { alert("导出失败: " + e.message); });
+    .catch(function (e) { showToast("导出失败: " + e.message, "err"); });
 }
 function editSessionChar() {
   var s = currentSession(); if (!s) return;
@@ -491,7 +783,7 @@ function doAttrgenConfirm() {
 }
 function sessionAttrGen() {
   var s = currentSession(); if (!s) return;
-  var char = effectiveChar(); if (!char) { alert("请先绑定角色再生成属性"); return; }
+  var char = effectiveChar(); if (!char) { showToast("请先绑定角色再生成属性"); return; }
   var sc = state.scopeCache[s.id]; var scoped = sc ? sc.scoped : false;
   var payload = { name: char.name || "", intro: char.intro || "", background: char.background || "", existing: char.attributes || [] };
   fetchJSON("/api/gen/attributes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then(function (res) {
@@ -501,17 +793,17 @@ function sessionAttrGen() {
         var upd = JSON.parse(JSON.stringify(char)); upd.attributes = merged;
         fetchJSON("/api/sessions/" + s.id + "/character", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ character: upd }) }).then(function (rr) {
           state.scopeCache[s.id] = { char: rr.character, world: state.scopeCache[s.id] && state.scopeCache[s.id].world, scoped: true };
-          renderSessionMeta(); alert("已添加属性到会话副本");
-        }).catch(function (e) { alert(e.message); });
+          renderSessionMeta(); showToast("已添加属性到会话副本", "ok");
+        }).catch(function (e) { showToast(e.message, "err"); });
       } else {
         var lib = JSON.parse(JSON.stringify(char)); lib.attributes = merged;
         fetchJSON("/api/characters/" + char.id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lib) }).then(function () {
           if (state.scopeCache[s.id]) state.scopeCache[s.id].char.attributes = merged;
           return refreshLore();
-        }).then(function () { renderSessionMeta(); alert("已添加属性到角色卡"); }).catch(function (e) { alert(e.message); });
+        }).then(function () { renderSessionMeta(); showToast("已添加属性到角色卡", "ok"); }).catch(function (e) { showToast(e.message, "err"); });
       }
     });
-  }).catch(function (e) { alert("生成失败: " + e.message); });
+  }).catch(function (e) { showToast("生成失败: " + e.message, "err"); });
 }
 
 /* ==== 角色扮演内容渲染（分段 + 样式区分）==== */
@@ -519,20 +811,60 @@ function rpEnabled() {
   var rp = state.config && state.config.roleplay;
   return !!(rp && rp.format_enabled);
 }
-// 把动作() / 内心________ / 对白"「」" 分别包成带样式的 span
+// 把动作() / 内心 _…_ / 对白「」 分别包成带样式的 span
 function renderRp(text) {
-  var re = /____([\s\S]*?)____|(「[^」\n]*」|“[^”\n]*”|"[^"\n]*"|『[^』\n]*』)|（[^（）\n]*）|\([^()\n]*\)/g;
-  var html = "", last = 0, m;
-  while ((m = re.exec(text)) !== null) {
-    html += escapeHtml(text.slice(last, m.index));
-    var tok = m[0], cls;
-    if (tok.indexOf("____") === 0) cls = "dlg-thought";
-    else if (tok.charAt(0) === "「" || tok.charAt(0) === "“" || tok.charAt(0) === '"' || tok.charAt(0) === "『") cls = "dlg-speech";
-    else cls = "dlg-action";
-    html += '<span class="' + cls + '">' + escapeHtml(tok) + "</span>";
-    last = m.index + m[0].length;
+  // 旧语法 ____…____（多字节、跨行）+ 对白/动作仍走正则；单下划线内心用扫描器
+  // 按下标做边界检查（避免 lookbehind 的旧浏览器兼容问题，也能接在其他 token 之后）。
+  var tokenRe = /____[\s\S]*?____|「[^」\n]*」|“[^”\n]*”|"[^"\n]*"|『[^』\n]*』|（[^（）\n]*）|\([^()\n]*\)/;
+  var innerRe = /^[^\s_](?:[^_\n]*?[^\s_])?_/;
+  var html = "", last = 0, i = 0;
+
+  function emitPlainUntil(end) {
+    if (end > last) html += escapeHtml(text.slice(last, end));
   }
-  html += escapeHtml(text.slice(last));
+  // 单下划线内心：同 CommonMark「词内不生效」防 my_var 误染；不跨行，首尾不贴空白。
+  // 返回 token 长度，不匹配返回 0。
+  function thoughtLen(pos) {
+    if (pos > 0 && /[A-Za-z0-9]/.test(text.charAt(pos - 1))) return 0;
+    var inner = innerRe.exec(text.slice(pos + 1));
+    if (!inner) return 0;
+    var afterClose = pos + 1 + inner[0].length;
+    if (afterClose < text.length && /[A-Za-z0-9]/.test(text.charAt(afterClose))) return 0;
+    return afterClose - pos;
+  }
+
+  while (i < text.length) {
+    var tlen = 0;
+    if (text.charAt(i) === "_") {
+      // 四下划线旧语法优先；否则试新单下划线
+      tokenRe.lastIndex = i;
+      var lm = tokenRe.exec(text);
+      if (lm && lm.index === i) tlen = lm[0].length;
+      else tlen = thoughtLen(i);
+      if (tlen) {
+        emitPlainUntil(i);
+        html += '<span class="dlg-thought">' + escapeHtml(text.slice(i, i + tlen)) + "</span>";
+      }
+    } else {
+      tokenRe.lastIndex = i;
+      var m = tokenRe.exec(text);
+      if (m && m.index === i) {
+        tlen = m[0].length;
+        emitPlainUntil(i);
+        var tok = m[0];
+        var c0 = tok.charAt(0);
+        var cls = (c0 === "「" || c0 === "“" || c0 === '"' || c0 === "『") ? "dlg-speech" : "dlg-action";
+        html += '<span class="' + cls + '">' + escapeHtml(tok) + "</span>";
+      }
+    }
+    if (tlen) {
+      i += tlen;
+      last = i;
+    } else {
+      i += 1;
+    }
+  }
+  emitPlainUntil(text.length);
   return html;
 }
 // 设置 assistant 内容区；启用格式则渲染段落样式，否则纯文本
@@ -552,17 +884,66 @@ function defaultToolReq() {
 
 /* ==== 会话 ==== */
 function renderSessionList() {
+  if (el.searchWrap) el.searchWrap.classList.toggle("hidden", !!state.roomView);
+  if (state.batchMode) { renderBatchSessions(); return; }
   if (state.roomView) { renderRoomNav(); return; }
   renderSessions();
 }
 /* 顶层：会话/房间列表 */
+function filteredSessions() {
+  var q = state.sessionQuery.trim().toLowerCase();
+  if (!q) return state.sessions;
+  return state.sessions.filter(function (s) {
+    return (s.title || "新会话").toLowerCase().indexOf(q) >= 0;
+  });
+}
 function renderSessions() {
   el.sessionList.innerHTML = "";
-  state.sessions.forEach(function (s) {
+  if (el.searchWrap) el.searchWrap.classList.remove("hidden");
+  var shown = filteredSessions();
+  if (!shown.length) {
+    var empty = document.createElement("div");
+    empty.className = "list-empty";
+    empty.textContent = state.sessionQuery.trim() ? "没有匹配的会话" : "还没有会话，点 ＋ 新建";
+    el.sessionList.appendChild(empty);
+    return;
+  }
+  shown.forEach(function (s) {
     var item = document.createElement("div");
     item.className = "session-item" + (s.id === state.currentSessionId ? " active" : "");
-    item.textContent = (s.title || "新会话") + (s.threads && s.threads.length ? " 👥" : "");
-    item.addEventListener("click", function () { selectSession(s.id); });
+    var titleSpan = document.createElement("span");
+    titleSpan.className = "session-title";
+    titleSpan.textContent = (s.title || "新会话") + (s.threads && s.threads.length ? " 👥" : "");
+    titleSpan.addEventListener("dblclick", function (ev) { ev.stopPropagation(); startRename(item, s); });
+    // 触屏没有双击：长按标题 500ms 重命名
+    var pressTimer = null;
+    var longPressed = false;
+    titleSpan.addEventListener("pointerdown", function (ev) {
+      if (ev.pointerType === "mouse" || state.busy) return;
+      pressTimer = setTimeout(function () {
+        pressTimer = null;
+        longPressed = true;
+        startRename(item, s);
+      }, 500);
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach(function (t) {
+      titleSpan.addEventListener(t, function () {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      });
+    });
+    item.appendChild(titleSpan);
+    item.addEventListener("click", function () {
+      if (longPressed) { longPressed = false; return; }
+      selectSession(s.id);
+    });
+
+    var pin = document.createElement("span");
+    pin.className = "pin" + (s.pinned ? " on" : "");
+    pin.textContent = "📌";
+    pin.title = s.pinned ? "取消置顶" : "置顶";
+    pin.addEventListener("click", function (ev) { ev.stopPropagation(); togglePin(s.id); });
+    item.appendChild(pin);
+
     var del = document.createElement("span");
     del.className = "del";
     del.textContent = "🗑";
@@ -570,6 +951,165 @@ function renderSessions() {
     item.appendChild(del);
     el.sessionList.appendChild(item);
   });
+}
+
+/* 内联重命名 */
+function startRename(item, s) {
+  if (state.busy) return;
+  var titleSpan = item.querySelector(".session-title");
+  var inp = document.createElement("input");
+  inp.type = "text"; inp.className = "rename-input"; inp.value = s.title || "";
+  titleSpan.replaceWith(inp);
+  inp.focus(); inp.select();
+  var finished = false;
+  function commit(save) {
+    if (finished) return;
+    finished = true;
+    var v = inp.value.trim();
+    inp.replaceWith(titleSpan);
+    if (save && v && v !== s.title) patchSessionMeta(s.id, { title: v });
+    else renderSessionList();
+  }
+  inp.addEventListener("keydown", function (e) {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  });
+  inp.addEventListener("blur", function () { commit(true); });
+  inp.addEventListener("click", function (ev) { ev.stopPropagation(); });
+}
+/* 置顶 / 重命名统一 PATCH */
+function togglePin(sid) {
+  var s = null;
+  state.sessions.forEach(function (x) { if (x.id === sid) s = x; });
+  patchSessionMeta(sid, { pinned: !!(s && s.pinned) ? false : true });
+}
+function patchSessionMeta(sid, body) {
+  fetchJSON("/api/sessions/" + sid, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(function () { return refreshSessions(); })
+    .catch(function (e) { showToast("操作失败: " + e.message, "err"); });
+}
+
+/* ==== 批量删除会话 ==== */
+function openBatchMode() {
+  if (state.busy) return;
+  state.batchMode = true;
+  state.roomView = false;
+  state.batchPicked = {};
+  renderSessionList();
+}
+function exitBatchMode() {
+  state.batchMode = false;
+  state.batchPicked = {};
+  renderSessionList();
+}
+function renderBatchSessions() {
+  el.sessionList.innerHTML = "";
+
+  // 顶部工具条：标题 + 退出
+  var bar = document.createElement("div");
+  bar.className = "batch-bar";
+  var title = document.createElement("span");
+  title.className = "batch-title";
+  title.textContent = "批量删除";
+  var exit = document.createElement("button");
+  exit.type = "button";
+  exit.className = "footer-btn small-btn";
+  exit.textContent = "✕ 退出";
+  exit.addEventListener("click", exitBatchMode);
+  bar.appendChild(title);
+  bar.appendChild(exit);
+  el.sessionList.appendChild(bar);
+
+  filteredSessions().forEach(function (s) {
+    var item = document.createElement("div");
+    item.className = "session-item batch-item" + (state.batchPicked[s.id] ? " picked" : "");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "batch-cb";
+    cb.checked = !!state.batchPicked[s.id];
+    var label = document.createElement("span");
+    label.className = "batch-label";
+    label.textContent = (s.title || "新会话") + (s.threads && s.threads.length ? " 👥" : "");
+    item.appendChild(cb);
+    item.appendChild(label);
+    function toggle() {
+      if (state.batchPicked[s.id]) delete state.batchPicked[s.id];
+      else state.batchPicked[s.id] = true;
+      renderBatchSessions();
+    }
+    item.addEventListener("click", function (ev) {
+      if (ev.target === cb) return;  // checkbox 自身 change 会触发
+      toggle();
+    });
+    cb.addEventListener("change", function () {
+      if (!cb.checked && state.batchPicked[s.id]) delete state.batchPicked[s.id];
+      else if (cb.checked) state.batchPicked[s.id] = true;
+      renderBatchSessions();
+    });
+    el.sessionList.appendChild(item);
+  });
+
+  // 底部操作条
+  var n = Object.keys(state.batchPicked).length;
+  var actions = document.createElement("div");
+  actions.className = "batch-actions";
+  var allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.className = "footer-btn small-btn";
+  allBtn.textContent = n === state.sessions.length && n > 0 ? "全不选" : "全选";
+  allBtn.addEventListener("click", function () {
+    if (n === state.sessions.length && n > 0) state.batchPicked = {};
+    else {
+      state.batchPicked = {};
+      state.sessions.forEach(function (s) { state.batchPicked[s.id] = true; });
+    }
+    renderBatchSessions();
+  });
+  var delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "footer-btn small-btn danger";
+  delBtn.textContent = "删除选中 (" + n + ")";
+  delBtn.disabled = n === 0;
+  delBtn.addEventListener("click", confirmBatchDelete);
+  actions.appendChild(allBtn);
+  actions.appendChild(delBtn);
+  el.sessionList.appendChild(actions);
+}
+function confirmBatchDelete() {
+  var ids = Object.keys(state.batchPicked);
+  if (!ids.length) return;
+  if (!confirm("确认删除选中的 " + ids.length + " 个会话？此操作不可恢复。")) return;
+  fetchJSON("/api/sessions/batch-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: ids }),
+  }).then(function (r) {
+    if (state.batchPicked[state.currentSessionId]) {
+      state.currentSessionId = null;
+      clearMessages();
+    }
+    state.batchMode = false;
+    state.batchPicked = {};
+    return refreshSessions().then(function () {
+      addBatchNotice((r && r.deleted) || 0);
+    });
+  });
+}
+function addBatchNotice(n) {
+  // 简单的一次性提示条
+  var bar = document.createElement("div");
+  bar.className = "batch-notice";
+  bar.textContent = "已删除 " + n + " 个会话";
+  document.body.appendChild(bar);
+  setTimeout(function () { bar.classList.add("show"); }, 10);
+  setTimeout(function () {
+    bar.classList.remove("show");
+    setTimeout(function () { bar.remove(); }, 300);
+  }, 2200);
 }
 /* 房间内：左侧栏展示该房间的各窗口（每 AI 私聊 + 群聊 + 建群/记忆），顶部返回键 */
 function renderRoomNav() {
@@ -587,7 +1127,15 @@ function renderRoomNav() {
   state.roomThreads.forEach(function (t) {
     var item = document.createElement("div");
     item.className = "session-item thread-item" + (t.id === state.currentThreadId ? " active" : "");
-    item.textContent = (t.kind === "group" ? "👥 " : "💬 ") + (t.title || "窗口");
+    // 私聊窗口按成员角色卡实时解析显示名（别名优先）；群聊窗口用建群时的标题
+    var winLabel = t.title || "窗口";
+    if (t.kind !== "group" && t.member_ids && t.member_ids.length) {
+      var seat0 = (state.roomMembers || []).find(function (m) {
+        return m.id === t.member_ids[0] && !m.is_user;
+      });
+      if (seat0) winLabel = memberDisplayName(seat0);
+    }
+    item.textContent = (t.kind === "group" ? "👥 " : "💬 ") + winLabel;
     item.addEventListener("click", function () { loadThread(t.id); });
     el.sessionList.appendChild(item);
   });
@@ -636,13 +1184,33 @@ function isScoped() {
   return sc ? !!sc.scoped : false;
 }
 
+// 手机端顶栏折叠：折叠后只留 ☰ + 会话标题 + 展开键（仅窄屏生效）
+function toggleTopbar() {
+  state.topbarCollapsed = !state.topbarCollapsed;
+  localStorage.setItem("flyai-topbar-collapsed", state.topbarCollapsed ? "1" : "0");
+  applyTopbarState();
+}
+function applyTopbarState() {
+  if (!el.topbar) return;
+  el.topbar.classList.toggle("collapsed", !!state.topbarCollapsed);
+  if (el.btnTopbarToggle) {
+    el.btnTopbarToggle.textContent = state.topbarCollapsed ? "⌄" : "⌃";
+    el.btnTopbarToggle.title = state.topbarCollapsed ? "展开顶栏" : "折叠顶栏";
+  }
+}
+
 function renderSessionMeta() {
   var s = currentSession();
-  if (!s) { el.sessionMeta.innerHTML = '<span class="chip">新建会话以开始</span>'; return; }
+  if (!s) {
+    el.sessionMeta.innerHTML = '<span class="chip">新建会话以开始</span>';
+    el.topbarTitle.textContent = "新会话";
+    return;
+  }
+  el.topbarTitle.textContent = s.title || "新会话";
 
   if (roomMode()) {
     // 房间：不显示「绑定单个角色」的选择器，仅展示成员与世界观
-    var names = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).map(function (m) { return m.name; });
+    var names = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).map(memberDisplayName);
     var world = effectiveWorld();
     var worldChip = document.createElement("span");
     worldChip.className = "chip";
@@ -653,9 +1221,18 @@ function renderSessionMeta() {
     roomChip.innerHTML = "👥 多AI房间" + (names.length ? " · " + escapeHtml(names.join("、")) : "");
     el.sessionMeta.appendChild(roomChip);
     el.sessionMeta.appendChild(worldChip);
+    el.sessionMeta.appendChild(makeTokenChip());
+    // R8：用户扮演的自设（persona）选择器
+    var seat = roomUserSeat();
+    var personaChip = document.createElement("span");
+    personaChip.className = "chip";
+    personaChip.innerHTML = "🎭 扮演 " + charSelectOptions("persona", (seat && seat.character_id) || "", "本人");
+    el.sessionMeta.appendChild(personaChip);
     el.sessionMeta.appendChild(makeMetaActions(null, false));
     var selW = el.sessionMeta.querySelector('select[data-world]');
     if (selW) selW.addEventListener("change", function () { updateSessionBinding("world_id", selW.value); });
+    var selP = el.sessionMeta.querySelector('select[data-persona]');
+    if (selP) selP.addEventListener("change", function () { setPersona(seat, selP.value); });
     return;
   }
 
@@ -680,12 +1257,22 @@ function renderSessionMeta() {
   el.sessionMeta.appendChild(avatarBtn);
   el.sessionMeta.appendChild(charChip);
   el.sessionMeta.appendChild(worldChip);
+  el.sessionMeta.appendChild(makeTokenChip());
   el.sessionMeta.appendChild(makeMetaActions(char, scoped));
 
   var selChar = el.sessionMeta.querySelector('select[data-char]');
   var selWorld = el.sessionMeta.querySelector('select[data-world]');
   if (selChar) selChar.addEventListener("change", function () { updateSessionBinding("character_id", selChar.value); });
   if (selWorld) selWorld.addEventListener("change", function () { updateSessionBinding("world_id", selWorld.value); });
+}
+
+function makeTokenChip() {
+  var chip = document.createElement("span");
+  chip.className = "chip token-chip";
+  var total = state.currentSessionId ? intOr(state.tokenTotals[state.currentSessionId], 0) : 0;
+  chip.textContent = total ? "🪙 " + fmtNum(total) + " tokens" : "";
+  chip.title = "本次打开页面以来该会话的累计 token（刷新即清零）";
+  return chip;
 }
 
 function makeMetaActions(char, scoped) {
@@ -728,9 +1315,9 @@ var MAP_ACT_TYPE = {
 function charSelectOptions(kind, selected, emptyLabel) {
   var opts = ['<option value="">' + emptyLabel + '</option>'];
   state.characters.forEach(function (c) {
-    opts.push('<option value="' + c.id + '"' + (c.id === selected ? " selected" : "") + '>' + escapeHtml(c.name || "未命名") + '</option>');
+    opts.push('<option value="' + c.id + '"' + (c.id === selected ? " selected" : "") + '>' + escapeHtml(cardDisplayName(c)) + '</option>');
   });
-  return '<select data-char>' + opts.join("") + '</select>';
+  return '<select data-' + kind + '>' + opts.join("") + '</select>';
 }
 function worldSelectOptions(kind, selected, emptyLabel) {
   var opts = ['<option value="">' + emptyLabel + '</option>'];
@@ -770,58 +1357,275 @@ function updateSessionBinding(field, value) {
   }).catch(function (e) { addErrorBar("设置失败: " + e.message); });
 }
 
-function openNewChatDialog() {
-  if (state.busy) return;
-  el.newchatPick.innerHTML = "";
-  el.newchatTitle.value = "";
-  el.newchatMsg.textContent = "";
-  var chars = state.characters || [];
-  if (!chars.length) {
-    el.newchatMsg.textContent = "角色库还没有角色卡片，请先在「🧩 内容」里创建。";
-    el.newchatMsg.className = "msg-bar err";
-  }
-  chars.forEach(function (c) {
-    var lbl = document.createElement("label");
-    lbl.className = "f-label toggle check-line";
-    var cb = document.createElement("input"); cb.type = "checkbox"; cb.value = c.id;
-    lbl.appendChild(cb);
-    lbl.appendChild(document.createTextNode(" " + escapeHtml(c.name || "未命名")));
-    el.newchatPick.appendChild(lbl);
-  });
-  safeCloseDialogs();
-  el.newchatDialog.showModal();
+/* ==== 角色卡归属/层级小工具 ==== */
+function isOwnCard(c) {
+  if (!c) return false;
+  if (c.author === state.userId) return true;
+  return state.role === "admin" && !c.author;  // admin 的旧卡 author 为空
+}
+function rootCards() {
+  return (state.characters || []).filter(function (c) { return !c.parent_id; });
+}
+function variantCards(rootId) {
+  return (state.characters || []).filter(function (c) { return c.parent_id === rootId; });
+}
+function cardDisplayName(c) { return (c && (c.alias || c.name)) || "未命名"; }
+// 房间成员的显示名：其角色卡（含副本）有别名时优先别名，否则回退座位名
+function memberDisplayName(m) {
+  if (!m) return "";
+  var ch = m.character_id ? characterOf(m.character_id) : null;
+  return ch ? cardDisplayName(ch) : (m.name || "");
 }
 
+/* ==== 通用二次确认弹窗 ==== */
+var confirmState = null;
+function askConfirm(opts) {
+  el.confirmTitle.textContent = opts.title || "请确认";
+  el.confirmText.textContent = opts.text || "";
+  el.btnConfirmOk.textContent = opts.okLabel || "确认";
+  el.btnConfirmOk.className = "btn " + (opts.danger === false ? "primary" : "danger");
+  confirmState = opts.onOk || null;
+  if (el.confirmDialog.open) el.confirmDialog.close();
+  el.confirmDialog.showModal();
+}
+
+/* ==== 角色卡详情弹窗 ==== */
+function cardDetailHtml(c) {
+  var h = '<div class="cd-head">' + makeAvatarHtml(c, false) +
+    '<div class="cd-head-info"><h3>' + escapeHtml(c.name || "未命名") + "</h3>" +
+    '<div class="sub">' + (c.alias ? "别名：" + escapeHtml(c.alias) + " · " : "") +
+    "标识：" + escapeHtml((c.author || "?") + ":" + c.id) + "</div></div></div>";
+  if (c.intro) h += '<h4>简介</h4><div class="cd-sec">' + escapeHtml(c.intro) + "</div>";
+  if (c.background) h += '<h4>经历</h4><div class="cd-sec">' + escapeHtml(c.background) + "</div>";
+  if (c.system_prompt) h += '<h4>系统级提示词</h4><div class="cd-sec">' + escapeHtml(c.system_prompt) + "</div>";
+  if (c.attributes && c.attributes.length) {
+    h += '<h4>属性</h4><ul class="cd-list">' + c.attributes.map(function (a) {
+      return "<li>" + escapeHtml(a.label || a.key) + "（" + escapeHtml(a.key) + "）· 初值 " +
+        escapeHtml(a.initial !== undefined ? a.initial : 0) + "</li>";
+    }).join("") + "</ul>";
+  }
+  if (c.table && c.table.length) {
+    h += '<h4>内容表</h4><ul class="cd-list">' + c.table.map(function (t) {
+      return "<li><b>" + escapeHtml(t.title || "") + "</b>：" + escapeHtml(t.content || "") + "</li>";
+    }).join("") + "</ul>";
+  }
+  if (c.prompt_format) h += '<h4>对白格式要求</h4><div class="cd-sec">' + escapeHtml(c.prompt_format) + "</div>";
+  if (c.prompt_tools) h += '<h4>工具使用要求</h4><div class="cd-sec">' + escapeHtml(c.prompt_tools) + "</div>";
+  return h;
+}
+function openCardDetail(c, actions) {
+  el.cardDetailBody.innerHTML = cardDetailHtml(c) +
+    '<div class="dialog-actions" id="card-detail-actions"></div>';
+  var acts = document.getElementById("card-detail-actions");
+  (actions || []).forEach(function (a) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "btn " + (a.cls || "");
+    b.textContent = a.label;
+    b.addEventListener("click", function () { if (a.onClick) a.onClick(); });
+    acts.appendChild(b);
+  });
+  var close = document.createElement("button");
+  close.type = "button"; close.className = "btn primary"; close.textContent = "关 闭";
+  close.addEventListener("click", function () { el.cardDetailDialog.close(); });
+  acts.appendChild(close);
+  if (el.cardDetailDialog.open) el.cardDetailDialog.close();
+  el.cardDetailDialog.showModal();
+}
+function forkToMine(id, after) {
+  fetchJSON("/api/characters/" + id + "/fork", { method: "POST" })
+    .then(function (c) {
+      return refreshLore().then(function () {
+        el.cardDetailDialog.close();
+        if (after) after(c);
+      });
+    })
+    .catch(function (e) { showToast("复制失败: " + e.message, "err"); });
+}
+
+/* ==== 新建对话：根角色卡 → 副本选择 ==== */
+function openNewChatDialog() {
+  if (state.busy) return;
+  state.newChat = { selected: {}, rootId: "" };
+  el.newchatTitle.value = "";
+  el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
+  safeCloseDialogs();
+  el.newchatDialog.showModal();
+  renderPickRoots();
+}
+function renderPickRoots() {
+  state.newChat.rootId = "";
+  el.newchatBack.classList.add("hidden");
+  el.newchatSub.textContent = "选择一个根角色卡，再选择主卡或其副本；可跨根卡多选，多个角色即多 AI 群聊房间。";
+  el.newchatPick.innerHTML = "";
+  var roots = rootCards();
+  if (!roots.length) {
+    el.newchatPick.innerHTML = '<div class="sub">角色库还没有角色卡片，请先在「🧩 内容」里创建。</div>';
+  } else {
+    var grid = document.createElement("div");
+    grid.className = "root-grid";
+    roots.forEach(function (c) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "root-card";
+      var n = variantCards(c.id).length;
+      b.innerHTML = makeAvatarHtml(c, true) +
+        '<span class="rc-name">' + escapeHtml(c.name || "未命名") + "</span>" +
+        '<span class="rc-meta">' + (isOwnCard(c) ? "" : "🌐 ") + n + " 个副本</span>";
+      b.addEventListener("click", function () { renderPickVariants(c.id); });
+      grid.appendChild(b);
+    });
+    el.newchatPick.appendChild(grid);
+  }
+  renderPickTray();
+}
+function renderPickVariants(rootId) {
+  state.newChat.rootId = rootId;
+  el.newchatBack.classList.remove("hidden");
+  var root = characterOf(rootId);
+  el.newchatSub.textContent = "选择「" + cardDisplayName(root) + "」的主卡或副本，可在详情中查看卡片数据。";
+  el.newchatPick.innerHTML = "";
+  var list = document.createElement("div");
+  list.className = "variant-list";
+  list.appendChild(variantRow(root, true));
+  variantCards(rootId).forEach(function (v) { list.appendChild(variantRow(v, false)); });
+  el.newchatPick.appendChild(list);
+  renderPickTray();
+}
+function variantRow(c, isRoot) {
+  var row = document.createElement("div");
+  row.className = "variant-row";
+  var own = isOwnCard(c);
+  var selected = !!state.newChat.selected[c.id];
+  var pick = document.createElement("button");
+  pick.type = "button"; pick.className = "vr-pick" + (selected ? " selected" : "");
+  pick.innerHTML =
+    '<span class="vr-tag' + (isRoot ? "" : " variant") + '">' + (isRoot ? "主卡" : "副本") + "</span>" +
+    makeAvatarHtml(c, true) +
+    '<span class="vr-name">' + escapeHtml(cardDisplayName(c)) + "</span>" +
+    (selected ? '<span class="vr-check">✓</span>' : "");
+  pick.addEventListener("click", function () { togglePick(c.id); });
+  row.appendChild(pick);
+
+  var more = document.createElement("button");
+  more.type = "button"; more.className = "flat-btn"; more.textContent = "...";
+  more.title = "查看卡片数据";
+  more.addEventListener("click", function () { openCardDetail(c, pickActions(c)); });
+  row.appendChild(more);
+
+  var del = document.createElement("button");
+  del.type = "button"; del.className = "flat-btn danger" + (own ? "" : " hidden");
+  del.textContent = "删除"; del.title = "删除";
+  del.addEventListener("click", function () { confirmDeleteCard(c, isRoot); });
+  row.appendChild(del);
+  return row;
+}
+function pickActions(c) {
+  var picked = !!state.newChat.selected[c.id];
+  var acts = [{
+    label: picked ? "取消选择" : "选择此卡", cls: "primary",
+    onClick: function () { togglePick(c.id); el.cardDetailDialog.close(); },
+  }];
+  if (!isOwnCard(c)) {
+    acts.push({
+      label: "复制为我的角色卡", cls: "",
+      onClick: function () {
+        forkToMine(c.id, function (nc) { openCardDetail(nc, pickActions(nc)); });
+      },
+    });
+  }
+  return acts;
+}
+function togglePick(id) {
+  var sel = state.newChat.selected;
+  if (sel[id]) delete sel[id];
+  else { var c = characterOf(id); if (c) sel[id] = c; }
+  if (state.newChat.rootId) renderPickVariants(state.newChat.rootId);
+  else renderPickRoots();
+}
+function renderPickTray() {
+  var ids = Object.keys(state.newChat.selected);
+  el.newchatTray.classList.toggle("hidden", !ids.length);
+  el.newchatTray.innerHTML = '<span class="tray-label">已选：</span>';
+  ids.forEach(function (id) {
+    var c = state.newChat.selected[id];
+    var chip = document.createElement("span");
+    chip.className = "pick-chip";
+    chip.textContent = cardDisplayName(c);
+    var x = document.createElement("button");
+    x.type = "button"; x.className = "pick-chip-x"; x.textContent = "✕";
+    x.title = "移除";
+    x.addEventListener("click", function () { togglePick(id); });
+    chip.appendChild(x);
+    el.newchatTray.appendChild(chip);
+  });
+  el.btnNewchatCreate.disabled = !ids.length;
+}
+function confirmDeleteCard(c, isRoot) {
+  askConfirm({
+    title: "删除角色卡",
+    text: isRoot
+      ? "确定删除根角色卡「" + cardDisplayName(c) + "」？其全部副本也会一并删除，且无法恢复。"
+      : "确定删除副本「" + cardDisplayName(c) + "」？此操作无法恢复。",
+    okLabel: "删除",
+    onOk: function () { doDeleteCard(c.id); },
+  });
+}
+function doDeleteCard(id) {
+  fetchJSON("/api/characters/" + id, { method: "DELETE" })
+    .then(function () { return refreshLore(); })
+    .then(function () {
+      if (state.newChat.rootId === id) renderPickRoots();
+      else if (state.newChat.rootId) renderPickVariants(state.newChat.rootId);
+      else renderPickRoots();
+      renderSessionMeta();
+    })
+    .catch(function (e) {
+      el.newchatMsg.textContent = "删除失败: " + e.message;
+      el.newchatMsg.className = "msg-bar err";
+    });
+}
 function confirmNewChat() {
   var title = el.newchatTitle.value.trim();
-  var ids = [];
-  el.newchatPick.querySelectorAll("input:checked").forEach(function (cb) { ids.push(cb.value); });
+  var ids = Object.keys(state.newChat.selected);
+  if (!ids.length) return;
   el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
-  var doCreate = function (url, body) {
-    return fetchJSON(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-      .then(function (s) {
-        state.currentSessionId = s.id;
-        state.currentAttrs = null;
-        el.newchatDialog.close();
-        return refreshSessions();
-      }).then(function () {
-        selectSession(state.currentSessionId);
-        el.input.focus();
-      });
-  };
-  if (ids.length >= 1) {
-    // 多 AI 房间：每个角色一条私聊窗口，后续可建群聊
-    doCreate("/api/rooms", { title: title, character_ids: ids })
-      .catch(function (e) { el.newchatMsg.textContent = "创建房间失败: " + e.message; el.newchatMsg.className = "msg-bar err"; });
-  } else {
-    // 单 AI 对话（沿用旧接口）
-    doCreate("/api/sessions", { title: title })
-      .catch(function (e) { el.newchatMsg.textContent = "创建失败: " + e.message; el.newchatMsg.className = "msg-bar err"; });
-  }
+  fetchJSON("/api/rooms", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: title, character_ids: ids }),
+  }).then(function (s) {
+    state.currentSessionId = s.id;
+    state.currentAttrs = null;
+    el.newchatDialog.close();
+    return refreshSessions();
+  }).then(function () {
+    selectSession(state.currentSessionId);
+    el.input.focus();
+  }).catch(function (e) {
+    el.newchatMsg.textContent = "创建房间失败: " + e.message;
+    el.newchatMsg.className = "msg-bar err";
+  });
+}
+function plainNewChat() {
+  var title = el.newchatTitle.value.trim();
+  el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
+  fetchJSON("/api/sessions", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: title }),
+  }).then(function (s) {
+    state.currentSessionId = s.id; state.currentAttrs = null;
+    el.newchatDialog.close();
+    return refreshSessions();
+  }).then(function () {
+    selectSession(state.currentSessionId); el.input.focus();
+  }).catch(function (e) {
+    el.newchatMsg.textContent = "创建失败: " + e.message;
+    el.newchatMsg.className = "msg-bar err";
+  });
 }
 
 function selectSession(id) {
   if (state.busy) return;
+  state.batchMode = false;
+  state.batchPicked = {};
   state.currentSessionId = id;
   renderSessionList();
   closeNav();
@@ -843,6 +1647,7 @@ function selectSession(id) {
       loadThread(state.roomThreads[0].id);
     } else {
       renderHistory(s.messages || []);
+      restoreDraft();
     }
   }).catch(function (e) { addErrorBar("加载会话失败: " + e.message); });
 }
@@ -854,6 +1659,28 @@ function memberOf(idOrName) {
 }
 function roomMode() {
   return !!(state.roomThreads && state.roomThreads.length);
+}
+/* R8：用户扮演自设（persona）—— 存在用户座位的 character_id 上，复用库角色卡 */
+function roomUserSeat() {
+  return (state.roomMembers || []).find(function (m) { return m.is_user; });
+}
+function personaChar() {
+  var seat = roomUserSeat();
+  if (!seat || !seat.character_id) return null;
+  return characterOf(seat.character_id) || null;
+}
+function setPersona(seat, characterId) {
+  if (!seat || !state.currentSessionId) return;
+  fetchJSON("/api/rooms/" + state.currentSessionId + "/members/" + seat.id, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ character_id: characterId }),
+  }).then(function (m) {
+    var idx = state.roomMembers.findIndex(function (x) { return x.id === seat.id; });
+    if (idx >= 0) state.roomMembers[idx] = m;
+    renderSessionMeta();
+    // 刷新当前窗口，让已有用户气泡也按新扮演角色重标注
+    if (state.currentThreadId) loadThread(state.currentThreadId);
+  }).catch(function (e) { addErrorBar("设置自设失败: " + e.message); });
 }
 
 function renderThreads() {
@@ -869,7 +1696,8 @@ function loadThread(tid) {
     var idx = -1;
     state.roomThreads.forEach(function (x, i) { if (x.id === tid) idx = i; });
     if (idx >= 0) state.roomThreads[idx] = t; else state.roomThreads.push(t);
-    renderHistory(t.messages || []);
+    renderHistory(t.messages || [], t.edits || {});
+    restoreDraft();
   }).catch(function (e) { addErrorBar("加载窗口失败: " + e.message); });
 }
 
@@ -882,7 +1710,7 @@ function openGroupDialog() {
     lbl.className = "f-label toggle check-line";
     var cb = document.createElement("input"); cb.type = "checkbox"; cb.value = m.id;
     lbl.appendChild(cb);
-    lbl.appendChild(document.createTextNode(" " + escapeHtml(m.name)));
+    lbl.appendChild(document.createTextNode(" " + escapeHtml(memberDisplayName(m))));
     el.groupPick.appendChild(lbl);
   });
   if (!state.currentSessionId || !ais.length) {
@@ -917,7 +1745,7 @@ function openMemDialog() {
     var ch = characterOf(m.character_id);
     var wrap = document.createElement("div");
     wrap.className = "mem-block";
-    wrap.innerHTML = '<div class="mem-head">' + makeAvatarHtml(ch || m, true) + ' <b>' + escapeHtml(m.name) + "</b></div>";
+    wrap.innerHTML = '<div class="mem-head">' + makeAvatarHtml(ch || m, true) + ' <b>' + escapeHtml(memberDisplayName(m)) + "</b></div>";
     var memBox = document.createElement("textarea");
     memBox.className = "mem-memory"; memBox.rows = 2;
     memBox.placeholder = "该 AI 在本房间的记忆（各窗口共享）"; memBox.value = m.memory || "";
@@ -962,30 +1790,27 @@ function onDeleteSession(id) {
   });
 }
 
-function clearMessages() { el.messages.innerHTML = ""; state.currentAssistant = null; }
+function clearMessages() {
+  el.messages.innerHTML = "";
+  state.currentAssistant = null;
+  state.turnNodes = {};
+}
 
 /* ==== 内容管理 ==== */
 function openLoreDialog() {
   clearDirty();
+  state.loreNav = "";
   el.loreBody.innerHTML = "<p class='sub'>管理角色卡与世界观。会话左上角可选用的角色/世界观。</p>";
   renderLoreSections();
   el.loreDialog.showModal();
 }
 function renderLoreSections() {
-  var charItems = (state.characters || []).map(function (c) {
-    return loreRow("characters", c.id, c.name || "未命名", c.avatar, (c.table || []).length + " 条内容");
-  }).join("");
   var worldItems = (state.worlds || []).map(function (w) {
     return loreRow("worlds", w.id, w.name || "未命名", w.avatar, (w.table || []).length + " 条内容");
   }).join("");
 
   el.loreBody.innerHTML =
-    "<h4>角色卡</h4>" +
-    '<div class="lore-list">' + (charItems || '<div class="lore-item"><span class="l-name">暂无角色</span></div>') + "</div>" +
-    '<div class="btn-row" style="margin-top:10px">' +
-    '<button id="lore-new-char" class="btn small">＋ 新建角色</button>' +
-    '<button id="lore-import-char" class="btn small">⇪ 导入角色</button>' +
-    "</div>" +
+    '<div id="lore-char-nav"></div>' +
     "<div class='spacer'></div>" +
     "<h4>世界观</h4>" +
     '<div class="lore-list">' + (worldItems || '<div class="lore-item"><span class="l-name">暂无世界观</span></div>') + "</div>" +
@@ -995,20 +1820,10 @@ function renderLoreSections() {
     "</div>" +
     '<div class="dialog-actions"><button id="lore-close" class="btn primary">完成</button></div>';
 
-  document.getElementById("lore-new-char").addEventListener("click", function () { newCharacter(); });
+  renderLoreCharNav();
   document.getElementById("lore-new-world").addEventListener("click", function () { newWorld(); });
-  document.getElementById("lore-import-char").addEventListener("click", function () { importLore("characters"); });
   document.getElementById("lore-import-world").addEventListener("click", function () { importLore("worlds"); });
   document.getElementById("lore-close").addEventListener("click", function () { el.loreDialog.close(); });
-  document.querySelectorAll("[data-char-edit]").forEach(function (b) {
-    b.addEventListener("click", function () { editCharacter(b.getAttribute("data-char-edit")); });
-  });
-  document.querySelectorAll("[data-char-export]").forEach(function (b) {
-    b.addEventListener("click", function () { exportLore("characters", b.getAttribute("data-char-export")); });
-  });
-  document.querySelectorAll("[data-char-del]").forEach(function (b) {
-    b.addEventListener("click", function () { deleteLore("characters", b.getAttribute("data-char-del"), "删除该角色？"); });
-  });
   document.querySelectorAll("[data-world-edit]").forEach(function (b) {
     b.addEventListener("click", function () { editWorld(b.getAttribute("data-world-edit")); });
   });
@@ -1017,6 +1832,152 @@ function renderLoreSections() {
   });
   document.querySelectorAll("[data-world-del]").forEach(function (b) {
     b.addEventListener("click", function () { deleteLore("worlds", b.getAttribute("data-world-del"), "删除该世界观？"); });
+  });
+}
+
+/* 角色卡两级导航（同新建对话选卡） */
+function renderLoreCharNav() {
+  var box = document.getElementById("lore-char-nav");
+  if (!box) return;
+  box.innerHTML = "<h4>角色卡</h4><div id='lore-char-body'></div>";
+  var body = document.getElementById("lore-char-body");
+  if (state.loreNav) renderLoreCharVariants(body, state.loreNav);
+  else renderLoreCharRoots(body);
+}
+function renderLoreCharRoots(body) {
+  var roots = rootCards();
+  var grid = document.createElement("div");
+  grid.className = "root-grid";
+  roots.forEach(function (c) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "root-card";
+    var n = variantCards(c.id).length;
+    b.innerHTML = makeAvatarHtml(c, true) +
+      '<span class="rc-name">' + escapeHtml(c.name || "未命名") + "</span>" +
+      '<span class="rc-meta">' + (isOwnCard(c) ? "" : "🌐 ") + n + " 个副本</span>";
+    b.addEventListener("click", function () { state.loreNav = c.id; renderLoreCharNav(); });
+    grid.appendChild(b);
+  });
+  var add = document.createElement("button");
+  add.type = "button"; add.className = "root-card add-tile";
+  add.innerHTML = '<span class="rc-add">＋</span><span class="rc-name">新建根角色卡</span>';
+  add.addEventListener("click", function () { newCharacter(); });
+  grid.appendChild(add);
+  body.appendChild(grid);
+
+  var row = document.createElement("div");
+  row.className = "btn-row"; row.style.marginTop = "10px";
+  var imp = document.createElement("button");
+  imp.type = "button"; imp.className = "btn small"; imp.textContent = "⇪ 导入角色";
+  imp.addEventListener("click", function () { importLore("characters"); });
+  row.appendChild(imp);
+  body.appendChild(row);
+}
+function renderLoreCharVariants(body, rootId) {
+  var root = characterOf(rootId);
+  if (!root) { state.loreNav = ""; renderLoreCharNav(); return; }
+  var bar = document.createElement("div");
+  bar.className = "dialog-actions";
+  var back = document.createElement("button");
+  back.type = "button"; back.className = "btn"; back.textContent = "← 返回根角色卡";
+  back.addEventListener("click", function () { state.loreNav = ""; renderLoreCharNav(); });
+  bar.appendChild(back);
+  body.appendChild(bar);
+
+  var sub = document.createElement("p");
+  sub.className = "sub";
+  sub.innerHTML = "「" + escapeHtml(root.name || "未命名") + "」的主卡与副本";
+  body.appendChild(sub);
+
+  var list = document.createElement("div");
+  list.className = "variant-list";
+  list.appendChild(loreVariantRow(root, true));
+  variantCards(rootId).forEach(function (v) { list.appendChild(loreVariantRow(v, false)); });
+  body.appendChild(list);
+
+  var add = document.createElement("button");
+  add.type = "button"; add.className = "btn small";
+  add.style.marginTop = "10px";
+  add.textContent = "＋ 新建副本";
+  add.addEventListener("click", function () { newVariant(rootId); });
+  body.appendChild(add);
+}
+function loreVariantRow(c, isRoot) {
+  var row = document.createElement("div");
+  row.className = "variant-row lore-variant-row";
+  var info = document.createElement("div");
+  info.className = "vr-info";
+  info.innerHTML =
+    '<span class="vr-tag' + (isRoot ? "" : " variant") + '">' + (isRoot ? "主卡" : "副本") + "</span>" +
+    makeAvatarHtml(c, true) +
+    '<span class="vr-name">' + escapeHtml(cardDisplayName(c)) + "</span>" +
+    (c.public ? '<span class="vr-public" title="已共享">🌐</span>' : "");
+  row.appendChild(info);
+
+  var actions = document.createElement("div");
+  actions.className = "l-actions";
+  var edit = document.createElement("button");
+  edit.type = "button"; edit.className = "btn small"; edit.textContent = "编辑";
+  edit.addEventListener("click", function () {
+    if (isOwnCard(c)) editCharacter(c.id);
+    else editSharedCard(c);
+  });
+  actions.appendChild(edit);
+
+  var more = document.createElement("button");
+  more.type = "button"; more.className = "flat-btn"; more.textContent = "...";
+  more.title = "查看卡片数据";
+  more.addEventListener("click", function () {
+    var acts = [];
+    if (isOwnCard(c)) {
+      acts.push({ label: "编辑", cls: "primary", onClick: function () { el.cardDetailDialog.close(); editCharacter(c.id); } });
+    } else {
+      acts.push({
+        label: "复制为我的角色卡并编辑", cls: "primary",
+        onClick: function () { forkToMine(c.id, function () { el.cardDetailDialog.close(); }); },
+      });
+    }
+    openCardDetail(c, acts);
+  });
+  actions.appendChild(more);
+
+  if (isOwnCard(c)) {
+    var del = document.createElement("button");
+    del.type = "button"; del.className = "flat-btn danger"; del.textContent = "删除";
+    del.addEventListener("click", function () {
+      askConfirm({
+        title: "删除角色卡",
+        text: isRoot
+          ? "确定删除根角色卡「" + cardDisplayName(c) + "」？其全部副本也会一并删除，且无法恢复。"
+          : "确定删除副本「" + cardDisplayName(c) + "」？此操作无法恢复。",
+        okLabel: "删除",
+        onOk: function () {
+          fetchJSON("/api/characters/" + c.id, { method: "DELETE" })
+            .then(function () { return refreshLore(); })
+            .then(function () {
+              if (isRoot) state.loreNav = "";
+              renderLoreCharNav(); renderSessionMeta();
+            })
+            .catch(function (e) { showToast("删除失败: " + e.message, "err"); });
+        },
+      });
+    });
+    actions.appendChild(del);
+  }
+  row.appendChild(actions);
+  return row;
+}
+function editSharedCard(c) {
+  askConfirm({
+    title: "共享角色卡",
+    text: "共享卡不能直接修改。是否复制为我的角色卡并编辑？",
+    okLabel: "复制并编辑", danger: false,
+    onOk: function () {
+      forkToMine(c.id, function (nc) {
+        state.loreNav = "";
+        editCharacter(nc.id);
+      });
+    },
   });
 }
 
@@ -1031,7 +1992,7 @@ function exportLore(endpoint, id) {
       a.download = (obj.name || type) + ".json";
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(a.href);
-    }).catch(function (e) { alert("导出失败: " + e.message); });
+    }).catch(function (e) { showToast("导出失败: " + e.message, "err"); });
 }
 
 function importLore(endpoint) {
@@ -1042,14 +2003,14 @@ function importLore(endpoint) {
     var reader = new FileReader();
     reader.onload = function () {
       var obj;
-      try { obj = JSON.parse(reader.result); } catch (e) { alert("JSON 解析失败"); return; }
+      try { obj = JSON.parse(reader.result); } catch (e) { showToast("JSON 解析失败", "err"); return; }
       fetchJSON("/api/" + endpoint + "/import", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(obj),
       }).then(function () { return refreshLore(); })
-        .then(function () { renderLoreSections(); renderSessionMeta(); })
-        .catch(function (e) { alert("导入失败: " + e.message); });
+        .then(function () { state.loreNav = ""; renderLoreSections(); renderSessionMeta(); })
+        .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
     };
     reader.readAsText(f);
   };
@@ -1076,12 +2037,17 @@ function makeAvatarHtml(item, small) {
 }
 
 function deleteLore(endpoint, id, msg) {
-  if (!confirm(msg)) return;
-  fetchJSON("/api/" + endpoint + "/" + id, { method: "DELETE" }).then(function () {
-    return refreshLore();
-  }).then(function () {
-    renderLoreSections();
-    renderSessionMeta();
+  askConfirm({
+    title: endpoint === "characters" ? "删除角色卡" : "删除世界观",
+    text: msg, okLabel: "删除",
+    onOk: function () {
+      fetchJSON("/api/" + endpoint + "/" + id, { method: "DELETE" }).then(function () {
+        return refreshLore();
+      }).then(function () {
+        renderLoreSections();
+        renderSessionMeta();
+      });
+    },
   });
 }
 function refreshLore() {
@@ -1093,13 +2059,32 @@ function refreshLore() {
 
 /* 角色编辑器 */
 function newCharacter() { characterEditor(null); }
+function newVariant(rootId) {
+  // 副本以主卡全部内容为初始值（id 置空、parent_id 指向根卡），
+  // table/attributes 深拷贝，避免编辑时改到缓存中的主卡
+  var root = characterOf(rootId);
+  if (!root) return;
+  var d = {};
+  Object.keys(root).forEach(function (k) { d[k] = root[k]; });
+  d.id = "";
+  d.parent_id = rootId;
+  d.alias = "";
+  d.table = (root.table || []).map(function (e) {
+    return { title: e.title, content: e.content };
+  });
+  d.attributes = (root.attributes || []).map(function (a) {
+    var o = {}; Object.keys(a).forEach(function (k) { o[k] = a[k]; }); return o;
+  });
+  characterEditor(d, false, rootId);
+}
 function editCharacter(id) { characterEditor(state.characters.find(function (c) { return c.id === id; })); }
 
-function characterEditor(c, scoped) {
+function characterEditor(c, scoped, parentId) {
   clearDirty();
   scoped = !!scoped;
   var id = c ? c.id : "";
-  el.loreBody.innerHTML = characterEditorHtml(c, scoped);
+  var parentForNew = parentId || "";
+  el.loreBody.innerHTML = characterEditorHtml(c, scoped, parentForNew);
   // 从顶部动作条（副本编辑 / 新建）进来时对话框可能尚未打开，需先展示
   if (el.loreDialog && !el.loreDialog.open) {
     safeCloseDialogs();
@@ -1114,23 +2099,31 @@ function characterEditor(c, scoped) {
     var url = id ? "/api/characters/" + id : "/api/characters";
     var method = id ? "PUT" : "POST";
     return fetchJSON(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  }, { initial: scoped ? c : null, scoped: scoped });
+  }, { initial: c || null, scoped: scoped, parentId: parentForNew });
 }
-function characterEditorHtml(c, scoped) {
+function characterEditorHtml(c, scoped, parentForNew) {
   var v = c || { name: "", avatar: "", intro: "", background: "", table: [] };
-  var title = scoped ? "编辑会话副本" : (c ? "编辑角色" : "新建角色");
+  var parentId = c ? (c.parent_id || "") : (parentForNew || "");
+  // 预填的新建副本：c 存在但 id 为空——标题按 id 判定
+  var title = scoped ? "编辑会话副本" : (v.id ? "编辑角色" : (parentId ? "新建副本" : "新建角色"));
+  var canPublish = !scoped && state.role === "admin" && !!(c && isOwnCard(c));
   return (
     '<div class="dialog-actions"><button class="btn" id="ed-back">← 返回列表</button></div>' +
     "<h3>" + title + "</h3>" +
     (scoped ? '<p class="sub">此副本仅供当前会话使用，修改不影响角色库主卡。</p>' : "") +
+    (parentId ? '<p class="sub">此卡是根角色卡的副本，根卡 id：' + escapeHtml(parentId) + "</p>" : "") +
     '<div style="display:flex;gap:16px;align-items:flex-start;margin:12px 0">' +
     '<div id="ed-avatar" class="avatar-placeholder" title="点击上传头像">' +
     (v.avatar ? '<img id="ed-avatar-img" src="' + v.avatar + '" alt="" />' : "<span>点击上传<br/>头像</span>") + "</div>" +
     '<div style="flex:1">' +
     '<label class="f-label">角色名称<input type="text" id="ed-name" value="' + escapeAttr(v.name) + '" /></label>' +
+    (scoped ? "" : '<label class="f-label">别名（副本列表中显示，留空则用角色名称）<input type="text" id="ed-alias" value="' + escapeAttr(v.alias || "") + '" /></label>') +
     "</div></div>" +
     '<label class="f-label">角色简介<textarea id="ed-intro" rows="2">' + escapeHtml(v.intro) + "</textarea></label>" +
     '<label class="f-label">角色经历<textarea id="ed-bg" rows="4">' + escapeHtml(v.background) + "</textarea></label>" +
+    "<div class='spacer'></div>" +
+    "<h4>系统级提示词</h4>" +
+    '<label class="f-label">高优先级系统指令，直接约束模型行为（留空则不注入）<textarea id="ed-system" rows="3">' + escapeHtml(v.system_prompt || "") + "</textarea></label>" +
     "<div class='spacer'></div>" +
     "<h4>属性（AI 每回合可维护的数值，显示在点击头像处）</h4>" +
     '<div id="ed-attrs"></div>' +
@@ -1144,7 +2137,9 @@ function characterEditorHtml(c, scoped) {
     "<h4>内容表（AI 通过工具可查询）</h4>" +
     '<div id="ed-tables"></div>' +
     '<button class="btn small" id="ed-add-entry">＋ 添加条目</button>' +
-    '<div class="dialog-actions"><button class="btn" id="ed-cancel">取消</button><button class="btn primary" id="ed-save">保存角色</button></div>' +
+    '<div class="dialog-actions"><button class="btn" id="ed-cancel">取消</button>' +
+    (canPublish ? '<button class="btn" id="ed-publish">' + (c.public ? "🌐 取消共享发布" : "🌐 发布共享") + "</button>" : "") +
+    '<button class="btn primary" id="ed-save">保存角色</button></div>' +
     '<div id="ed-msg" class="msg-bar"></div>' +
     '<input type="file" id="ed-file" accept="image/*" class="hidden" />'
   );
@@ -1185,6 +2180,7 @@ function worldEditorHtml(w) {
 
 function bindEditorCommon(kind, id, saveFn, opts) {
   opts = opts || {};
+  var v;
   if (opts.initial) v = opts.initial;
   else v = kind === "character"
     ? (id ? state.characters.find(function (c) { return c.id === id; }) : {})
@@ -1218,7 +2214,7 @@ function bindEditorCommon(kind, id, saveFn, opts) {
           .then(function (res) {
             openAttrgenDialog(res.attributes || [], function (attrs) { attrs.forEach(function (a) { addAttrRow(attrsEl, a); }); });
           })
-          .catch(function (e) { alert("生成失败: " + e.message); })
+          .catch(function (e) { showToast("生成失败: " + e.message, "err"); })
           .finally(function () { genAttrBtn.disabled = false; });
       });
     }
@@ -1237,7 +2233,7 @@ function bindEditorCommon(kind, id, saveFn, opts) {
       fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd }).then(function (r) { return r.json(); }).then(function (res) {
         avatarEl.innerHTML = '<img src="' + res.url + '" alt="" />';
         avatarEl.dataset.avatar = res.url;
-      }).catch(function (e) { alert("上传失败: " + e.message); });
+      }).catch(function (e) { showToast("上传失败: " + e.message, "err"); });
     });
   }
 
@@ -1245,12 +2241,19 @@ function bindEditorCommon(kind, id, saveFn, opts) {
     var payload = { table: readEntries(tablesEl) };
     payload.prompt_format = document.getElementById("ed-format").value;
     payload.prompt_tools = document.getElementById("ed-tools").value;
+    var sysEl = document.getElementById("ed-system");
+    if (sysEl) payload.system_prompt = sysEl.value;
     if (kind === "character") {
       payload.name = document.getElementById("ed-name").value;
       payload.intro = document.getElementById("ed-intro").value;
       payload.background = document.getElementById("ed-bg").value;
       payload.avatar = (avatarEl && avatarEl.dataset.avatar) || (v.avatar || "");
       if (attrsEl) payload.attributes = readAttrs(attrsEl);
+      if (!opts.scoped) {
+        var aliasEl = document.getElementById("ed-alias");
+        payload.alias = aliasEl ? aliasEl.value : "";
+        payload.parent_id = v.parent_id || opts.parentId || "";
+      }
     } else {
       payload.name = document.getElementById("ed-name").value;
       payload.content = document.getElementById("ed-intro").value;
@@ -1267,10 +2270,34 @@ function bindEditorCommon(kind, id, saveFn, opts) {
         renderSessionMeta();
         if (el.loreDialog) el.loreDialog.close();
       } else {
-        return refreshLore().then(function () { renderLoreSections(); renderSessionMeta(); });
+        return refreshLore().then(function () {
+          // 保存后回到该卡所在层级（根卡→其副本列表；副本→所属根卡列表）
+          if (res && res.id) state.loreNav = res.parent_id || res.id;
+          renderLoreSections(); renderSessionMeta();
+        });
       }
     }).catch(function (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg-bar err"; });
   });
+
+  // 发布 / 取消发布共享（仅 admin 自己的卡）
+  var pubBtn = document.getElementById("ed-publish");
+  if (pubBtn) {
+    pubBtn.addEventListener("click", function () {
+      var unpublish = !!v.public;
+      pubBtn.disabled = true;
+      fetchJSON("/api/characters/" + id + "/" + (unpublish ? "unpublish" : "publish"), { method: "POST" })
+        .then(function () { return refreshLore(); })
+        .then(function () {
+          state.loreNav = v.parent_id || v.id;
+          renderLoreSections(); renderSessionMeta();
+        })
+        .catch(function (e) {
+          var msg = document.getElementById("ed-msg");
+          msg.textContent = "发布失败: " + e.message; msg.className = "msg-bar err";
+          pubBtn.disabled = false;
+        });
+    });
+  }
 }
 
 function entryRowHtml(title, content) {
@@ -1330,26 +2357,190 @@ function readEntries(container) {
   return out;
 }
 
-/* ==== 历史渲染 ==== */
-function renderHistory(messages) {
+/* ==== 历史渲染（按「轮」组织：一条用户消息 + 它的回复组）==== */
+function currentThread() {
+  var list = state.roomThreads || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === state.currentThreadId) return list[i];
+  }
+  return null;
+}
+function currentThreadIsDM() {
+  var t = currentThread();
+  return !t || t.kind === "dm";  // 无窗口上下文时按 dm
+}
+
+function renderHistory(messages, edits) {
   clearMessages();
-  var openToolRegion = null;
-  messages.forEach(function (m) {
-    if (m.hidden) return;  // 群聊自评「无需发言」：不展示但保留在历史
-    if (m.role === "user") { openToolRegion = null; el.messages.appendChild(makeUserBubble(m.content || "")); }
-    else if (m.role === "assistant") { openToolRegion = appendAssistantMsg(m); }
-    else if (m.role === "tool") {
-      if (openToolRegion) appendToolResultCard(openToolRegion, { id: m.tool_call_id, name: m.name, ok: (m.ok !== undefined) ? m.ok : !String(m.content||"").startsWith("[工具错误]"), output: m.content });
+  var canEdit = currentThreadIsDM();
+  // 搜索卡 → 后续精选结果的配对（按候选编号取原图 URL）
+  var pixivReveal = buildPixivReveal(messages);
+  var i = 0;
+  // 开头游离消息（正常不会有）
+  while (i < messages.length && messages[i].role !== "user") {
+    renderFlatNonUser(messages[i], null);
+    i++;
+  }
+  while (i < messages.length) {
+    var user = messages[i];
+    var anchor = user.id;
+    var end = messages.length;
+    for (var j = i + 1; j < messages.length; j++) {
+      if (messages[j].role === "user") { end = j; break; }
     }
-  });
+    var userEl = makeUserBubble(user.content || "", user.images, anchor);
+    el.messages.appendChild(userEl);
+    state.turnNodes[anchor] = { userEl: userEl, editing: false };
+
+    var openToolRegion = null;
+    for (var k = i + 1; k < end; k++) {
+      var m = messages[k];
+      // 群聊自评「无需发言」不展示；旧版 bug 曾误隐「带工具调用的空白中间消息」，
+      // 那种消息必须渲染，否则工具结果（图片）无处挂载
+      var hiddenToolMsg = m.role === "assistant" && m.tool_calls && m.tool_calls.length;
+      if (m.hidden && !hiddenToolMsg) {
+        if (m.role === "assistant") openToolRegion = null;
+        continue;
+      }
+      if (m.role === "assistant") {
+        openToolRegion = appendAssistantMsg(m, anchor).toolRegion;
+      } else if (m.role === "tool") {
+        if (openToolRegion) {
+          appendToolResultCard(openToolRegion, {
+            id: m.tool_call_id, name: m.name,
+            ok: (m.ok !== undefined) ? m.ok : !String(m.content || "").startsWith("[工具错误]"),
+            output: m.content,
+            revealed: pixivReveal[m.tool_call_id] || null,
+          });
+        }
+      }
+    }
+    if (canEdit) addTurnControls(anchor, (edits || {})[anchor]);
+    i = end;
+  }
   scrollToBottom();
 }
-function makeUserBubble(text) {
+// 渲染不属于任何轮的 assistant/tool 游离消息（兜底）
+function renderFlatNonUser(m, anchor) {
+  // appendAssistantMsg 内部已插入 DOM；tool 游离消息无挂载点，不展示
+  if (m.role === "assistant") appendAssistantMsg(m, anchor);
+}
+
+// 一轮的编辑入口 / 分页器 / 重生成操作行（仅 dm）
+function addTurnControls(anchor, entry) {
+  var node = state.turnNodes[anchor];
+  // ✏️：hover 用户气泡显现，打开统一内联编辑器
+  var editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "turn-edit-btn";
+  editBtn.title = "编辑这条消息";
+  editBtn.textContent = "✏️";
+  editBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    openUserEditor(anchor);
+  });
+  node.userEl.appendChild(editBtn);
+  // 点击整条用户消息才亮出 ✏️（无 hover 的触屏入口）；点气泡外任意处收起
+  node.userEl.addEventListener("click", function (e) {
+    if (node.editing) return;
+    if (e.target.closest &&
+        e.target.closest(".turn-edit-btn, .chat-img, a, .inline-edit, .inline-edit-actions")) return;
+    activateEditEntry(node.userEl);
+  });
+
+  if (entry) {
+    // 编辑版本分页：放在用户气泡内末尾
+    if (entry.edits.length > 1) {
+      node.userEl.appendChild(
+        makePager(entry.edit_active + 1, entry.edits.length,
+          function () { switchTurn(anchor, entry.edit_active - 1, null); },
+          function () { switchTurn(anchor, entry.edit_active + 1, null); })
+      );
+    }
+    // 回复版本分页：放在该轮回复组之后
+    var slot = entry.edits[entry.edit_active];
+    if (slot.reply_variants.length > 1) {
+      el.messages.appendChild(
+        makePager(slot.reply_active + 1, slot.reply_variants.length,
+          function () { switchTurn(anchor, null, slot.reply_active - 1); },
+          function () { switchTurn(anchor, null, slot.reply_active + 1); })
+      );
+    }
+  }
+
+  // 🔄 回复组操作行：重新生成（打开同一编辑器，原文直接发送即重生成）
+  var actions = document.createElement("div");
+  actions.className = "turn-actions";
+  var regen = document.createElement("button");
+  regen.type = "button";
+  regen.className = "btn small ghost";
+  regen.textContent = "🔄 重新生成";
+  regen.addEventListener("click", function () { openUserEditor(anchor); });
+  actions.appendChild(regen);
+  el.messages.appendChild(actions);
+}
+
+// 同时只允许一条用户消息亮出编辑键
+function activateEditEntry(userEl) {
+  var current = document.querySelector(".msg.user.edit-on");
+  if (current && current !== userEl) current.classList.remove("edit-on");
+  userEl.classList.add("edit-on");
+}
+function deactivateEditEntries() {
+  var nodes = document.querySelectorAll(".msg.user.edit-on");
+  Array.prototype.forEach.call(nodes, function (n) { n.classList.remove("edit-on"); });
+}
+
+function makePager(active, total, goPrev, goNext) {
+  var pager = document.createElement("div");
+  pager.className = "turn-pager";
+  var prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "pager-btn";
+  prev.textContent = "‹";
+  prev.disabled = active <= 1;
+  prev.addEventListener("click", goPrev);
+  var label = document.createElement("span");
+  label.className = "pager-label";
+  label.textContent = active + " / " + total;
+  var next = document.createElement("button");
+  next.type = "button";
+  next.className = "pager-btn";
+  next.textContent = "›";
+  next.disabled = active >= total;
+  next.addEventListener("click", goNext);
+  pager.appendChild(prev);
+  pager.appendChild(label);
+  pager.appendChild(next);
+  return pager;
+}
+
+function makeUserBubble(text, images, anchor) {
   var wrap = document.createElement("div");
   wrap.className = "msg user";
+  if (anchor) wrap.dataset.userId = anchor;
+  // 用户扮演自设时，气泡上方标注扮演的角色头像与名字
+  var p = personaChar();
+  if (p) {
+    var label = document.createElement("div");
+    label.className = "us-label";
+    label.innerHTML = makeAvatarHtml(p, true) + '<span class="us-name">' + escapeHtml(p.name || "你") + "</span>";
+    wrap.appendChild(label);
+  }
   var bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;
+  if (text) {
+    var textEl = document.createElement("div");
+    textEl.className = "bubble-text";
+    textEl.textContent = text;
+    bubble.appendChild(textEl);
+  }
+  (images || []).forEach(function (img) {
+    var im = document.createElement("img");
+    im.className = "chat-img";
+    im.src = imageDataUrl(img);
+    bubble.appendChild(im);
+  });
   wrap.appendChild(bubble);
   return wrap;
 }
@@ -1398,9 +2589,10 @@ function makeAssistantContainer() {
     a.chev.textContent = a.open ? "▾" : "▸";
   };
   a.setSpeaker = function (name, member) {
-    a.speakerName = name || "AI";
     a.head.classList.remove("hidden");
     var ch = member && member.character_id ? characterOf(member.character_id) : null;
+    // 角色卡有别名时优先显示别名
+    a.speakerName = ch ? cardDisplayName(ch) : (name || "AI");
     a.idEl.innerHTML =
       makeAvatarHtml(ch || member || null, true) +
       '<span class="spk-name">' + escapeHtml(a.speakerName) + "</span>";
@@ -1415,14 +2607,20 @@ function makeAssistantContainer() {
 function ensureAssistant() {
   if (state.currentAssistant) return state.currentAssistant;
   var a = makeAssistantContainer();
-  el.messages.appendChild(a.container);
+  // 旧轮编辑/重生成：插在该轮与下一轮之间；普通发送：追加到底
+  if (state.streamInsertBefore) {
+    el.messages.insertBefore(a.container, state.streamInsertBefore);
+  } else {
+    el.messages.appendChild(a.container);
+  }
   state.currentAssistant = a;
   if (roomMode() && !a.speakerName) a.head.classList.remove("hidden");
   scrollToBottom();
   return a;
 }
-function appendAssistantMsg(m) {
+function appendAssistantMsg(m, anchor) {
   var a = makeAssistantContainer();
+  if (anchor) a.container.dataset.anchor = anchor;
   el.messages.appendChild(a.container);
   if (m.name) {
     a.setSpeaker(m.name, memberOf(m.name));
@@ -1433,59 +2631,140 @@ function appendAssistantMsg(m) {
   if (m.content) setAssistantContent(a, m.content);
   if (m.tool_calls) m.tool_calls.forEach(function (c) { appendToolCallCard(a.toolRegion, c, false); });
   scrollToBottom();
-  return a.toolRegion;
+  return a;
+}
+
+/* ==== 图片附件（视觉模型）==== */
+var IMAGE_MAX_COUNT = 4;
+var IMAGE_MAX_EDGE = 1568;   // 压缩后最长边
+var IMAGE_QUALITY = 0.82;
+var IMAGE_MAX_FILE = 8 * 1024 * 1024;
+
+function imageDataUrl(img) {
+  return "data:" + img.media_type + ";base64," + img.data;
+}
+function addImageFiles(fileList) {
+  if (!visionEnabled()) {
+    showToast("当前模型不支持图片输入，请在设置中为视觉模型勾选「视觉」");
+    return;
+  }
+  var files = Array.prototype.filter.call(fileList || [], function (f) {
+    return f.type.indexOf("image/") === 0;
+  });
+  if (!files.length) return;
+  // 串行处理，处理完一张就刷新缩略图
+  files.reduce(function (p, f) {
+    return p.then(function () {
+      if (state.pendingImages.length >= IMAGE_MAX_COUNT) {
+        showToast("每条消息最多附带 " + IMAGE_MAX_COUNT + " 张图片");
+        return;
+      }
+      return processImageFile(f).then(function (img) {
+        state.pendingImages.push(img);
+        renderPendingImages();
+      }).catch(function (e) {
+        showToast("图片处理失败（" + (f.name || "") + "）：" + e.message, "err");
+      });
+    });
+  }, Promise.resolve());
+}
+function processImageFile(file) {
+  if (file.size > IMAGE_MAX_FILE) return Promise.reject(new Error("文件超过 8MB"));
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onerror = function () { reject(new Error("读取失败")); };
+    reader.onload = function () {
+      var pic = new Image();
+      pic.onerror = function () { reject(new Error("无法解析为图片")); };
+      pic.onload = function () {
+        var scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(pic.width, pic.height));
+        var cw = Math.max(1, Math.round(pic.width * scale));
+        var ch = Math.max(1, Math.round(pic.height * scale));
+        var canvas = document.createElement("canvas");
+        canvas.width = cw;
+        canvas.height = ch;
+        var ctx2d = canvas.getContext("2d");
+        ctx2d.fillStyle = "#ffffff";  // 透明 PNG 转 JPEG 先铺白底
+        ctx2d.fillRect(0, 0, cw, ch);
+        ctx2d.drawImage(pic, 0, 0, cw, ch);
+        canvas.toBlob(function (blob) {
+          if (!blob) { reject(new Error("压缩失败")); return; }
+          var fr = new FileReader();
+          fr.onload = function () {
+            var comma = fr.result.indexOf(",");
+            resolve({ media_type: "image/jpeg", data: fr.result.slice(comma + 1) });
+          };
+          fr.onerror = function () { reject(new Error("读取失败")); };
+          fr.readAsDataURL(blob);
+        }, "image/jpeg", IMAGE_QUALITY);
+      };
+      pic.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function renderPendingImages() {
+  el.attachPreview.innerHTML = "";
+  el.attachPreview.classList.toggle("hidden", !state.pendingImages.length);
+  state.pendingImages.forEach(function (img, i) {
+    var cell = document.createElement("div");
+    cell.className = "attach-cell";
+    var pic = document.createElement("img");
+    pic.src = imageDataUrl(img);
+    cell.appendChild(pic);
+    var x = document.createElement("button");
+    x.type = "button";
+    x.className = "attach-x";
+    x.title = "移除";
+    x.textContent = "×";
+    x.addEventListener("click", function () {
+      state.pendingImages.splice(i, 1);
+      renderPendingImages();
+    });
+    cell.appendChild(x);
+    el.attachPreview.appendChild(cell);
+  });
 }
 
 /* ==== 流式聊天 ==== */
 function onSend() {
   if (state.busy) return;
   var text = el.input.value.trim();
-  if (!text) return;
+  var images = state.pendingImages.slice();
+  if (!text && !images.length) return;
   var doSend = function () {
     state.busy = true;
     el.btnSend.disabled = true;
     el.btnStop.classList.remove("hidden");
     el.input.disabled = true;
-    el.messages.appendChild(makeUserBubble(text));
+    el.messages.appendChild(makeUserBubble(text, images));
     el.input.value = "";
+    clearDraft();
+    autosizeInput();
+    // 已发图片清空待发区
+    state.pendingImages = [];
+    renderPendingImages();
+    // 失败恢复：暂存本次内容；成功结束后由 done 清除
+    state.pendingSend = { text: text, images: images };
+    // 发送即视为贴底跟随
+    state.stickBottom = true;
     // 每个 AI 各自一条卡片：流式期间按 speaker 事件新建，不预建占位
     state.currentAssistant = null;
     state.currentSpeaker = null;
     scrollToBottom();
-    state.abortController = new AbortController();
     var tid = state.currentThreadId ||
       ((state.roomThreads && state.roomThreads.length) ? state.roomThreads[0].id : undefined);
     var payload = {
       message: text,
       session_id: state.currentSessionId,
       thread_id: tid,
-      provider_id: (state.config && state.config.active_provider) || "",
+      provider_id: chosenProviderId(),
       tools_enabled: true,
+      images: images,
+      image_model_id: state.imageModelId || "",
+      image_engine: state.sdEngine ? "sd" : "",
     };
-    fetch("/api/chat", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(payload),
-      signal: state.abortController.signal,
-    }).then(function (resp) {
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      return readSSE(resp.body, {
-        message_start: onMsgStart,
-        speaker: onSpeaker,
-        speaker_skip: onSpeakerSkip,
-        thinking_delta: onThinkingDelta,
-        content_delta: onContentDelta,
-        tool_calls: onToolCalls,
-        tool_start: onToolStart,
-        tool_end: onToolEnd,
-        attributes: onAttributes,
-        error: onStreamError,
-        done: onDone,
-      });
-    }).catch(function (e) {
-      if (e.name !== "AbortError") addErrorBar("请求失败: " + e.message);
-      finalizeTurn();
-    });
+    postChatSSE(payload);
   };
   if (!state.currentSessionId) {
     fetchJSON("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
@@ -1494,6 +2773,36 @@ function onSend() {
   } else { doSend(); }
 }
 function onStop() { if (state.abortController) state.abortController.abort(); }
+
+// SSE 通道共用（普通发送 / 历史编辑 / 重新生成）
+function postChatSSE(payload) {
+  state.abortController = new AbortController();
+  return fetch("/api/chat", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+    signal: state.abortController.signal,
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return readSSE(resp.body, {
+      message_start: onMsgStart,
+      speaker: onSpeaker,
+      speaker_skip: onSpeakerSkip,
+      thinking_delta: onThinkingDelta,
+      content_delta: onContentDelta,
+      tool_calls: onToolCalls,
+      tool_start: onToolStart,
+      tool_end: onToolEnd,
+      attributes: onAttributes,
+      error: onStreamError,
+      done: onDone,
+    });
+  }).catch(function (e) {
+    if (e.name === "AbortError") { finalizeTurn(); return; }
+    // 网络层失败（请求未成功发出）：文字图片回填，不丢字
+    restoreFailedSend("请求失败: " + e.message);
+  });
+}
 
 function readSSE(body, handlers) {
   if (!body) return Promise.resolve();
@@ -1567,6 +2876,7 @@ function onThinkingDelta(data) {
 }
 function onContentDelta(data) {
   var a = ensureAssistant(); if (!a) return;
+  a.contentEl.classList.add("streaming-cursor");
   setAssistantContent(a, a.rawContent + (data.text || ""));
   scrollToBottom();  // 不强制：用户上翻时停留在原位
 }
@@ -1589,11 +2899,170 @@ function onToolStart(data) {
   var tstatus = card.querySelector(".tstatus"); tstatus.innerHTML = "";
   tstatus.appendChild(spin); tstatus.appendChild(document.createTextNode(data.status_text || ("正在调用 " + data.name)));
 }
+// 从工具输出中提取图片标记 [图片已生成]/[图片] <url>
+function extractGeneratedImage(text) {
+  var m = /\[(?:图片已生成|图片)\]\s*(\S+)/.exec(text || "");
+  return m ? m[1] : "";
+}
+// 从工具输出中提取 [图片参数] 单行 JSON（看图器按生图方式展示）
+function extractImageMeta(text) {
+  var m = /^\[图片参数\]\s*(\{.*\})\s*$/m.exec(text || "");
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch (e) { return null; }
+}
+// 图片标记输出：卡片只渲染图片，不显示任何文本
+function isImageMarkerText(text) {
+  return /^\[(?:图片已生成|图片)\]/.test(text || "");
+}
+function makeGeneratedImage(url, meta) {
+  var img = document.createElement("img");
+  img.className = "gen-img";
+  img.src = url;
+  img.alt = "AI 生成图片";
+  img._imgMeta = meta || null;
+  return img;
+}
+
+/* ==== P 站搜图：候选墙 + 毛玻璃 → 原图揭示 ==== */
+function isPixivCandidatesText(text) {
+  return /^\[P站候选\]/.test(text || "");
+}
+function isPixivPicksText(text) {
+  return /^\[P站精选\]/.test(text || "");
+}
+// [候] <编号> <pid> <url>
+function parsePixivCands(text) {
+  var out = [];
+  var re = /\[候\]\s+(\d+)\s+(\d+)\s+(\S+)/g, m;
+  while ((m = re.exec(text || ""))) {
+    out.push({ index: parseInt(m[1], 10), pid: m[2], url: m[3] });
+  }
+  return out;
+}
+// [选] <编号> <pid> <url>
+function parsePixivPicks(text) {
+  var out = [];
+  var re = /\[选\]\s+(\d+)\s+(\d+)\s+(\S+)/g, m;
+  while ((m = re.exec(text || ""))) {
+    out.push({ index: parseInt(m[1], 10), pid: m[2], url: m[3] });
+  }
+  return out;
+}
+// 从全部消息中建立 搜索工具消息id -> {候选编号: 原图URL}
+function buildPixivReveal(messages) {
+  var map = {};
+  var cur = null;
+  (messages || []).forEach(function (m) {
+    if (m.role !== "tool") return;
+    if (m.name === "search_pixiv") {
+      cur = m.tool_call_id;
+      map[cur] = {};
+    } else if (m.name === "pick_pixiv" && cur) {
+      parsePixivPicks(m.content).forEach(function (p) {
+        map[cur][p.index] = p.url;
+      });
+    }
+  });
+  return map;
+}
+function makePixivGrid(cands, revealed, live) {
+  // live=true：未精选项渲染模糊缩略图；false：未精选项为无网络请求的毛玻璃占位
+  var grid = document.createElement("div");
+  grid.className = "pixiv-grid";
+  cands.forEach(function (c) {
+    var item = document.createElement("figure");
+    item.className = "px-item";
+    item.dataset.index = String(c.index);
+    var frame = document.createElement("div");
+    frame.className = "px-frame";
+    var finalUrl = revealed ? revealed[c.index] : null;
+    if (finalUrl) {
+      frame.appendChild(makePxImg(finalUrl, false, c.pid));
+      frame.classList.add("revealed");
+      item.classList.add("picked");
+    } else if (live) {
+      frame.appendChild(makePxImg(c.url, true, c.pid));
+    } else {
+      var frost = document.createElement("div");
+      frost.className = "px-img px-frost";
+      frame.appendChild(frost);
+    }
+    var link = document.createElement("a");
+    link.className = "px-link";
+    link.href = "https://www.pixiv.net/artworks/" + c.pid;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "P站 ↗";
+    frame.appendChild(link);
+    item.appendChild(frame);
+    grid.appendChild(item);
+  });
+  return grid;
+}
+function makePxImg(src, blur, pid) {
+  var img = document.createElement("img");
+  img.className = "px-img " + (blur ? "px-blur" : "px-revealed");
+  img.src = src;
+  img.alt = "Pixiv 插画 " + pid;
+  img.addEventListener("click", function () {
+    if (!img.classList.contains("px-blur")) window.open(img.src, "_blank");
+  });
+  return img;
+}
+// 精选原图到达：在最近的候选墙对应位置替换为原图，加载完成后去除模糊
+function revealPixivPicks(picks) {
+  var grids = el.messages.querySelectorAll(".pixiv-grid");
+  var grid = grids.length ? grids[grids.length - 1] : null;
+  if (!grid) return;
+  picks.forEach(function (p) {
+    var item = grid.querySelector('.px-item[data-index="' + p.index + '"]');
+    if (!item || item.classList.contains("picked")) return;
+    var frame = item.querySelector(".px-frame");
+    var old = frame.querySelector(".px-img");
+    var img = makePxImg(p.url, true, p.pid);  // 原图加载完成前保持模糊
+    function clear() {
+      img.classList.remove("px-blur");
+      img.classList.add("px-revealed");
+      frame.classList.add("revealed");
+      item.classList.add("picked");
+    }
+    if (img.complete && img.naturalWidth) clear();
+    else img.addEventListener("load", clear);
+    frame.insertBefore(img, old);
+    if (old) old.remove();
+  });
+}
 function onToolEnd(data) {
   var card = findCard(data.id); if (!card) return;
   card.classList.add(data.ok ? "ok" : "err");
   card.querySelector(".tstatus").textContent = data.ok ? "✓ 完成" : "✗ 失败";
-  if (data.preview) { var pre = document.createElement("div"); pre.className = "tpreview"; pre.textContent = data.preview; card.appendChild(pre); }
+  if (isPixivCandidatesText(data.preview)) {
+    // 候选缩略图：全部毛玻璃遮盖，等待 AI 筛选后取原图
+    var cands = parsePixivCands(data.preview);
+    if (cands.length) {
+      card.querySelector(".tstatus").textContent =
+        "✓ 找到 " + cands.length + " 张候选，AI 筛选中…";
+      card.appendChild(makePixivGrid(cands, null, true));
+    }
+  } else if (isPixivPicksText(data.preview)) {
+    // 精选原图到达：去掉对应候选位置的模糊展示原图（本卡仅留状态）
+    revealPixivPicks(parsePixivPicks(data.preview));
+  } else {
+    var hasMarker = isImageMarkerText(data.preview);
+    if (hasMarker) {
+      // 图片标记输出：只渲染图片，指令句与路径均不展示
+      var imgUrl0 = extractGeneratedImage(data.preview);
+      if (imgUrl0) {
+        card.appendChild(
+          makeGeneratedImage(imgUrl0, extractImageMeta(data.preview)));
+      }
+    } else if (data.preview) {
+      var pre = document.createElement("div");
+      pre.className = "tpreview";
+      pre.textContent = data.preview;
+      card.appendChild(pre);
+    }
+  }
   scrollToBottom();  // 不强制：用户上翻时停留在原位
 }
 function appendToolResultCard(region, data) {
@@ -1602,30 +3071,373 @@ function appendToolResultCard(region, data) {
   var tname = document.createElement("div"); tname.className = "tname"; tname.textContent = "🔧 " + (data.name || data.id || "tool");
   var tstatus = document.createElement("div"); tstatus.className = "tstatus"; tstatus.textContent = data.ok ? "✓ 完成" : "✗ 失败";
   card.appendChild(tname); card.appendChild(tstatus);
-  if (data.output) { var pre = document.createElement("div"); pre.className = "tpreview"; pre.textContent = String(data.output).slice(0, 300); card.appendChild(pre); }
+  var output = data.output ? String(data.output) : "";
+  if (isPixivCandidatesText(output)) {
+    // 候选墙：已精选位置展示原图，其余以毛玻璃占位（候选文件已清理，不再请求）
+    var cands = parsePixivCands(output);
+    if (cands.length) card.appendChild(makePixivGrid(cands, data.revealed || {}, false));
+  } else if (isPixivPicksText(output)) {
+    // 精选原图已并入搜索卡网格；本卡仅显示数量
+    var n = parsePixivPicks(output).length;
+    if (n) card.querySelector(".tstatus").textContent = "✓ 已精选 " + n + " 张";
+  } else {
+    var hasMarker = isImageMarkerText(output);
+    if (hasMarker) {
+      // 图片标记输出：只渲染图片，指令句与路径均不展示
+      var imgUrl = extractGeneratedImage(output);
+      if (imgUrl) {
+        card.appendChild(makeGeneratedImage(imgUrl, extractImageMeta(output)));
+      }
+    } else if (output) {
+      var pre = document.createElement("div");
+      pre.className = "tpreview";
+      pre.textContent = output.slice(0, 300);
+      card.appendChild(pre);
+    }
+  }
   region.appendChild(card);
 }
 function findCard(id) {
   if (!state.currentAssistant) return null;
   return state.currentAssistant.toolRegion.querySelector('.tool-card[data-id="' + id + '"]');
 }
-function onStreamError(data) { addErrorBar(data.message || "发生错误"); }
-function onDone() { finalizeTurn(); }
+
+/* ==== 全屏图片查看器：放大 / 下载 / 按生图方式查看提示词 ==== */
+function openImageViewer(src, meta) {
+  el.ivImg.src = src;
+  el.ivPanel.innerHTML = "";
+  el.ivPanel.classList.remove("open");
+  el.ivInfo.classList.remove("active");
+  var hasMeta = !!(meta && (meta.prompt || meta.negative_prompt ||
+      meta.model || meta.sampler));
+  el.ivInfo.classList.toggle("hidden", !hasMeta);
+  if (hasMeta) el.ivPanel.appendChild(buildImageInfoPanel(meta));
+  el.imgViewer.classList.remove("hidden");
+}
+function closeImageViewer() {
+  el.imgViewer.classList.add("hidden");
+  el.ivPanel.classList.remove("open");
+  el.ivInfo.classList.remove("active");
+  el.ivImg.src = "";
+}
+function toggleImageInfo() {
+  var open = el.ivPanel.classList.toggle("open");
+  el.ivInfo.classList.toggle("active", open);
+}
+function downloadViewerImage() {
+  var src = el.ivImg.src;
+  if (!src) return;
+  var a = document.createElement("a");
+  a.href = src;
+  a.download = suggestImageName(src);
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+function suggestImageName(src) {
+  var dm = /^data:image\/([\w.+-]+)/i.exec(src);
+  if (dm) {
+    var ext = dm[1].toLowerCase().replace("jpeg", "jpg");
+    return "image_" + viewerStamp() + "." + ext;
+  }
+  try {
+    var base = String(new URL(src, location.href).pathname).split("/").pop();
+    if (base && /\.[A-Za-z0-9]{2,5}$/.test(base)) return base;
+  } catch (e) {}
+  return "image.jpg";
+}
+function viewerStamp() {
+  var d = new Date();
+  function p(n) { return (n < 10 ? "0" : "") + n; }
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "_" +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+// 信息面板：SD 与云端两种生图方式结构不同
+function buildImageInfoPanel(meta) {
+  var box = document.createElement("div");
+  box.className = "iv-info";
+  if (meta.engine === "sd") {
+    box.appendChild(makeInfoHeader("🖥", "Stable Diffusion",
+      meta.engine_label || "Anything V5 · 文生图"));
+    if (meta.prompt) box.appendChild(makeInfoBlock("正向提示词", meta.prompt, "iv-mono"));
+    if (meta.negative_prompt) {
+      box.appendChild(makeInfoBlock("负向提示词", meta.negative_prompt, "iv-mono"));
+    }
+    var seedText = (meta.seed === -1 || meta.seed === "-1") ? "随机" : meta.seed;
+    box.appendChild(makeInfoGrid([
+      ["尺寸", (meta.width || "?") + " × " + (meta.height || "?")],
+      ["采样步数", meta.steps],
+      ["CFG Scale", meta.cfg_scale],
+      ["采样器", meta.sampler],
+      ["调度器", meta.schedule],
+      ["种子", seedText],
+    ]));
+  } else if (meta.engine === "cloud") {
+    var isEdit = meta.mode === "img2img";
+    box.appendChild(makeInfoHeader("☁️", isEdit ? "云端图生图" : "云端生图",
+      meta.model ? "模型 " + meta.model : ""));
+    var chips = [];
+    if (meta.model) chips.push(meta.model);
+    if (meta.size) chips.push(meta.size);
+    if (chips.length) box.appendChild(makeInfoChips(chips));
+    if (meta.prompt) box.appendChild(makeInfoBlock("提示词", meta.prompt, null));
+  } else {
+    box.appendChild(makeInfoHeader("🖼", "图片信息", ""));
+    if (meta.prompt) box.appendChild(makeInfoBlock("提示词", meta.prompt, null));
+  }
+  return box;
+}
+function makeInfoHeader(icon, title, sub) {
+  var h = document.createElement("div");
+  h.className = "iv-info-head";
+  h.innerHTML =
+    '<span class="iv-info-icon">' + icon + "</span><div>" +
+    '<div class="iv-info-title">' + escapeHtml(title) + "</div>" +
+    (sub ? '<div class="iv-info-sub">' + escapeHtml(sub) + "</div>" : "") +
+    "</div>";
+  return h;
+}
+function makeInfoBlock(label, text, extraClass) {
+  var wrap = document.createElement("div");
+  wrap.className = "iv-block";
+  var bar = document.createElement("div");
+  bar.className = "iv-block-bar";
+  var lab = document.createElement("span");
+  lab.className = "iv-block-label";
+  lab.textContent = label;
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "iv-copy";
+  btn.textContent = "复制";
+  btn.addEventListener("click", function () {
+    copyText(text).then(function (ok) {
+      showToast(ok ? "已复制到剪贴板" : "复制失败，请手动选择", ok ? "ok" : "err");
+    });
+  });
+  bar.appendChild(lab);
+  bar.appendChild(btn);
+  var body = document.createElement("div");
+  body.className = "iv-block-body" + (extraClass ? " " + extraClass : "");
+  body.textContent = text;
+  wrap.appendChild(bar);
+  wrap.appendChild(body);
+  return wrap;
+}
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      function () { return true; },
+      function () { return fallbackCopy(text); });
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+function fallbackCopy(text) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) {}
+  ta.remove();
+  return ok;
+}
+function makeInfoGrid(rows) {
+  var grid = document.createElement("div");
+  grid.className = "iv-param-grid";
+  rows.forEach(function (r) {
+    if (r[1] === undefined || r[1] === null || r[1] === "") return;
+    var item = document.createElement("div");
+    item.className = "iv-param";
+    var k = document.createElement("span");
+    k.className = "iv-param-k";
+    k.textContent = r[0];
+    var v = document.createElement("span");
+    v.className = "iv-param-v";
+    v.textContent = String(r[1]);
+    item.appendChild(k);
+    item.appendChild(v);
+    grid.appendChild(item);
+  });
+  return grid;
+}
+function makeInfoChips(chips) {
+  var wrap = document.createElement("div");
+  wrap.className = "iv-chips";
+  chips.forEach(function (c) {
+    var s = document.createElement("span");
+    s.className = "iv-chip";
+    s.textContent = c;
+    wrap.appendChild(s);
+  });
+  return wrap;
+}
+function onStreamError(data) {
+  // fatal:false（如达到工具轮数上限）后还会跟一个 done 事件，不提前收尾
+  showToast(data.message || "发生错误", "err", 5000);
+  if (data.fatal !== false) finalizeTurn();
+}
+function onDone(data) {
+  recordUsage(data && data.usage);
+  finalizeTurn();
+}
+/* Token 用量：本轮 toast + 会话内累计（本页面周期，刷新归零）*/
+function recordUsage(usage) {
+  if (!usage) return;
+  var p = intOr(usage.prompt_tokens, 0), c = intOr(usage.completion_tokens, 0);
+  if (p || c) showToast("本轮 token：输入 " + fmtNum(p) + " · 输出 " + fmtNum(c), "info", 4200);
+  if (!state.currentSessionId) return;
+  var sid = state.currentSessionId;
+  state.tokenTotals[sid] = intOr(state.tokenTotals[sid], 0) + intOr(usage.total_tokens, p + c);
+  renderSessionMeta();
+}
+function intOr(v, d) {
+  v = parseInt(v, 10);
+  return isNaN(v) ? d : v;
+}
+function fmtNum(n) {
+  return String(intOr(n, 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
 function finalizeTurn() {
   var a = state.currentAssistant;
   if (a) {
     a.thinkingEl.open = false;
     a.setThinking(false);
+    a.contentEl.classList.remove("streaming-cursor");
     if (a.speakerName) a.setOpen(false);  // 群聊发言结束后折叠，点击头部展开
   }
+  state.pendingSend = null;
+  var editingAnchor = state.turnEditAnchor;
   state.currentAssistant = null;
   state.currentSpeaker = null;
+  state.streamInsertBefore = null;
+  state.turnEditAnchor = null;
   state.busy = false;
   el.btnSend.disabled = false;
   el.btnStop.classList.add("hidden");
   el.input.disabled = false;
   el.input.focus();
   refreshSessions();
+  // 从磁盘重画：流式直插的气泡没有操作入口（✏️/🔄/分页器），编辑/重生成也需
+  // 规范化 DOM。群聊窗口 canEdit=false 不挂控制
+  if (state.currentThreadId) loadThread(state.currentThreadId);
+}
+
+/* ==== 历史消息内联编辑 / 重新生成（共用同一编辑器）==== */
+function openUserEditor(anchor) {
+  if (state.busy) return;
+  var node = state.turnNodes[anchor];
+  if (!node || node.editing) return;
+  node.userEl.classList.remove("edit-on");
+  var bubble = node.userEl.querySelector(".bubble");
+  if (!bubble) return;
+  var textEl = bubble.querySelector(".bubble-text");
+  var currentText = textEl ? textEl.textContent : "";
+  if (textEl) textEl.remove();
+
+  node.editing = true;
+  var ta = document.createElement("textarea");
+  ta.className = "inline-edit";
+  ta.rows = Math.max(2, Math.min(8, currentText.split("\n").length + 1));
+  ta.value = currentText;
+  var firstImg = bubble.querySelector(".chat-img");
+  if (firstImg) bubble.insertBefore(ta, firstImg); else bubble.appendChild(ta);
+
+  var actions = document.createElement("div");
+  actions.className = "inline-edit-actions";
+  var hint = document.createElement("span");
+  hint.className = "inline-edit-hint";
+  hint.textContent = "不改内容直接发送 = 重新生成";
+  var sendBtn = document.createElement("button");
+  sendBtn.type = "button"; sendBtn.className = "btn small"; sendBtn.textContent = "发送";
+  var cancelBtn = document.createElement("button");
+  cancelBtn.type = "button"; cancelBtn.className = "btn small ghost"; cancelBtn.textContent = "取消";
+  actions.appendChild(hint); actions.appendChild(sendBtn); actions.appendChild(cancelBtn);
+  bubble.appendChild(actions);
+  ta.focus();
+
+  cancelBtn.addEventListener("click", function () {
+    ta.remove(); actions.remove();
+    node.editing = false;
+    if (textEl) {
+      if (firstImg) bubble.insertBefore(textEl, firstImg); else bubble.appendChild(textEl);
+    }
+  });
+  sendBtn.addEventListener("click", function () {
+    var newText = ta.value;
+    ta.remove(); actions.remove();
+    node.editing = false;
+    if (newText) {
+      var nt = document.createElement("div");
+      nt.className = "bubble-text";
+      nt.textContent = newText;
+      if (firstImg) bubble.insertBefore(nt, firstImg); else bubble.appendChild(nt);
+    }
+    submitTurnEdit(anchor, newText, currentText);
+  });
+}
+
+function submitTurnEdit(anchor, newText, originalText) {
+  if (state.busy) return;
+  var changed = newText !== originalText;
+  var node = state.turnNodes[anchor];
+  // 移除该轮回复区全部内容（旧回复 / 分页器 / 操作行）；
+  // 记录下一轮起点作为流式插入位置，最近一轮 afterTurn=null → 追加到底
+  var afterTurn = null;
+  var cur = node.userEl.nextSibling;
+  while (cur) {
+    if (cur.nodeType === 1 && cur.classList &&
+        cur.classList.contains("msg") && cur.classList.contains("user")) {
+      afterTurn = cur;
+      break;
+    }
+    cur = cur.nextSibling;
+  }
+  cur = node.userEl.nextSibling;
+  while (cur && cur !== afterTurn) {
+    var nx = cur.nextSibling;
+    cur.remove();
+    cur = nx;
+  }
+  state.streamInsertBefore = afterTurn;
+  state.turnEditAnchor = anchor;
+  state.currentAssistant = null;
+  state.busy = true;
+  el.btnSend.disabled = true;
+  el.btnStop.classList.remove("hidden");
+  scrollToBottom();
+
+  var payload = {
+    message: newText,
+    session_id: state.currentSessionId,
+    thread_id: state.currentThreadId,
+    provider_id: chosenProviderId(),
+    tools_enabled: true,
+    image_model_id: state.imageModelId || "",
+    image_engine: state.sdEngine ? "sd" : "",
+  };
+  if (changed) payload.edit_message_id = anchor;
+  else payload.regenerate_message_id = anchor;
+  postChatSSE(payload);
+}
+
+function switchTurn(anchor, editIndex, replyIndex) {
+  if (state.busy) return;
+  var body = {};
+  if (editIndex !== null && editIndex !== undefined) body.edit_index = editIndex;
+  if (replyIndex !== null && replyIndex !== undefined) body.reply_index = replyIndex;
+  fetchJSON(
+    "/api/rooms/" + state.currentSessionId + "/threads/" + state.currentThreadId + "/turns/" + anchor,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+  ).then(function (t) {
+    var idx = -1;
+    state.roomThreads.forEach(function (x, i) { if (x.id === t.id) idx = i; });
+    if (idx >= 0) state.roomThreads[idx] = t; else state.roomThreads.push(t);
+    renderHistory(t.messages || [], t.edits || {});
+  }).catch(function (e) { addErrorBar("切换版本失败: " + e.message); });
 }
 function addErrorBar(msg) {
   var bar = document.createElement("div");
@@ -1638,7 +3450,26 @@ function addErrorBar(msg) {
 function openSettings() {
   if (!state.config) return;
   clearDirty();
-  el.configMsg.textContent = ""; el.configMsg.className = "msg-bar";
+  var isAdmin = state.role === "admin";
+  el.settingsAdmin.hidden = !isAdmin;
+  el.settingsUser.hidden = isAdmin;
+  el.settingsSub.textContent = isAdmin
+    ? "提供商与工具配置（管理员）"
+    : "管理你自建的模型，或选用管理员共享的模型（你的等级 Lv" + state.userLevel + "）";
+  if (isAdmin) {
+    el.configMsg.textContent = ""; el.configMsg.className = "msg-bar";
+    fillAdminForm();
+    renderProviderRows();
+    renderImageModelRows();
+    renderPluginChecks();
+  } else {
+    el.userConfigMsg.textContent = ""; el.userConfigMsg.className = "msg-bar";
+    renderUserModelCards();
+  }
+  el.dialog.showModal();
+}
+
+function fillAdminForm() {
   el.setMaxIters.value = state.config.tools ? state.config.tools.max_iterations : 8;
   el.setTimeout.value = state.config.tools ? state.config.tools.timeout_seconds : 60;
   el.setReadDirs.value = (state.config.tools.allowed_read_dirs || []).join("\n");
@@ -1646,35 +3477,68 @@ function openSettings() {
   el.setRpFormat.checked = !!(rp.format_enabled);
   el.setAttrEnabled.checked = !!(rp.attributes && rp.attributes.enabled);
   el.setAttrAi.checked = !!(rp.attributes && rp.attributes.ai_provided);
-  renderProviderRows();
-  renderPluginChecks();
-  el.dialog.showModal();
+  var emb = state.config.embeddings || {};
+  el.setEmbBase.value = emb.base_url || "";
+  el.setEmbKey.value = emb.api_key || "";
+  el.setEmbModel.value = emb.model || "";
+  el.setEmbTopk.value = emb.top_k || 4;
+  var img = state.config.image_generation || {};
+  el.setImgEnabled.checked = img.enabled !== false;
+  el.setImgSize.value = img.default_size || "2K";
+  var sd = state.config.stable_diffusion || {};
+  el.setSdEnabled.checked = sd.enabled === true;
+  el.setSdBase.value = sd.base_url || "http://127.0.0.1:7860";
+  el.setSdFnindex.value = sd.fn_index != null ? sd.fn_index : 99;
+  el.setSdWidth.value = sd.width || 512;
+  el.setSdHeight.value = sd.height || 768;
+  el.setSdSteps.value = sd.steps || 28;
+  el.setSdCfg.value = sd.cfg_scale != null ? sd.cfg_scale : 7.0;
+  el.setSdSampler.value = sd.sampler || "DPM++ 2M";
+  el.setSdSchedule.value = sd.schedule || "Karras";
+  el.setSdNegative.value = sd.negative_prompt || "";
+  var px = state.config.pixiv || {};
+  el.setPxEnabled.checked = px.enabled !== false;
+  el.setPxProxy.value = px.proxy || "";
+  el.setPxR18.checked = !!px.r18_allowed;
+  el.setPxNum.value = px.candidate_num || 15;
+  var ws = state.config.web_search || {};
+  el.setWsEnabled.checked = ws.enabled !== false;
+  el.setWsProxy.value = ws.proxy || "";
+  el.setWsNum.value = ws.results_num || 8;
+  el.setWsPagechars.value = ws.max_page_chars || 6000;
 }
 function renderProviderRows() {
   el.providerList.innerHTML = "";
-  (state.config.providers || []).forEach(function (p, i) {
-    var row = document.createElement("div");
-    row.className = "provider-row grid";
-    row.dataset.id = p.id;
-    var label = document.createElement("div");
-    label.className = "provider-row p-label";
-    label.innerHTML = "<label style='display:flex;align-items:center;gap:6px;font-size:13px'><input type='radio' name='active-provider' value='" + p.id + "'" + (state.config.active_provider === p.id ? " checked" : "") + " /> 激活</label><span>" + escapeHtml(p.id) + "</span>";
-    row.appendChild(label);
-    row.appendChild(fieldRow("id", "ID", p.id));
-    row.appendChild(fieldRow("type", "类型", p.type, "select"));
-    row.appendChild(fieldRow("base_url", "Base URL", p.base_url));
-    row.appendChild(fieldRow("api_key", "API Key", p.api_key, "password"));
-    row.appendChild(fieldRow("model", "模型", p.model));
-    var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
-    del.style.gridColumn = "span 2";
-    del.addEventListener("click", function () { row.remove(); });
-    row.appendChild(del);
-    el.providerList.appendChild(row);
+  (state.config.providers || []).forEach(function (p) {
+    el.providerList.appendChild(providerRow(p));
   });
   var radios = document.querySelectorAll('input[name="active-provider"]');
   if (radios.length && Array.prototype.every.call(radios, function (r) { return !r.checked; })) {
     radios[0].checked = true;
   }
+}
+function providerRow(p) {
+  var row = document.createElement("div");
+  row.className = "provider-row grid";
+  row.dataset.id = p.id;
+  var label = document.createElement("div");
+  label.className = "provider-row p-label";
+  label.innerHTML = "<label style='display:flex;align-items:center;gap:6px;font-size:13px'><input type='radio' name='active-provider' value='" + p.id + "'" + (state.config.active_provider === p.id ? " checked" : "") + " /> 激活</label><span>" + escapeHtml(p.id) + "</span>";
+  row.appendChild(label);
+  row.appendChild(fieldRow("id", "ID", p.id));
+  row.appendChild(fieldRow("type", "类型", p.type, "select"));
+  row.appendChild(fieldRow("base_url", "Base URL", p.base_url));
+  row.appendChild(fieldRow("api_key", "API Key", p.api_key, "password"));
+  row.appendChild(fieldRow("model", "模型", p.model));
+  row.appendChild(fieldRow("vision", "视觉（支持图片输入）", p.vision, "checkbox"));
+  row.appendChild(fieldRow("owner", "归属（uid）", p.owner));
+  row.appendChild(fieldRow("shared", "共享", p.shared, "checkbox"));
+  row.appendChild(fieldRow("min_level", "共享最低等级", p.min_level, "number"));
+  var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
+  del.style.gridColumn = "span 2";
+  del.addEventListener("click", function () { row.remove(); });
+  row.appendChild(del);
+  return row;
 }
 function fieldRow(key, label, value, kind) {
   var wrap = document.createElement("label");
@@ -1687,12 +3551,26 @@ function fieldRow(key, label, value, kind) {
       var o = document.createElement("option"); o.value = t; o.textContent = t; if (t === value) o.selected = true;
       input.appendChild(o);
     });
+  } else if (kind === "checkbox") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!value;
   } else {
     input = document.createElement("input");
     input.type = kind || "text"; input.value = value || "";
   }
   input.dataset.key = key;
-  wrap.appendChild(span); wrap.appendChild(input);
+  if (kind === "checkbox") {
+    // 复选框与说明横排：框在左、文字在右
+    wrap.style.flexDirection = "row";
+    wrap.style.alignItems = "center";
+    span.textContent = " " + label;
+    wrap.appendChild(input);
+    wrap.appendChild(span);
+  } else {
+    wrap.appendChild(span);
+    wrap.appendChild(input);
+  }
   return wrap;
 }
 function addProviderRow() {
@@ -1705,11 +3583,52 @@ function addProviderRow() {
   row.appendChild(fieldRow("base_url", "Base URL", ""));
   row.appendChild(fieldRow("api_key", "API Key", "", "password"));
   row.appendChild(fieldRow("model", "模型", ""));
+  row.appendChild(fieldRow("vision", "视觉（支持图片输入）", false, "checkbox"));
+  row.appendChild(fieldRow("owner", "归属（uid）", "admin"));
+  row.appendChild(fieldRow("shared", "共享", false, "checkbox"));
+  row.appendChild(fieldRow("min_level", "共享最低等级", 0, "number"));
   var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
   del.style.gridColumn = "span 2";
   del.addEventListener("click", function () { row.remove(); });
   row.appendChild(del);
   el.providerList.appendChild(row);
+}
+
+/* 管理员：生图模型行 */
+function renderImageModelRows() {
+  el.imageModelList.innerHTML = "";
+  (state.config.image_models || []).forEach(function (m) {
+    el.imageModelList.appendChild(imageModelRow(m));
+  });
+}
+function imageModelRow(m) {
+  var isNew = !m;
+  m = m || { id: "", name: "", base_url: "", api_key: "", model: "",
+             owner: "admin", shared: false, min_level: 0 };
+  var row = document.createElement("div");
+  row.className = "provider-row grid image-row";
+  if (m.id) row.dataset.id = m.id;
+  var label = document.createElement("div");
+  label.className = "provider-row p-label";
+  label.innerHTML = "<span style='" + (isNew ? "color:var(--accent)" : "") + "'>"
+    + escapeHtml(m.name || m.id || "新生图模型") + "</span>";
+  row.appendChild(label);
+  row.appendChild(fieldRow("id", "ID", m.id));
+  row.appendChild(fieldRow("name", "名称", m.name));
+  row.appendChild(fieldRow("base_url", "Base URL", m.base_url));
+  row.appendChild(fieldRow("api_key", "API Key", m.api_key, "password"));
+  row.appendChild(fieldRow("model", "模型", m.model));
+  row.appendChild(fieldRow("owner", "归属（uid）", m.owner));
+  row.appendChild(fieldRow("shared", "共享", m.shared, "checkbox"));
+  row.appendChild(fieldRow("min_level", "共享最低等级", m.min_level, "number"));
+  var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
+  del.style.gridColumn = "span 2";
+  del.addEventListener("click", function () { row.remove(); });
+  row.appendChild(del);
+  return row;
+}
+function addImageModelRow() {
+  el.imageModelList.appendChild(imageModelRow(null));
 }
 function renderPluginChecks() {
   el.pluginChecks.innerHTML = "";
@@ -1731,26 +3650,95 @@ function saveConfig() {
     var urlInput = row.querySelector('input[data-key="base_url"]');
     var keyInput = row.querySelector('input[data-key="api_key"]');
     var modelInput = row.querySelector('input[data-key="model"]');
+    var visionInput = row.querySelector('input[data-key="vision"]');
+    var ownerInput = row.querySelector('input[data-key="owner"]');
+    var sharedInput = row.querySelector('input[data-key="shared"]');
+    var levelInput = row.querySelector('input[data-key="min_level"]');
     var pval = {
       id: idInput ? idInput.value.trim() : "",
       type: typeSel ? typeSel.value : "openai",
       base_url: urlInput ? urlInput.value.trim() : "",
       api_key: keyInput ? keyInput.value : "",
       model: modelInput ? modelInput.value.trim() : "",
+      vision: visionInput ? !!visionInput.checked : false,
+      owner: ownerInput && ownerInput.value.trim() ? ownerInput.value.trim() : "admin",
+      shared: sharedInput ? !!sharedInput.checked : false,
+      min_level: levelInput ? (parseInt(levelInput.value, 10) || 0) : 0,
     };
     if (pval.id) providers.push(pval);
   });
   var active = radioChecked ? radioChecked.value : (providers[0] ? providers[0].id : "");
+
+  // 生图模型：完全空白行跳过；填了内容但无 ID 则自动生成
+  var imageModels = [];
+  Array.prototype.forEach.call(el.imageModelList.querySelectorAll(".image-row"), function (row) {
+    var val = {
+      id: row.querySelector('input[data-key="id"]').value.trim(),
+      name: row.querySelector('input[data-key="name"]').value.trim(),
+      base_url: row.querySelector('input[data-key="base_url"]').value.trim(),
+      api_key: row.querySelector('input[data-key="api_key"]').value,
+      model: row.querySelector('input[data-key="model"]').value.trim(),
+      owner: row.querySelector('input[data-key="owner"]').value.trim() || "admin",
+      shared: row.querySelector('input[data-key="shared"]').checked,
+      min_level: parseInt(row.querySelector('input[data-key="min_level"]').value, 10) || 0,
+    };
+    if (!val.id && !val.name && !val.base_url && !val.model) return;
+    if (!val.id) {
+      val.id = "img" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+    imageModels.push(val);
+  });
   var readDirs = el.setReadDirs.value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
   var tools = { enabled: true, max_iterations: parseInt(el.setMaxIters.value, 10) || 8, timeout_seconds: parseInt(el.setTimeout.value, 10) || 60, allowed_read_dirs: readDirs };
   var roleplay = {
     format_enabled: !!el.setRpFormat.checked,
     attributes: { enabled: !!el.setAttrEnabled.checked, ai_provided: !!el.setAttrAi.checked },
   };
+  var curEmb = state.config.embeddings || {};
+  var embeddings = {
+    base_url: el.setEmbBase.value.trim(),
+    api_key: el.setEmbKey.value.trim(),
+    model: el.setEmbModel.value.trim(),
+    top_k: parseInt(el.setEmbTopk.value, 10) || 4,
+    cache_file: curEmb.cache_file || "",
+  };
+  var imageGeneration = {
+    enabled: !!el.setImgEnabled.checked,
+    default_size: el.setImgSize.value || "2K",
+  };
+  var stableDiffusion = {
+    enabled: !!el.setSdEnabled.checked,
+    base_url: el.setSdBase.value.trim() || "http://127.0.0.1:7860",
+    fn_index: parseInt(el.setSdFnindex.value, 10) || 99,
+    width: parseInt(el.setSdWidth.value, 10) || 512,
+    height: parseInt(el.setSdHeight.value, 10) || 768,
+    steps: parseInt(el.setSdSteps.value, 10) || 28,
+    cfg_scale: parseFloat(el.setSdCfg.value) || 7.0,
+    sampler: el.setSdSampler.value.trim() || "DPM++ 2M",
+    schedule: el.setSdSchedule.value.trim() || "Karras",
+    negative_prompt: el.setSdNegative.value,
+  };
+  var pixiv = {
+    enabled: !!el.setPxEnabled.checked,
+    proxy: el.setPxProxy.value.trim(),
+    r18_allowed: !!el.setPxR18.checked,
+    candidate_num: parseInt(el.setPxNum.value, 10) || 15,
+  };
+  var webSearch = {
+    enabled: !!el.setWsEnabled.checked,
+    proxy: el.setWsProxy.value.trim(),
+    results_num: parseInt(el.setWsNum.value, 10) || 8,
+    max_page_chars: parseInt(el.setWsPagechars.value, 10) || 6000,
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ active_provider: active, providers: providers, tools: tools, roleplay: roleplay }),
+    body: JSON.stringify({
+      active_provider: active, providers: providers, tools: tools, roleplay: roleplay,
+      embeddings: embeddings, image_generation: imageGeneration,
+      image_models: imageModels, stable_diffusion: stableDiffusion,
+      pixiv: pixiv, web_search: webSearch,
+    }),
   }).then(function (cfg) {
     state.config = cfg;
     el.configMsg.textContent = "已保存"; el.configMsg.className = "msg-bar ok";
@@ -1761,6 +3749,299 @@ function saveConfig() {
     .catch(function (e) { el.configMsg.textContent = "保存失败: " + e.message; el.configMsg.className = "msg-bar err"; });
 }
 
+/* ==== 普通用户：我的模型 / 共享模型卡片 ==== */
+var PROVIDER_FIELDS = [
+  { key: "type", label: "类型", kind: "select", options: ["openai", "anthropic"] },
+  { key: "base_url", label: "Base URL" },
+  { key: "api_key", label: "API Key", kind: "password" },
+  { key: "model", label: "模型" },
+  { key: "vision", label: "视觉（图片输入）", kind: "checkbox" },
+];
+var IMAGE_FIELDS = [
+  { key: "name", label: "名称" },
+  { key: "base_url", label: "Base URL" },
+  { key: "api_key", label: "API Key", kind: "password" },
+  { key: "model", label: "模型" },
+];
+
+function renderUserModelCards() {
+  el.myProviderList.innerHTML = "";
+  el.sharedProviderList.innerHTML = "";
+  el.myImageList.innerHTML = "";
+  el.sharedImageList.innerHTML = "";
+  var providers = (state.config && state.config.providers) || [];
+  providers.forEach(function (p) {
+    var mine = p.owner === state.userId;
+    var card = buildModelCard("provider", p, { mine: mine });
+    (mine ? el.myProviderList : el.sharedProviderList).appendChild(card);
+  });
+  var images = (state.config && state.config.image_models) || [];
+  images.forEach(function (m) {
+    var mine = m.owner === state.userId;
+    var card = buildModelCard("image", m, { mine: mine });
+    (mine ? el.myImageList : el.sharedImageList).appendChild(card);
+  });
+}
+
+function buildModelCard(kind, data, opts) {
+  data = data || {};
+  var fields = kind === "provider" ? PROVIDER_FIELDS : IMAGE_FIELDS;
+  var card = document.createElement("div");
+  card.className = "model-card" + (opts.mine ? "" : " shared");
+  if (data.id) card.dataset.id = data.id;
+
+  // 头部：选用 radio + 标题 +（共享）等级徽标
+  var head = document.createElement("div");
+  head.className = "model-card-head";
+  var radio = document.createElement("input");
+  radio.type = "radio";
+  radio.name = kind === "provider" ? "pick-provider" : "pick-image";
+  radio.value = data.id || "";
+  var picked = kind === "provider"
+    ? chosenProviderId()
+    : (state.imageModelId || "");
+  radio.checked = !!data.id && data.id === picked;
+  radio.addEventListener("change", function () {
+    if (kind === "provider") {
+      localStorage.setItem("flyai-provider", data.id);
+    } else {
+      state.imageModelId = data.id;
+      localStorage.setItem("flyai-image-model", data.id);
+    }
+  });
+  head.appendChild(radio);
+  var title = document.createElement("strong");
+  if (kind === "provider") {
+    title.textContent = data.model ? (data.model + "（" + data.id + "）") : "新模型";
+  } else {
+    title.textContent = data.name || data.model || "新生图模型";
+  }
+  head.appendChild(title);
+  if (!opts.mine) {
+    var badge = document.createElement("span");
+    badge.className = "badge-level";
+    badge.textContent = "需要等级 ≥ " + (data.min_level || 0);
+    head.appendChild(badge);
+  }
+  card.appendChild(head);
+
+  // 字段
+  var grid = document.createElement("div");
+  grid.className = "model-card-fields";
+  fields.forEach(function (f) {
+    grid.appendChild(cardField(f, data[f.key], !opts.mine));
+  });
+  card.appendChild(grid);
+
+  // 操作按钮（仅归属自己）
+  if (opts.mine) {
+    var actions = document.createElement("div");
+    actions.className = "model-card-actions";
+    var save = document.createElement("button");
+    save.className = "btn small primary";
+    save.textContent = "保存";
+    save.addEventListener("click", function () { saveMyCard(kind, card); });
+    actions.appendChild(save);
+    if (data.id) {
+      var del = document.createElement("button");
+      del.className = "btn small danger";
+      del.textContent = "删除";
+      del.addEventListener("click", function () { deleteMyCard(kind, card); });
+      actions.appendChild(del);
+    }
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function cardField(f, value, disabled) {
+  var label = document.createElement("label");
+  label.className = "model-field";
+  var span = document.createElement("span");
+  span.textContent = f.label;
+  var input;
+  if (f.kind === "select") {
+    input = document.createElement("select");
+    f.options.forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o;
+      opt.textContent = o;
+      if (o === value) opt.selected = true;
+      input.appendChild(opt);
+    });
+  } else {
+    input = document.createElement("input");
+    input.type = f.kind || "text";
+    input.value = value == null ? "" : value;
+  }
+  input.dataset.k = f.key;
+  if (disabled) input.disabled = true;
+  label.appendChild(span);
+  label.appendChild(input);
+  return label;
+}
+
+function addMyProvider() {
+  var card = buildModelCard("provider", null, { mine: true });
+  card.dataset.new = "1";
+  var radio = card.querySelector("input[type=radio]");
+  if (radio) radio.disabled = true;
+  el.myProviderList.appendChild(card);
+}
+
+function addMyImage() {
+  var card = buildModelCard("image", null, { mine: true });
+  card.dataset.new = "1";
+  var radio = card.querySelector("input[type=radio]");
+  if (radio) radio.disabled = true;
+  el.myImageList.appendChild(card);
+}
+
+function saveMyCard(kind, card) {
+  var fields = kind === "provider" ? PROVIDER_FIELDS : IMAGE_FIELDS;
+  var values = {};
+  fields.forEach(function (f) {
+    var input = card.querySelector('[data-k="' + f.key + '"]');
+    values[f.key] = f.kind === "checkbox" ? input.checked : input.value;
+  });
+  var isNew = card.dataset.new === "1";
+  var base = kind === "provider" ? "/api/models/providers" : "/api/models/images";
+  var url = isNew ? base : base + "/" + encodeURIComponent(card.dataset.id);
+  userCardMsg("保存中…");
+  fetchJSON(url, {
+    method: isNew ? "POST" : "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  }).then(function (saved) {
+    // 新建的模型自动选用，避免存完仍是别人的模型
+    if (isNew && saved && saved.id) {
+      if (kind === "provider") {
+        localStorage.setItem("flyai-provider", saved.id);
+      } else {
+        state.imageModelId = saved.id;
+        localStorage.setItem("flyai-image-model", saved.id);
+      }
+    }
+    return refreshConfig();
+  }).then(function () {
+    renderUserModelCards();
+    userCardMsg("已保存", "ok");
+    renderProviderBar();
+  }).catch(function (e) {
+    userCardMsg("保存失败: " + e.message, "err");
+  });
+}
+
+function deleteMyCard(kind, card) {
+  var title = card.dataset.id;
+  if (!confirm("确定删除模型「" + title + "」？")) return;
+  var base = kind === "provider" ? "/api/models/providers" : "/api/models/images";
+  fetchJSON(base + "/" + encodeURIComponent(title), { method: "DELETE" })
+    .then(refreshConfig)
+    .then(function () { renderUserModelCards(); })
+    .catch(function (e) { userCardMsg("删除失败: " + e.message, "err"); });
+}
+
+function refreshConfig() {
+  return fetchJSON("/api/config").then(function (cfg) {
+    state.config = cfg;
+    updateSdEngineButton();
+  });
+}
+
+/* ==== Stable Diffusion 引擎开关 ==== */
+function sdAvailable() {
+  var sd = state.config && state.config.stable_diffusion;
+  return !!(sd && sd.enabled === true);
+}
+function toggleSdEngine() {
+  if (!sdAvailable()) return;
+  state.sdEngine = !state.sdEngine;
+  localStorage.setItem("flyai-sd-engine", state.sdEngine ? "sd" : "off");
+  updateSdEngineButton();
+  showToast(state.sdEngine
+    ? "已切换为本地 Stable Diffusion 生图（Anything V5）"
+    : "已切换为云端生图模型");
+}
+function updateSdEngineButton() {
+  if (!el.btnSd) return;
+  var available = sdAvailable();
+  el.btnSd.classList.toggle("hidden", !available);
+  el.btnSd.classList.toggle("active", available && state.sdEngine);
+  // 管理员关闭 SD 后，不能再保留选中状态
+  if (!available && state.sdEngine) {
+    state.sdEngine = false;
+    localStorage.setItem("flyai-sd-engine", "off");
+  }
+}
+
+function userCardMsg(text, cls) {
+  el.userConfigMsg.textContent = text;
+  el.userConfigMsg.className = "msg-bar " + (cls || "");
+}
+
+/* ==== Toast 通知（替代原生 alert，不阻断操作）==== */
+function showToast(msg, type, holdMs) {
+  var box = document.getElementById("toast-box");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "toast-box";
+    document.body.appendChild(box);
+  }
+  var t = document.createElement("div");
+  t.className = "toast " + (type || "info");
+  t.textContent = msg;
+  box.appendChild(t);
+  requestAnimationFrame(function () { t.classList.add("show"); });
+  setTimeout(function () {
+    t.classList.remove("show");
+    setTimeout(function () { t.remove(); }, 300);
+  }, holdMs || 3200);
+}
+
+/* ==== 输入草稿（按会话+窗口持久化，刷新/切换不丢字）==== */
+function draftKey() {
+  return "flyai-draft-" + (state.currentSessionId || "none") + "-" + (state.currentThreadId || "none");
+}
+function saveDraftNow() {
+  var v = el.input.value;
+  if (v) localStorage.setItem(draftKey(), v);
+  else localStorage.removeItem(draftKey());
+}
+function scheduleDraftSave() {
+  clearTimeout(state.draftTimer);
+  state.draftTimer = setTimeout(saveDraftNow, 400);
+}
+function restoreDraft() {
+  el.input.value = localStorage.getItem(draftKey()) || "";
+  autosizeInput();
+}
+function clearDraft() { localStorage.removeItem(draftKey()); }
+
+/* ==== 发送失败：文字与图片回填 ==== */
+function restoreFailedSend(reason) {
+  var ps = state.pendingSend;
+  if (ps) {
+    el.input.value = ps.text;
+    state.pendingImages = ps.images.slice();
+    renderPendingImages();
+    saveDraftNow();
+    autosizeInput();
+  }
+  showToast(reason, "err", 5000);
+  finalizeTurn();
+  el.input.focus();
+}
+
+/* ==== 输入框高度自适应 ==== */
+function autosizeInput() {
+  el.input.style.height = "auto";
+  var h = el.input.scrollHeight;
+  var maxH = 200;
+  el.input.style.height = Math.min(h, maxH) + "px";
+  el.input.style.overflowY = h > maxH ? "auto" : "hidden";
+}
+
 /* ==== 工具函数 ==== */
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -1768,9 +4049,15 @@ function escapeHtml(s) {
   });
 }
 function escapeAttr(s) { return escapeHtml(s); }
+function onMessagesScroll() {
+  var m = el.messages;
+  state.stickBottom = (m.scrollHeight - m.scrollTop - m.clientHeight) < 80;
+  updateJumpBtn();
+}
 function scrollToBottom(force) {
   var m = el.messages;
-  if (force || (m.scrollHeight - m.scrollTop - m.clientHeight) < 120) m.scrollTop = m.scrollHeight;
+  // 用户主动上翻（stick=false）时不跟随，只在贴底或强制时滚动
+  if (force || state.stickBottom) m.scrollTop = m.scrollHeight;
   updateJumpBtn();
 }
 /* 距底部多远时显示「跳到底部」按钮 */

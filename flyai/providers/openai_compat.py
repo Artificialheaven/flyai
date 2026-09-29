@@ -42,7 +42,22 @@ class OpenAICompatProvider(BaseProvider):
         body.update(self.cfg.params)
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
 
-        async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+        # stream_options 拿 token 用量；个别兼容厂商不认该字段（400），去掉重试一次
+        try:
+            async for ev in self._run_stream(url, body, headers, True):
+                yield ev
+        except ProviderError as exc:
+            if exc.status_code == 400 and "stream_options" in (exc.detail or ""):
+                async for ev in self._run_stream(url, body, headers, False):
+                    yield ev
+            else:
+                raise
+
+    async def _run_stream(self, url, body, headers, include_usage) -> AsyncIterator[StreamEvent]:
+        req_body = dict(body)
+        if include_usage:
+            req_body["stream_options"] = {"include_usage": True}
+        async with self._client.stream("POST", url, json=req_body, headers=headers) as resp:
             if resp.status_code >= 400:
                 detail = await resp.aread()
                 err_text = detail.decode("utf-8", errors="replace")[:800]
@@ -65,6 +80,16 @@ class OpenAICompatProvider(BaseProvider):
                     continue
                 if obj.get("error"):
                     raise ProviderError(f"提供商错误: {obj['error']}")
+                # 用量块（include_usage 时随末尾空 choices 块到达）
+                usage = obj.get("usage")
+                if usage:
+                    yield StreamEvent(
+                        StreamEventType.USAGE,
+                        usage={
+                            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                            "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        },
+                    )
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
@@ -117,7 +142,7 @@ class OpenAICompatProvider(BaseProvider):
             if msg.role == "system":
                 out.append({"role": "system", "content": msg.content or ""})
             elif msg.role == "user":
-                out.append({"role": "user", "content": msg.content or ""})
+                out.append({"role": "user", "content": self._user_content(msg)})
             elif msg.role == "assistant":
                 item: Dict = {"role": "assistant", "content": msg.content or None}
                 if msg.tool_calls:
@@ -131,7 +156,34 @@ class OpenAICompatProvider(BaseProvider):
                     ]
                 out.append(item)
             elif msg.role == "tool":
-                out.append(
-                    {"role": "tool", "tool_call_id": msg.tool_call_id, "content": msg.content or ""}
-                )
+                item = {"role": "tool", "tool_call_id": msg.tool_call_id}
+                if msg.images:
+                    parts = [{"type": "text", "text": msg.content or "工具已执行"}]
+                    for img in msg.images:
+                        parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{img.media_type};base64,{img.data}"
+                                },
+                            }
+                        )
+                    item["content"] = parts
+                else:
+                    item["content"] = msg.content or ""
+                out.append(item)
         return out
+
+    def _user_content(self, msg: Message):
+        """user 消息：有图时编为多模态 parts，无图保持字符串（前缀缓存友好）。"""
+        if not msg.images:
+            return msg.content or ""
+        parts: List[Dict] = [{"type": "text", "text": msg.content or "请看图"}]
+        for img in msg.images:
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img.media_type};base64,{img.data}"},
+                }
+            )
+        return parts

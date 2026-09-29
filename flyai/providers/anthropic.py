@@ -72,6 +72,8 @@ class AnthropicProvider(BaseProvider):
         call_acc: Dict[int, Dict] = {}
         stop_reason = None
         has_tool_use = False
+        input_tokens = 0
+        output_tokens = 0
 
         async for raw in resp.aiter_lines():
             line = raw.rstrip("\r")
@@ -88,7 +90,10 @@ class AnthropicProvider(BaseProvider):
                     continue
                 if event_name == "error":
                     raise ProviderError(f"Anthropic 错误: {obj}")
-                if event_name == "content_block_start":
+                if event_name == "message_start":
+                    u = (obj.get("message") or {}).get("usage") or {}
+                    input_tokens = int(u.get("input_tokens") or input_tokens)
+                elif event_name == "content_block_start":
                     block = obj.get("content_block") or {}
                     btype = block.get("type")
                     idx = obj.get("index", 0)
@@ -109,6 +114,18 @@ class AnthropicProvider(BaseProvider):
                             holder["args"] += delta.get("partial_json", "")
                 elif event_name == "message_delta":
                     stop_reason = (obj.get("delta") or {}).get("stop_reason") or stop_reason
+                    u = obj.get("usage") or {}
+                    if u.get("output_tokens") is not None:
+                        output_tokens = int(u.get("output_tokens"))
+
+        if input_tokens or output_tokens:
+            yield StreamEvent(
+                StreamEventType.USAGE,
+                usage={
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                },
+            )
 
         # 流结束：若有工具调用则产出
         if call_acc:
@@ -166,7 +183,7 @@ class AnthropicProvider(BaseProvider):
                     block: Dict = {
                         "type": "tool_result",
                         "tool_use_id": tm.tool_call_id,
-                        "content": tm.content or "",
+                        "content": self._tool_result_content(tm),
                     }
                     is_error = (tm.ok is False) or (
                         tm.ok is None and (tm.content or "").startswith("[工具错误]")
@@ -179,7 +196,7 @@ class AnthropicProvider(BaseProvider):
                 continue
 
             if msg.role == "user":
-                final_messages.append({"role": "user", "content": msg.content or ""})
+                final_messages.append({"role": "user", "content": self._user_content(msg)})
                 i += 1
                 continue
 
@@ -211,6 +228,42 @@ class AnthropicProvider(BaseProvider):
 
         system = "\n\n".join(system_parts) if system_parts else ""
         return system, final_messages
+
+    def _tool_result_content(self, msg: Message):
+        """tool_result：视觉模型下带上回贴的生成图片（text+image blocks）。"""
+        if not msg.images:
+            return msg.content or ""
+        blocks: List[Dict] = [{"type": "text", "text": msg.content or "工具已执行"}]
+        for img in msg.images:
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data,
+                    },
+                }
+            )
+        return blocks
+
+    def _user_content(self, msg: Message):
+        """user 消息：有图时编为 text+image blocks，无图保持字符串。"""
+        if not msg.images:
+            return msg.content or ""
+        blocks: List[Dict] = [{"type": "text", "text": msg.content or "请看图"}]
+        for img in msg.images:
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data,
+                    },
+                }
+            )
+        return blocks
 
     def _thinking_enabled(self) -> bool:
         t = self.cfg.params.get("thinking") or {}

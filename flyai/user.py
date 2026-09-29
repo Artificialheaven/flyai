@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import AppConfig, PROJECT_ROOT
 from .lore.store import LoreStore
@@ -23,6 +23,8 @@ from .sessions import JsonSessionStore, MemorySessionStore, SessionStore
 
 # 管理员标识：管理员不在 user 库中，凭据存于 config/auth（config.auth.admin）
 ADMIN_UID = "admin"
+# 管理员权限等级：普通用户 0-255，管理员固定 256
+ADMIN_LEVEL = 256
 
 
 @dataclass
@@ -33,6 +35,8 @@ class User:
     name: str = ""
     password_hash: str = ""
     created_at: str = ""
+    # 权限等级 0-255，决定可使用的共享模型；越大越高
+    level: int = 0
 
     def __post_init__(self):
         if not self.id:
@@ -54,6 +58,7 @@ class User:
             "name": self.name,
             "password_hash": self.password_hash,
             "created_at": self.created_at,
+            "level": int(self.level or 0),
         }
 
     @classmethod
@@ -63,6 +68,7 @@ class User:
             name=d.get("name", ""),
             password_hash=d.get("password_hash", ""),
             created_at=d.get("created_at", ""),
+            level=int(d.get("level", 0) or 0),
         )
 
 
@@ -112,10 +118,10 @@ class UserStore:
                 return u
         return None
 
-    def create(self, name: str, password: str) -> User:
+    def create(self, name: str, password: str, level: int = 0) -> User:
         if self.get_by_name(name):
             raise ValueError(f"用户名已存在: {name}")
-        u = User(name=name)
+        u = User(name=name, level=int(level or 0))
         if password:
             u.set_password(password)  # 空密码保留空 hash，check_password 视为任意输入可进入
         self._users[u.id] = u
@@ -165,15 +171,17 @@ def migrate_legacy(data_dir: Path) -> None:
 
 @dataclass
 class UserScope:
-    """单个用户的数据作用域：会话存储、角色/世界观存储、上传目录。"""
+    """单个用户的数据作用域：权限等级、会话存储、角色/世界观存储、上传目录。"""
 
     uid: str
     store: SessionStore
     lore: LoreStore
     upload_dir: Path
+    level: int = 0
 
     @classmethod
-    def build(cls, uid: str, config: AppConfig, data_dir: Path) -> "UserScope":
+    def build(cls, uid: str, config: AppConfig, data_dir: Path,
+              user_store: Optional["UserStore"] = None) -> "UserScope":
         user_dir = data_dir / uid
         if config.history.backend == "json":
             store = JsonSessionStore(user_dir / "sessions")
@@ -181,4 +189,12 @@ class UserScope:
             store = MemorySessionStore()
         upload_dir = (data_dir / "uploads" / uid)
         upload_dir.mkdir(parents=True, exist_ok=True)
-        return cls(uid=uid, store=store, lore=LoreStore(user_dir), upload_dir=upload_dir)
+        lore = LoreStore(user_dir, shared_base=data_dir / "shared")
+        if uid == ADMIN_UID:
+            level = ADMIN_LEVEL
+        elif user_store is not None:
+            u = user_store.get_by_id(uid)
+            level = int(u.level or 0) if u else 0
+        else:
+            level = 0
+        return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir, level=level)

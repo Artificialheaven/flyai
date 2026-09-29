@@ -116,15 +116,46 @@ async def suggest_attributes(
     return out
 
 
-def _messages_script(session) -> str:
-    lines = []
-    for m in session.messages:
-        role = m.role
+def _message_lines(m, with_names: bool) -> List[str]:
+    """把一条消息展开为文本行：包含 content、工具调用与工具结果。"""
+    prefix = f"[{m.name}] " if (with_names and (m.name or "")) else ""
+    role = m.role
+    if role == "assistant":
+        lines = []
+        c = (m.content or "").strip()
+        if c:
+            lines.append(prefix + c)
+        for tc in (m.tool_calls or []):
+            try:
+                args = json.dumps(tc.arguments, ensure_ascii=False)
+            except Exception:
+                args = ""
+            lines.append(f"{prefix}[调用工具 {tc.name}({args})]")
+        return lines
+    if role == "tool":
         c = (m.content or "").strip()
         if not c:
+            return []
+        return [f"[工具结果({m.name or ''}) {c}]"]
+    c = (m.content or "").strip()
+    if not c:
+        return []
+    return [f"{prefix}{role}: {c}"]
+
+
+def messages_to_script(messages, with_names: bool = False) -> str:
+    """消息列表 → 纯文本脚本（含工具调用/结果；跳过 hidden）。"""
+    lines: List[str] = []
+    for m in messages:
+        if getattr(m, "hidden", False):
             continue
-        lines.append(f"{role}: {c}")
+        lines.extend(_message_lines(m, with_names))
     return "\n".join(lines) if lines else "（本对话暂无消息）"
+
+
+def _messages_script(session) -> str:
+    """旧单 AI 会话包装：直接读 session.messages。"""
+    return messages_to_script(session.messages)
 
 
 async def compress_conversation(
@@ -159,6 +190,58 @@ async def compress_conversation(
     new_char = _apply_char(cur_char, c_data, character)
     new_world = _apply_world(cur_world, w_data, world)
     return new_char, new_world
+
+
+_DEFAULT_ROOM_COMPRESS_SYS = (
+    "你是一名剧情整理员。阅读一个多 AI 聊天房间中各窗口的对话历史，"
+    "把其中沉淀下来的信息分别归纳进每个 AI 角色的资料，以及房间共享的世界设定。"
+    '只输出一个 JSON 对象：{"members": [{"member_id": "AI 参与者ID", '
+    '"character": {"intro": "角色简介", "background": "角色经历/记忆变化", '
+    '"table": [{"title": "...", "content": "..."}]}}], '
+    '"world": {"content": "世界观", "table": [{"title": "...", "content": "..."}]}}。'
+    "对话行的 [名字] 前缀标明发言者；member_id 必须取自给出的参与者清单。"
+    "没有变化的字段或成员省略即可；不要编造对话中没出现过的信息。"
+)
+
+
+async def compress_room(state, session, lore) -> Dict[str, Any]:
+    """让 AI 按窗口/发言者归纳房间历史，返回 {members:[{member_id,character}], world}。
+
+    不落库；由调用方经 apply_room_compression 写入成员副本。
+    """
+    from ..sessions.resolve import member_character
+
+    provider = state.get_provider()
+    if provider is None:
+        raise RuntimeError("未配置可用提供商，请先在设置中添加")
+
+    member_ids: List[str] = []
+    parts: List[str] = []
+    for m in session.members:
+        if m.is_user:
+            continue
+        member_ids.append(m.id)
+        char = member_character(m, lore)
+        summary = "（无角色卡）"
+        if char is not None:
+            summary = f"简介：{char.intro or '（空）'}；经历：{char.background or '（空）'}"
+        parts.append(f"参与者 member_id={m.id}（{m.name}）当前资料：{summary}")
+
+    for t in session.threads:
+        parts.append(
+            f"【窗口 {t.title or t.kind}】\n" + messages_to_script(t.messages, with_names=True)
+        )
+
+    parts.append("参与者ID 清单：" + "、".join(member_ids))
+    parts.append("请把对话中新增且有价值的信息按参与者归纳，合并而非替换原有资料，仅输出 JSON。")
+    user = "\n\n".join(parts)
+    text = await complete(
+        provider, [Message(role="user", content=user)], system_prompt=_DEFAULT_ROOM_COMPRESS_SYS
+    )
+    data = _extract_json(text)
+    if not isinstance(data, dict):
+        raise ValueError("AI 输出不是对象")
+    return data
 
 
 def _apply_char(cur: Dict[str, Any], c_data: Dict[str, Any], base: Optional[Character]) -> Character:

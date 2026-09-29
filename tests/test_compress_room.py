@@ -1,0 +1,144 @@
+"""房间压缩：消息脚本文本、compress_room（monkeypatch complete）、apply_room_compression。"""
+
+import json
+import os
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import pytest
+
+from flyai.lore.gen import compress_room, messages_to_script
+from flyai.schemas import Message, ToolCall
+from flyai.sessions.resolve import apply_room_compression
+
+
+class _FakeLore:
+    def __init__(self, chars=None):
+        self._chars = {c.id: c for c in (chars or [])}
+
+    def get_character(self, cid):
+        return self._chars.get(cid)
+
+
+def _room(char_ids, titles=("初", "两个")):
+    from flyai.lore.models import Character
+    from flyai.sessions.models import RoomMember, Session, Thread
+
+    s = Session(title="房间")
+    s.members.append(RoomMember(name="你", is_user=True))
+    chars = []
+    for i, cid in enumerate(char_ids):
+        ch = Character(id=cid, name=titles[i])
+        chars.append(ch)
+        m = RoomMember(name=ch.name, character_id=cid)
+        s.members.append(m)
+        s.threads.append(Thread(kind="dm", title=m.name, member_ids=[m.id]))
+    return s, chars
+
+
+# ---- messages_to_script ----
+
+def test_messages_to_script_includes_tools_names_and_skips_hidden():
+    msgs = [
+        Message(role="user", content="你好"),
+        Message(
+            role="assistant", content="回复内容", name="初",
+            tool_calls=[ToolCall(id="t1", name="query_lore", arguments={"keyword": "x"})],
+        ),
+        Message(role="tool", content="查到资料了", name="query_lore", tool_call_id="t1"),
+        Message(role="assistant", content="不应出现", name="初", hidden=True),
+    ]
+    script = messages_to_script(msgs, with_names=True)
+
+    assert "user: 你好" in script
+    assert "[初] 回复内容" in script
+    assert "[初] [调用工具 query_lore(" in script and '"keyword": "x"' in script
+    assert "[工具结果(query_lore) 查到资料了]" in script
+    assert "不应出现" not in script
+
+    # 不带名字前缀
+    plain = messages_to_script(msgs)
+    assert "[初]" not in plain and "回复内容" in plain
+
+
+def test_messages_to_script_empty():
+    assert messages_to_script([]) == "（本对话暂无消息）"
+
+
+# ---- compress_room ----
+
+@pytest.mark.asyncio
+async def test_compress_room_builds_thread_script_and_returns_json(monkeypatch):
+    s, chars = _room(["c1", "c2"])
+    s.threads[0].messages.append(Message(role="user", content="你好"))
+    lore = _FakeLore(chars)
+
+    captured = {}
+
+    async def fake_complete(provider, messages, system_prompt="", **kwargs):
+        captured["user"] = messages[-1].content
+        captured["system"] = system_prompt
+        return json.dumps({
+            "members": [
+                {"member_id": s.members[1].id, "character": {"intro": "初的新简介"}},
+                {"member_id": s.members[2].id, "character": {"background": "两个的新经历"}},
+            ],
+            "world": {"content": "共享世界变化"},
+        })
+
+    monkeypatch.setattr("flyai.lore.gen.complete", fake_complete)
+
+    state = SimpleNamespace(get_provider=lambda: object())
+    data = await compress_room(state, s, lore)
+
+    assert len(data["members"]) == 2
+    assert data["world"]["content"] == "共享世界变化"
+    # 给模型的文本里：参与者资料 + 按窗口分段（带发言者名）+ ID 清单
+    prompt = captured["user"]
+    assert "参与者 member_id=" in prompt
+    assert "【窗口 初】" in prompt and "你好" in prompt
+    assert s.members[1].id in prompt and s.members[2].id in prompt
+    assert "member_id" in captured["system"]
+
+
+# ---- apply_room_compression ----
+
+def test_apply_room_compression_writes_member_overrides_and_world():
+    s, chars = _room(["c1"])
+    lore = _FakeLore(chars)
+    ai = s.members[1]
+
+    data = {
+        "members": [
+            {
+                "member_id": ai.id,
+                "character": {
+                    "intro": "更新的简介",
+                    "table": [{"title": "关键设定", "content": "内容值"}],
+                },
+            }
+        ],
+        "world": {"content": "世界变化", "table": [{"title": "规则", "content": "一条"}]},
+    }
+    out = apply_room_compression(s, data, lore)
+
+    # base（库卡）与 patch 合并：名称保留、简介更新、条目写入
+    assert ai.override["name"] == "初"
+    assert ai.override["intro"] == "更新的简介"
+    assert ai.override["table"] == [{"title": "关键设定", "content": "内容值"}]
+    assert s.world_override["content"] == "世界变化"
+    assert s.world_override["table"] == [{"title": "规则", "content": "一条"}]
+
+    assert out["members"][ai.id] is ai.override
+    assert out["world"]["content"] == "世界变化"
+
+
+def test_apply_room_compression_ignores_unknown_member():
+    s, chars = _room(["c1"])
+    out = apply_room_compression(
+        s, {"members": [{"member_id": "ghost", "character": {"intro": "x"}}]}, _FakeLore(chars)
+    )
+    assert out["members"] == {}
+    assert s.members[1].override is None

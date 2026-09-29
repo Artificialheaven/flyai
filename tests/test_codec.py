@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from flyai.config import ProviderConfig
 from flyai.providers.anthropic import AnthropicProvider
 from flyai.providers.openai_compat import OpenAICompatProvider
-from flyai.schemas import Message, ToolCall
+from flyai.schemas import ImageAttachment, Message, ToolCall
 
 
 def _openai():
@@ -101,6 +101,128 @@ def test_anthropic_tool_result_is_error_flag():
     _, body = _anthropic()._encode_request(msgs)
     block = body[1]["content"][0]
     assert block["type"] == "tool_result"
+
+
+def test_message_images_roundtrip():
+    msg = Message(
+        role="user",
+        content="看看这是什么",
+        images=[ImageAttachment(media_type="image/png", data="ZmFrZWltZw==")],
+    )
+    d = msg.to_dict()
+    assert d["images"] == [{"media_type": "image/png", "data": "ZmFrZWltZw=="}]
+    back = Message.from_dict(d)
+    assert back.images[0].media_type == "image/png"
+    assert back.images[0].data == "ZmFrZWltZw=="
+
+
+def test_message_id_auto_generated_and_preserved():
+    m1 = Message(role="user", content="a")
+    m2 = Message(role="user", content="b")
+    assert m1.id and m2.id and m1.id != m2.id  # 空 id 自动补
+    # 显式 id 原样保留
+    m3 = Message(role="user", content="c", id="fixed-id")
+    assert m3.id == "fixed-id"
+    # 缺 id 的旧 dict 反序列化时补 id，再序列化幂等
+    d = {"role": "user", "content": "旧消息"}
+    back = Message.from_dict(d)
+    assert back.id
+    again = Message.from_dict(back.to_dict())
+    assert again.id == back.id
+
+
+def test_thread_edits_roundtrip():
+    from flyai.sessions.models import Thread
+
+    t = Thread(kind="dm")
+    u = Message(role="user", content="A")
+    t.messages = [u, Message(role="assistant", content="rA")]
+    t.edits[u.id] = {
+        "edits": [
+            {"user": u.to_dict(), "reply_variants": [[t.messages[1].to_dict()]], "reply_active": 0}
+        ],
+        "edit_active": 0,
+    }
+    d = t.to_dict()
+    assert d["edits"][u.id]["edit_active"] == 0
+    t2 = Thread.from_dict(d)
+    assert t2.edits[u.id]["edits"][0]["user"]["content"] == "A"
+    assert t2.messages[0].id == u.id
+
+
+def test_openai_image_parts():
+    msgs = [
+        Message(role="user", content="没图"),
+        Message(
+            role="user",
+            content="看图",
+            images=[ImageAttachment(media_type="image/jpeg", data="ZmFrZWltZw==")],
+        ),
+    ]
+    out = _openai()._encode_request(msgs)
+    # 无图消息仍是字符串
+    assert out[0]["content"] == "没图"
+    # 带图消息编为多模态 parts
+    parts = out[1]["content"]
+    assert parts[0] == {"type": "text", "text": "看图"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"]["url"] == "data:image/jpeg;base64,ZmFrZWltZw=="
+
+
+def test_openai_image_only_message():
+    # 无文字只发图
+    msgs = [Message(role="user", images=[ImageAttachment(media_type="image/png", data="ZmFrZWltZw==")])]
+    out = _openai()._encode_request(msgs)
+    parts = out[0]["content"]
+    assert parts[0]["type"] == "text"
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_anthropic_image_blocks():
+    msgs = [
+        Message(
+            role="user",
+            content="看图",
+            images=[ImageAttachment(media_type="image/png", data="ZmFrZWltZw==")],
+        ),
+        Message(role="assistant", content=None, tool_calls=[ToolCall(id="c1", name="read_file", arguments={})]),
+        Message(role="tool", tool_call_id="c1", name="read_file", content="r"),
+    ]
+    _, body = _anthropic()._encode_request(msgs)
+    # user 消息：text + image blocks
+    usr = body[0]["content"]
+    assert usr[0] == {"type": "text", "text": "看图"}
+    assert usr[1]["type"] == "image"
+    source = usr[1]["source"]
+    assert source == {"type": "base64", "media_type": "image/png", "data": "ZmFrZWltZw=="}
+    # 后续 tool 折叠/交替不受影响：user(tool_result) 紧随 assistant
+    assert [m["role"] for m in body[1:]] == ["assistant", "user"]
+    assert body[2]["content"][0]["type"] == "tool_result"
+
+
+def test_build_images_validation():
+    from fastapi import HTTPException
+
+    from flyai.api.routes_chat import ChatRequest, _build_images
+
+    assert _build_images(ChatRequest(message="x")) is None
+
+    ok = _build_images(ChatRequest(
+        message="x",
+        images=[{"media_type": "image/jpeg", "data": "ZmFrZWltZw=="}],
+    ))
+    assert ok[0].media_type == "image/jpeg"
+
+    with pytest.raises(HTTPException):  # 非法类型
+        _build_images(ChatRequest(images=[{"media_type": "text/plain", "data": "ZmFrZWltZw=="}]))
+    with pytest.raises(HTTPException):  # 坏 base64
+        _build_images(ChatRequest(images=[{"media_type": "image/png", "data": "!!!notb64"}]))
+    with pytest.raises(HTTPException):  # 超张数
+        _build_images(ChatRequest(images=[
+            {"media_type": "image/png", "data": "ZmFrZWltZw=="} for _ in range(5)
+        ]))
+    with pytest.raises(HTTPException):  # 空图片
+        _build_images(ChatRequest(images=[{"media_type": "image/png", "data": ""}]))
 
 
 def test_file_reader_safety():

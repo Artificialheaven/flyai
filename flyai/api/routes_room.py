@@ -28,10 +28,18 @@ class MemberAdd(BaseModel):
     character_id: str = ""
 
 
+class TurnSwitch(BaseModel):
+    # 历史版本切换：二选一或都给（先切 edit 再在该 edit 内切 reply）
+    edit_index: Optional[int] = None
+    reply_index: Optional[int] = None
+
+
 class MemberUpdate(BaseModel):
     memory: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
     override: Optional[Dict[str, Any]] = None
+    # R8：设为用户扮演的自设角色卡（用户座位）；空串清除
+    character_id: Optional[str] = None
 
 
 def _must_get(sc, rid):
@@ -93,6 +101,13 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
         m.attributes = body.attributes
     if body.override is not None:
         m.override = body.override
+    if body.character_id is not None:
+        # 设/改用户扮演的自设：校验角色存在；空串表示清除
+        if body.character_id and not sc.lore.get_character(body.character_id):
+            raise HTTPException(400, "角色不存在")
+        m.character_id = body.character_id
+        # 换卡时清掉旧的会话专属副本，避免遮蔽库卡
+        m.override = None
     sc.store.save(s)
     return m.to_dict()
 
@@ -129,4 +144,30 @@ def get_thread(rid: str, tid: str, request: Request):
     t = s.thread(tid)
     if t is None:
         raise HTTPException(404, "窗口不存在")
+    return t.to_dict()
+
+
+@router.patch("/rooms/{rid}/threads/{tid}/turns/{anchor}")
+def switch_turn(rid: str, tid: str, anchor: str, body: TurnSwitch, request: Request):
+    """切换某轮的历史 edit / reply 版本，不触发模型。"""
+    sc = request.app.state.flyai.user(request)
+    s = _must_get(sc, rid)
+    t = s.thread(tid)
+    if t is None:
+        raise HTTPException(404, "窗口不存在")
+    if t.kind != "dm":
+        raise HTTPException(400, "群聊窗口没有历史版本")
+    if anchor not in t.edits:
+        raise HTTPException(404, "该轮没有历史版本")
+    if body.edit_index is None and body.reply_index is None:
+        raise HTTPException(400, "未指定要切换的版本序号")
+    from ..sessions import versions
+
+    try:
+        versions.switch_version(
+            t, anchor, edit_index=body.edit_index, reply_index=body.reply_index
+        )
+    except (IndexError, KeyError):
+        raise HTTPException(400, "版本序号无效")
+    sc.store.save(s)
     return t.to_dict()

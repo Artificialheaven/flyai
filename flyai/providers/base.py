@@ -17,15 +17,23 @@ class StreamEventType(str, Enum):
     THINKING_DELTA = "thinking_delta"
     CONTENT_DELTA = "content_delta"
     TOOL_CALLS = "tool_calls"
+    USAGE = "usage"               # 本次调用 token 用量 {prompt_tokens, completion_tokens}
 
 
 class StreamEvent:
     """适配器产出的统一流事件。"""
 
-    def __init__(self, type: StreamEventType, text: str = "", tool_calls: Optional[List[ToolCall]] = None):
+    def __init__(
+        self,
+        type: StreamEventType,
+        text: str = "",
+        tool_calls: Optional[List[ToolCall]] = None,
+        usage: Optional[dict] = None,
+    ):
         self.type = type
         self.text = text
         self.tool_calls = tool_calls or []
+        self.usage = usage
 
 
 class BaseProvider(ABC):

@@ -41,10 +41,25 @@ class Character:
     attributes: List[Dict[str, Any]] = field(default_factory=list)
     prompt_format: str = ""   # 对白格式要求（覆盖内置默认）
     prompt_tools: str = ""    # 工具使用要求（覆盖内置默认）
+    system_prompt: str = ""   # 系统级提示词（高优先级自定义系统指令，空则不注入）
+    parent_id: str = ""       # 空=根卡（主角色卡）；非空=该根卡下的副本
+    alias: str = ""           # 副本在列表中显示的别名（空则回退 name）
+    author: str = ""          # 创建者 uid（服务端注入）；对外以 author:id 唯一标识
+    public: bool = False      # 是否已发布为全体用户共享（admin 操作）
 
     def __post_init__(self):
         if not self.id:
             self.id = uuid.uuid4().hex
+
+    @property
+    def display_name(self) -> str:
+        """副本列表/展示用名称：别名优先，否则角色名。"""
+        return self.alias or self.name
+
+    @property
+    def ref(self) -> str:
+        """Author+ID 复合标识。"""
+        return f"{self.author}:{self.id}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +72,11 @@ class Character:
             "attributes": list(self.attributes),
             "prompt_format": self.prompt_format,
             "prompt_tools": self.prompt_tools,
+            "system_prompt": self.system_prompt,
+            "parent_id": self.parent_id,
+            "alias": self.alias,
+            "author": self.author,
+            "public": self.public,
         }
 
     @classmethod
@@ -71,6 +91,11 @@ class Character:
             attributes=list(d.get("attributes", []) or []),
             prompt_format=d.get("prompt_format", ""),
             prompt_tools=d.get("prompt_tools", ""),
+            system_prompt=d.get("system_prompt", "") or "",
+            parent_id=d.get("parent_id", "") or "",
+            alias=d.get("alias", "") or "",
+            author=d.get("author", "") or "",
+            public=bool(d.get("public", False)),
         )
 
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..config import AttributeDef
-from ..sessions.models import Session
 
 
 def resolve_attribute_defs(character, roleplay) -> List[AttributeDef]:
@@ -51,18 +50,24 @@ def _num(v):
 
 
 class AttributeManager:
-    def __init__(self, session: Session, defs: List[AttributeDef]):
-        self.session = session
+    """绑定到一个带 `.attributes` 字典的目标。
+
+    私聊为 Session（session.attributes）；群聊为单个 RoomMember
+    （member.attributes）——两者同一套校验/钳制逻辑。
+    """
+
+    def __init__(self, target: Any, defs: List[AttributeDef]):
+        self.target = target
         self.defs = {d.key: d for d in defs}
         self._ensure_initial()
 
     def _ensure_initial(self) -> None:
-        if not self.session.attributes:
-            self.session.attributes = {k: d.initial for k, d in self.defs.items()}
+        if not self.target.attributes:
+            self.target.attributes = {k: d.initial for k, d in self.defs.items()}
 
     def get_all(self) -> Dict[str, Any]:
         self._ensure_initial()
-        return dict(self.session.attributes)
+        return dict(self.target.attributes)
 
     def describe(self) -> str:
         """返回「label: value」的可读描述，供工具结果与提示词展示。"""
@@ -94,6 +99,6 @@ class AttributeManager:
                 delta = float(ch.get("delta", 0))
             except (TypeError, ValueError):
                 continue
-            current = float(self.session.attributes.get(key, self.defs[key].initial))
-            self.session.attributes[key] = self._clamp(key, current + delta)
+            current = float(self.target.attributes.get(key, self.defs[key].initial))
+            self.target.attributes[key] = self._clamp(key, current + delta)
         return self.get_all()

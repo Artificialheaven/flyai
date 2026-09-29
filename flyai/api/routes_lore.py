@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..lore.models import Character, World
+from ..user import ADMIN_UID
 
 router = APIRouter(prefix="/api", tags=["lore"])
 
@@ -31,6 +32,9 @@ class CharacterPayload(BaseModel):
     attributes: List[Dict[str, Any]] = []
     prompt_format: str = ""
     prompt_tools: str = ""
+    system_prompt: str = ""
+    parent_id: str = ""
+    alias: str = ""
 
 
 class WorldPayload(BaseModel):
@@ -56,6 +60,9 @@ def _build_character(payload) -> Character:
         attributes=[dict(a) for a in (payload.attributes or [])],
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
+        system_prompt=payload.system_prompt or "",
+        parent_id=payload.parent_id or "",
+        alias=payload.alias or "",
     )
 
 
@@ -87,25 +94,122 @@ def list_characters(request: Request):
 
 @router.post("/characters")
 def create_character(payload: CharacterPayload, request: Request):
+    sc = _state(request)
     c = _build_character(payload)
     c.id = uuid.uuid4().hex
-    _state(request).lore.save_character(c)
+    c.author = sc.uid  # author 只能由服务端写入
+    if c.parent_id:
+        root = sc.lore.get_character(c.parent_id)
+        if root is None:
+            raise HTTPException(400, "根角色卡不存在")
+        # 副本挂在自己拥有的根卡下；共享卡请先 fork
+        if sc.lore.character_source(c.parent_id) != "own":
+            raise HTTPException(400, "不能在共享根卡下直接建副本，请先复制为我的角色卡")
+        c.parent_id = root.id
+    sc.lore.save_character(c)
     return c.to_dict()
 
 
 @router.put("/characters/{cid}")
 def update_character(cid: str, payload: CharacterPayload, request: Request):
-    if _state(request).lore.get_character(cid) is None:
+    sc = _state(request)
+    source = sc.lore.character_source(cid)
+    if source is None:
         raise HTTPException(404, "角色不存在")
+    if source == "shared":
+        raise HTTPException(403, "共享角色卡不可修改，请先复制为我的角色卡")
     c = _build_character(payload)
     c.id = cid
-    _state(request).lore.save_character(c)
+    cur = sc.lore.get_character(cid)
+    c.author = cur.author  # 作者不可改
+    c.public = cur.public
+    sc.lore.save_character(c)
+    # 已发布的卡：改动同步到共享目录
+    if cur.public and source == "own":
+        sc.lore.publish_character(c)
     return c.to_dict()
 
 
 @router.delete("/characters/{cid}")
 def delete_character(cid: str, request: Request):
-    _state(request).lore.delete_character(cid)
+    sc = _state(request)
+    source = sc.lore.character_source(cid)
+    if source is None:
+        raise HTTPException(404, "角色不存在")
+    if source == "shared":
+        raise HTTPException(403, "共享角色卡不可删除")
+    cur = sc.lore.get_character(cid)
+    if cur.public:
+        # 删除已发布的卡：连同共享副本与全部已发布副本一起清理
+        for v in sc.lore.list_characters():
+            if v.parent_id == cid and sc.lore.character_source(v.id) == "own":
+                sc.lore.unpublish_character(v.id)
+        sc.lore.unpublish_character(cid)
+    if cur.parent_id:
+        sc.lore.delete_character(cid)
+    else:
+        sc.lore.delete_character_cascade(cid)
+    return {"ok": True}
+
+
+@router.post("/characters/{cid}/fork")
+def fork_character_to_own(cid: str, request: Request):
+    """把可见（含共享）卡复制为自己的独立根角色卡：新 id、自己作者、脱离父卡。"""
+    sc = _state(request)
+    src = sc.lore.get_character(cid)
+    if src is None:
+        raise HTTPException(404, "角色不存在")
+    d = src.to_dict()
+    d["id"] = uuid.uuid4().hex
+    d["parent_id"] = ""
+    d["public"] = False
+    c = Character.from_dict(d)
+    c.author = sc.uid
+    sc.lore.save_character(c)
+    return c.to_dict()
+
+
+@router.post("/characters/{cid}/publish")
+def publish_character_route(cid: str, request: Request):
+    """admin 发布角色卡为全体用户共享。发布根卡级联发布其全部副本；
+    发布副本时自动带上根卡。"""
+    sc = _state(request)
+    if sc.uid != ADMIN_UID:
+        raise HTTPException(403, "仅管理员可发布共享角色卡")
+    target = sc.lore.get_character(cid)
+    if target is None or sc.lore.character_source(cid) != "own":
+        raise HTTPException(404, "角色不存在或不是自己的角色卡")
+
+    def _publish_one(c):
+        sc.lore.publish_character(c)
+
+    if target.parent_id:
+        root = sc.lore.get_character(target.parent_id)
+        if root is not None:
+            _publish_one(root)
+        _publish_one(target)
+    else:
+        _publish_one(target)
+        for v in sc.lore.list_characters():
+            if v.parent_id == target.id and sc.lore.character_source(v.id) == "own":
+                _publish_one(v)
+    return {"ok": True}
+
+
+@router.post("/characters/{cid}/unpublish")
+def unpublish_character_route(cid: str, request: Request):
+    """admin 取消发布。取消根卡级联取消其全部副本；取消副本只影响该副本。"""
+    sc = _state(request)
+    if sc.uid != ADMIN_UID:
+        raise HTTPException(403, "仅管理员可取消共享")
+    if sc.lore.character_source(cid) is None:
+        raise HTTPException(404, "角色不存在")
+    target = sc.lore.get_character(cid)
+    if not target.parent_id:
+        for v in sc.lore.list_characters():
+            if v.parent_id == cid and sc.lore.character_source(v.id) == "own":
+                sc.lore.unpublish_character(v.id)
+    sc.lore.unpublish_character(cid)
     return {"ok": True}
 
 
@@ -210,4 +314,4 @@ async def upload_avatar(request: Request, file: UploadFile = File(...)):
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(400, "图片过大（>5MB）")
     dest.write_bytes(content)
-    return {"url": f"/uploads/{fname}"}
+    return {"url": f"/uploads/{state.uid}/{fname}"}
