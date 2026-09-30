@@ -113,6 +113,26 @@ def test_masked_config_masks_embeddings_key(tmp_path):
     assert view["providers"][0]["api_key"] == mask_api_key(CHAT_KEY)
 
 
+def test_browser_config_roundtrip(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(browser={
+        "enabled": True,
+        "headless": True,
+        "proxy": "http://127.0.0.1:7897",
+        "max_steps": 20,
+        "idle_seconds": 300,
+    }), _req(state))
+    view = get_config(_req(state))
+    br = view["browser"]
+    assert br["enabled"] is True
+    assert br["proxy"] == "http://127.0.0.1:7897"
+    assert br["max_steps"] == 20
+    assert br["idle_seconds"] == 300
+    # UI 未暴露的字段回落默认值，仍在响应中
+    assert br["executable_path"] == ""
+    assert br["nav_timeout_ms"] == 20000
+
+
 def test_admin_sees_every_model(tmp_path):
     state = _mkstate(tmp_path)
     view = get_config(_req(state))

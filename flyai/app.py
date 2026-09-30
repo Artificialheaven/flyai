@@ -48,6 +48,8 @@ class AppState:
     loader: PluginLoader = None
     data_dir: Path = None
     user_store: UserStore = None
+    # AI 浏览器会话管理（Playwright 可选依赖；未启用时为 None）
+    browser: Optional["BrowserSessionManager"] = None
     _providers: Dict[str, BaseProvider] = field(default_factory=dict)
     _scopes: Dict[str, UserScope] = field(default_factory=dict)
     _embedder: "EmbeddingClient" = None
@@ -144,6 +146,28 @@ class AppState:
 
             self.registry.register(WebSearchTool(self.config.web_search))
             self.registry.register(WebFetchTool(self.config.web_search))
+        # AI 浏览器（Playwright）：逐级 open/snapshot/click/type 浏览
+        if self.config.browser.enabled:
+            from .tools.browser_tool import (
+                BrowserBackTool,
+                BrowserClickTool,
+                BrowserCloseTool,
+                BrowserOpenTool,
+                BrowserSnapshotTool,
+                BrowserTextTool,
+                BrowserTypeTool,
+            )
+
+            for tool_cls in (
+                BrowserOpenTool,
+                BrowserSnapshotTool,
+                BrowserClickTool,
+                BrowserTypeTool,
+                BrowserBackTool,
+                BrowserTextTool,
+                BrowserCloseTool,
+            ):
+                self.registry.register(tool_cls())
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -206,6 +230,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
+        # AI 浏览器管理器（enabled=false 时工具不注册，管理器也不创建）
+        if state.config.browser.enabled:
+            from .browser.manager import BrowserSessionManager
+
+            state.browser = BrowserSessionManager(state)
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         app.state.flyai = state
         logger.info(
@@ -216,6 +245,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             len(state.user_store.list()),
         )
         yield
+        if state.browser is not None:
+            await state.browser.aclose()
         await state.aclose_providers()
 
     app = FastAPI(title="FlyAI", lifespan=lifespan)

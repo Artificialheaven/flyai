@@ -326,6 +326,11 @@ function cacheElements() {
   el.setWsProxy = document.getElementById("set-ws-proxy");
   el.setWsNum = document.getElementById("set-ws-num");
   el.setWsPagechars = document.getElementById("set-ws-pagechars");
+  el.setBrowserEnabled = document.getElementById("set-browser-enabled");
+  el.setBrowserHeadless = document.getElementById("set-browser-headless");
+  el.setBrowserProxy = document.getElementById("set-browser-proxy");
+  el.setBrowserSteps = document.getElementById("set-browser-steps");
+  el.setBrowserIdle = document.getElementById("set-browser-idle");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");
@@ -3894,6 +3899,12 @@ function fillAdminForm() {
   el.setWsProxy.value = ws.proxy || "";
   el.setWsNum.value = ws.results_num || 8;
   el.setWsPagechars.value = ws.max_page_chars || 6000;
+  var br = state.config.browser || {};
+  el.setBrowserEnabled.checked = !!br.enabled;
+  el.setBrowserHeadless.checked = br.headless !== false;
+  el.setBrowserProxy.value = br.proxy || "";
+  el.setBrowserSteps.value = br.max_steps || 15;
+  el.setBrowserIdle.value = br.idle_seconds || 180;
 }
 function renderProviderRows() {
   el.providerList.innerHTML = "";
@@ -4129,6 +4140,14 @@ function saveConfig() {
     results_num: parseInt(el.setWsNum.value, 10) || 8,
     max_page_chars: parseInt(el.setWsPagechars.value, 10) || 6000,
   };
+  // 合并已有 browser 配置：UI 只暴露部分字段，保留 executable_path 等
+  var browser = Object.assign({}, state.config.browser || {}, {
+    enabled: !!el.setBrowserEnabled.checked,
+    headless: !!el.setBrowserHeadless.checked,
+    proxy: el.setBrowserProxy.value.trim(),
+    max_steps: parseInt(el.setBrowserSteps.value, 10) || 15,
+    idle_seconds: parseInt(el.setBrowserIdle.value, 10) || 180,
+  });
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -4136,7 +4155,7 @@ function saveConfig() {
       active_provider: active, providers: providers, tools: tools, roleplay: roleplay,
       embeddings: embeddings, image_generation: imageGeneration,
       image_models: imageModels, stable_diffusion: stableDiffusion,
-      pixiv: pixiv, web_search: webSearch,
+      pixiv: pixiv, web_search: webSearch, browser: browser,
     }),
   }).then(function (cfg) {
     state.config = cfg;

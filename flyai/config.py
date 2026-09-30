@@ -221,6 +221,57 @@ class WebSearchSettings(BaseModel):
     max_page_chars: int = 6000   # 单页正文截取上限，控 token
 
 
+class BrowserSettings(BaseModel):
+    """AI 浏览器：基于 Playwright 的有状态网页操控。
+
+    AI 通过 browser_open / browser_snapshot / browser_click / browser_type
+    像人一样逐级进入网页（打开 → 看可交互元素编号 → 点击 → 再看再点）。
+    Playwright 是可选依赖：未安装时浏览器工具不注册；
+    安装见 requirements-browser.txt（pip install playwright && playwright install chromium）。
+    """
+
+    enabled: bool = False
+    headless: bool = True
+    executable_path: str = ""       # Chromium 路径；留空自动发现
+    proxy: str = ""                 # 如 http://127.0.0.1:7897；留空直连
+    nav_timeout_ms: int = 20000     # 单次导航/动作超时
+    idle_seconds: int = 180         # 会话空闲自动关闭（标签页回收）
+    max_steps: int = 15             # 单个浏览器会话最多动作数（open/click/type/back）
+    max_snapshot_chars: int = 6000  # snapshot / get_text 文本上限，控 token
+
+    @validator("nav_timeout_ms")
+    def _clamp_nav_timeout(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 20000
+        return v if 5000 <= v <= 120000 else 20000
+
+    @validator("idle_seconds")
+    def _clamp_idle(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 180
+        return v if 30 <= v <= 3600 else 180
+
+    @validator("max_steps")
+    def _clamp_max_steps(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 15
+        return v if 1 <= v <= 50 else 15
+
+    @validator("max_snapshot_chars")
+    def _clamp_snapshot_chars(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 6000
+        return v if 500 <= v <= 30000 else 6000
+
+
 # Anything V5（danbooru 系动漫模型）通用负向标签：覆盖常见崩坏
 DEFAULT_SD_NEGATIVE = (
     "lowres, bad anatomy, bad hands, text, error, missing fingers, "
@@ -280,6 +331,7 @@ class AppConfig(BaseModel):
     stable_diffusion: StableDiffusionSettings = StableDiffusionSettings()
     pixiv: PixivSettings = PixivSettings()
     web_search: WebSearchSettings = WebSearchSettings()
+    browser: BrowserSettings = BrowserSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

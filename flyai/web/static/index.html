@@ -214,6 +214,20 @@
           <input type="number" id="set-ws-pagechars" value="6000" min="1000" step="1000" />
         </label>
 
+        <h4>AI 浏览器（Playwright）</h4>
+        <p class="sub">AI 可像人一样逐级浏览网页：打开 → 查看编号元素 → 点链接/按钮进入内部页面。需先安装：<code>pip install -r requirements-browser.txt</code> 然后 <code>playwright install chromium</code>（Ubuntu 另需 <code>sudo playwright install-deps chromium</code>）。未装时勾选也无法使用。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-browser-enabled" /> 启用 AI 浏览器</label>
+        <label class="f-label toggle"><input type="checkbox" id="set-browser-headless" /> 无头模式（不勾选会弹出浏览器窗口）</label>
+        <label class="f-label">代理
+          <input type="text" id="set-browser-proxy" placeholder="http://127.0.0.1:7897" />
+        </label>
+        <label class="f-label">单次会话最多动作数
+          <input type="number" id="set-browser-steps" value="15" min="1" max="50" />
+        </label>
+        <label class="f-label">空闲回收秒数
+          <input type="number" id="set-browser-idle" value="180" min="30" max="3600" step="30" />
+        </label>
+
         <div class="dialog-actions">
           <button id="btn-config-cancel" class="btn">取消</button>
           <button id="btn-config-save" class="btn primary">保存</button>

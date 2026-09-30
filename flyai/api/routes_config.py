@@ -23,6 +23,7 @@ from ..config import (
     ProviderConfig,
     StableDiffusionSettings,
     WebSearchSettings,
+    BrowserSettings,
     RoleplaySettings,
     mask_api_key,
     save_config,
@@ -75,6 +76,7 @@ class ConfigPayload(BaseModel):
     stable_diffusion: Optional[dict] = None
     pixiv: Optional[dict] = None
     web_search: Optional[dict] = None
+    browser: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -129,6 +131,7 @@ def _masked_config(state, uid: Optional[str] = None):
         "stable_diffusion": cfg.stable_diffusion.dict(),
         "pixiv": cfg.pixiv.dict(),
         "web_search": cfg.web_search.dict(),
+        "browser": cfg.browser.dict(),
     }
 
 
@@ -226,6 +229,9 @@ def put_config(payload: ConfigPayload, request: Request):
 
     if payload.web_search is not None:
         cfg.web_search = WebSearchSettings.parse_obj(dict(payload.web_search))
+
+    if payload.browser is not None:
+        cfg.browser = BrowserSettings.parse_obj(dict(payload.browser))
 
     _persist(state)
     return _masked_config(state, ADMIN_UID)

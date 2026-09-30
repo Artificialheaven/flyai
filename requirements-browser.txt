@@ -1,0 +1,6 @@
+# AI 浏览器（可选功能）：Playwright + Chromium
+# 安装：
+#   pip install -r requirements-browser.txt
+#   playwright install chromium
+# Ubuntu 还需系统库：sudo playwright install-deps chromium
+playwright>=1.40

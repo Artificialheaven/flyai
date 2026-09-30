@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import ipaddress
 import json
 import logging
 import re
@@ -27,7 +26,11 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from ..config import WebSearchSettings
+from ..netguard import is_blocked_host
 from .base import Tool, ToolContext, ToolResult
+
+# 兼容旧引用（tests 以 mod._is_blocked_host 调用）
+_is_blocked_host = is_blocked_host
 
 logger = logging.getLogger("flyai.websearch")
 
@@ -350,27 +353,6 @@ async def _fetch_with_redirect_checks(
         url = str(httpx.URL(url).join(location))
         await resp.aclose()
     raise RuntimeError("重定向次数过多（超过 5 次）")
-
-
-def _is_blocked_host(hostname: str) -> bool:
-    """拦截 localhost / 内网 / 环回 / 链路本地等地址（SSRF 防护）。"""
-    h = (hostname or "").strip().lower().rstrip(".")
-    if not h:
-        return True
-    if h == "localhost" or h.endswith(".localhost"):
-        return True
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        return False
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
 
 
 _HTML_TYPES = ("text/html", "application/xhtml+xml", "application/xml", "text/xml")

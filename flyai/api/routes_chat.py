@@ -169,6 +169,10 @@ async def chat(req: ChatRequest, request: Request):
     # RAG 语义检索（query_lore / query_chat_memory 共用）：配了 embeddings 才注入
     _get_emb = getattr(state, "get_embedder", None)
     services["embedder"] = _get_emb() if _get_emb else None
+    # AI 浏览器（启用时）：会话键按 用户:聊天会话 隔离
+    if getattr(state, "browser", None) is not None:
+        services["browser_manager"] = state.browser
+        services["browser_key"] = "%s:%s" % (sc.uid, session.id)
     # 角色卡自带属性时即启用（不再受全局开关限制）；
     # 旧卡回退全局 list 的逻辑在 resolve_attribute_defs 内已含开关判断
     attr_defs = resolve_attribute_defs(character, state.config.roleplay)
@@ -383,6 +387,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                 # RAG 语义检索：配了 embeddings 提供商才注入，否则工具回退关键词检索
                 _get_emb = getattr(state, "get_embedder", None)
                 services["embedder"] = _get_emb() if _get_emb else None
+                # AI 浏览器（启用时）：会话键按 用户:聊天会话 隔离
+                if getattr(state, "browser", None) is not None:
+                    services["browser_manager"] = state.browser
+                    services["browser_key"] = "%s:%s" % (sc.uid, session.id)
                 # 属性跟踪：该 AI 角色卡定义了属性即启用，值落在 member.attributes
                 member_attr_defs = resolve_attribute_defs(char, state.config.roleplay)
                 if member_attr_defs:
