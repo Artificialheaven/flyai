@@ -124,15 +124,57 @@ def test_apply_room_compression_writes_member_overrides_and_world():
     }
     out = apply_room_compression(s, data, lore)
 
-    # base（库卡）与 patch 合并：名称保留、简介更新、条目写入
+    # base（库卡）与 patch 合并：名称保留、简介更新、条目按标题合并写入
     assert ai.override["name"] == "初"
     assert ai.override["intro"] == "更新的简介"
-    assert ai.override["table"] == [{"title": "关键设定", "content": "内容值"}]
+    assert ai.override["table"] == [
+        {"title": "关键设定", "content": "内容值", "pinned": False}
+    ]
     assert s.world_override["content"] == "世界变化"
-    assert s.world_override["table"] == [{"title": "规则", "content": "一条"}]
+    assert s.world_override["table"] == [
+        {"title": "规则", "content": "一条", "pinned": False}
+    ]
 
     assert out["members"][ai.id] is ai.override
     assert out["world"]["content"] == "世界变化"
+
+
+def test_apply_room_compression_merges_table_by_title_and_keeps_pinned():
+    """AI 只返回部分标题：其余条目原样保留，同标题只更新 content，pinned 不丢。"""
+    from flyai.lore.models import Character, LoreEntry
+
+    s, _ = _room(["c1"])
+    base = Character(
+        id="c1",
+        name="初",
+        table=[
+            LoreEntry(title="旧设定", content="旧内容", pinned=True),
+            LoreEntry(title="待更新", content="原内容"),
+        ],
+    )
+    lore = _FakeLore([base])
+    ai = s.members[1]
+
+    data = {
+        "members": [
+            {
+                "member_id": ai.id,
+                "character": {
+                    "table": [
+                        {"title": "待更新", "content": "新内容"},
+                        {"title": "新设定", "content": "追加内容"},
+                    ]
+                },
+            }
+        ]
+    }
+    apply_room_compression(s, data, lore)
+
+    table = ai.override["table"]
+    assert [t["title"] for t in table] == ["旧设定", "待更新", "新设定"]
+    assert table[0]["content"] == "旧内容" and table[0]["pinned"] is True
+    assert table[1]["content"] == "新内容"
+    assert table[2]["content"] == "追加内容"
 
 
 def test_apply_room_compression_ignores_unknown_member():

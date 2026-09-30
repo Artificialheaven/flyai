@@ -15,13 +15,18 @@ from typing import Any, Dict, List
 class LoreEntry:
     title: str = ""
     content: str = ""
+    pinned: bool = False     # 常驻/钉选：True 时无条件注入系统提示词（类似世界书 constant）
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"title": self.title, "content": self.content}
+        return {"title": self.title, "content": self.content, "pinned": self.pinned}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "LoreEntry":
-        return cls(title=d.get("title", ""), content=d.get("content", ""))
+        return cls(
+            title=d.get("title", ""),
+            content=d.get("content", ""),
+            pinned=bool(d.get("pinned", False)),
+        )
 
 
 @dataclass
@@ -37,6 +42,7 @@ class Character:
     avatar: str = ""          # 头像资源路径（/uploads/xxx.png）或空
     intro: str = ""           # 角色简介
     background: str = ""      # 角色经历
+    mes_example: str = ""     # 对话范例：<START> 分隔的 3~5 轮范例（可用 {{char}}/{{user}}）
     table: List[LoreEntry] = field(default_factory=list)
     attributes: List[Dict[str, Any]] = field(default_factory=list)
     prompt_format: str = ""   # 对白格式要求（覆盖内置默认）
@@ -68,6 +74,7 @@ class Character:
             "avatar": self.avatar,
             "intro": self.intro,
             "background": self.background,
+            "mes_example": self.mes_example,
             "table": [e.to_dict() for e in self.table],
             "attributes": list(self.attributes),
             "prompt_format": self.prompt_format,
@@ -87,6 +94,7 @@ class Character:
             avatar=d.get("avatar", ""),
             intro=d.get("intro", ""),
             background=d.get("background", ""),
+            mes_example=d.get("mes_example", "") or "",
             table=[LoreEntry.from_dict(e) for e in d.get("table", [])],
             attributes=list(d.get("attributes", []) or []),
             prompt_format=d.get("prompt_format", ""),

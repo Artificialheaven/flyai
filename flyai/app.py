@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+import time
+
 from .config import (
     AppConfig,
     PROJECT_ROOT,
@@ -19,6 +21,7 @@ from .config import (
     load_config,
     save_config,
 )
+from .auth_sessions import AuthSessionStore, LoginRateLimiter, resolve_uid
 from .errors import ConfigError
 from .providers.base import BaseProvider
 from .providers.factory import create_provider
@@ -48,16 +51,56 @@ class AppState:
     _providers: Dict[str, BaseProvider] = field(default_factory=dict)
     _scopes: Dict[str, UserScope] = field(default_factory=dict)
     _embedder: "EmbeddingClient" = None
+    # 登录凭证（随机 token）与登录限速
+    auth_sessions: AuthSessionStore = field(default_factory=AuthSessionStore)
+    login_limiter: LoginRateLimiter = field(default_factory=LoginRateLimiter)
+    # 待确认的压缩提案：{proposal_id: {uid,sid,room,raw,basesig,ts}}
+    _compress_proposals: Dict[str, dict] = field(default_factory=dict)
+
+    _PROPOSAL_TTL = 1800
+    _PROPOSAL_MAX = 32
+
+    def put_compress_proposal(self, uid: str, sid: str, room: bool, raw: dict, basesig) -> str:
+        """存入一个待确认压缩提案，返回随机 id。顺带 prune 过期/超量提案。"""
+        import secrets
+
+        now = time.time()
+        stale = [k for k, p in self._compress_proposals.items() if now - p.get("ts", 0) > self._PROPOSAL_TTL]
+        for k in stale:
+            self._compress_proposals.pop(k, None)
+
+        pid = secrets.token_hex(8)
+        self._compress_proposals[pid] = {
+            "uid": uid, "sid": sid, "room": room, "raw": raw, "basesig": basesig, "ts": now,
+        }
+        if len(self._compress_proposals) > self._PROPOSAL_MAX:
+            oldest = min(self._compress_proposals.items(), key=lambda kv: kv[1].get("ts", 0))[0]
+            self._compress_proposals.pop(oldest, None)
+        return pid
+
+    def get_compress_proposal(self, proposal_id: str, uid: str) -> Optional[dict]:
+        """按 id + uid 取提案；不存在/过期/uid 不符返回 None。不消费。"""
+        p = self._compress_proposals.get(proposal_id)
+        if p is None or p.get("uid") != uid:
+            return None
+        if time.time() - p.get("ts", 0) > self._PROPOSAL_TTL:
+            self._compress_proposals.pop(proposal_id, None)
+            return None
+        return p
+
+    def drop_compress_proposal(self, proposal_id: str) -> None:
+        self._compress_proposals.pop(proposal_id, None)
 
     def user(self, request: Request) -> UserScope:
-        """按请求的 X-User-Id 头解析单个用户的数据作用域；未登录返回 401。
+        """按请求的 Bearer 令牌解析单个用户的数据作用域；未登录返回 401。
 
-        管理员（ADMIN_UID）凭据在 config，不在用户库；也拥有独立数据作用域。
+        令牌仅在 /api/auth/login 成功后签发；管理员（ADMIN_UID）凭据在 config，
+        不在用户库，但同样需要令牌才能访问。
         """
-        uid = (request.headers.get("x-user-id") or "").strip()
+        uid = (resolve_uid(self, request) or "").strip()
         valid = (uid == ADMIN_UID) or bool(self.user_store.get_by_id(uid))
         if not uid or not valid:
-            raise HTTPException(401, "未登录或用户不存在")
+            raise HTTPException(401, "未登录或登录已失效")
         scope = self._scopes.get(uid)
         if scope is None:
             scope = UserScope.build(uid, self.config, self.data_dir, self.user_store)
@@ -160,6 +203,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         data_dir = Path(__file__).resolve().parent.parent / "data"
         migrate_legacy(data_dir)
         state.data_dir = data_dir
+        # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
+        state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         app.state.flyai = state

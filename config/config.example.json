@@ -43,7 +43,7 @@
   "auth": {
     "admin": {
       "username": "admin",
-      "password": ""
+      "password": "test"
     }
   },
   "roleplay": {

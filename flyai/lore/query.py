@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+import asyncio
+import hashlib
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import AttributeDef, RoleplaySettings
+from ..providers.embedding import dot, normalize
 from .attributes import resolve_attribute_defs
+from .budget import fit_blocks, fit_budget
 from .models import Character, LoreEntry, World
 
 KIND_CHARACTER = "character"
 KIND_WORLD = "world"
+
+_RAG_MAX_EMBED = 300   # 语义检索最多向量化的条目数
+_EMBED_TEXT = 1000     # 每条目用于向量化的文本截断长度
+_KEYWORD_LIMIT_DEFAULT = 8
+
+_TERM_SPLIT_RE = re.compile(r"[\s,，、;；/]+")
 
 
 class LoreQuerier:
@@ -18,17 +31,44 @@ class LoreQuerier:
     def __init__(self, character: Character, world: World):
         self.character = character
         self.world = world
+        # per-kind 条目向量缓存：{kind: {"sig", "entries", "texts", "vecs"}}
+        self._vec_cache: Dict[str, Dict[str, Any]] = {}
+        self._vec_locks: Dict[str, asyncio.Lock] = {}
 
     def list_titles(self, kind: str) -> List[str]:
         table = self._table(kind)
         return [e.title for e in table]
 
-    def search(self, kind: str, keyword: str) -> Optional[List[LoreEntry]]:
+    def search(self, kind: str, keyword: str, limit: int = _KEYWORD_LIMIT_DEFAULT) -> Optional[List[LoreEntry]]:
+        """关键词检索：标题精确 > 标题子串 > 正文命中，按分数降序、原序兜底。
+
+        空 keyword 返回整表（工具层空 keyword 只列标题）。
+        """
         table = self._table(kind)
         kw = (keyword or "").strip().lower()
         if not kw:
             return table
-        return [e for e in table if kw in (e.title or "").lower()]
+        terms = [t for t in _TERM_SPLIT_RE.split(kw) if t]
+        if not terms:
+            return table
+
+        scored: List[Tuple[int, int, LoreEntry]] = []
+        for idx, e in enumerate(table):
+            title_l = (e.title or "").lower()
+            content_l = (e.content or "").lower()
+            score = 0
+            for term in terms:
+                if title_l == term:
+                    score += 100
+                c = title_l.count(term)
+                if c:
+                    score += 10 * c
+                score += content_l.count(term)
+            if score > 0:
+                scored.append((score, idx, e))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        limit = int(limit or _KEYWORD_LIMIT_DEFAULT)
+        return [e for _s, _i, e in scored[:limit]]
 
     def _table(self, kind: str) -> List[LoreEntry]:
         if kind == KIND_CHARACTER and self.character:
@@ -45,6 +85,222 @@ class LoreQuerier:
             kinds.append(KIND_WORLD)
         return kinds
 
+    # ---- 语义检索 ----
+
+    @staticmethod
+    def _table_signature(entries: List[LoreEntry]) -> str:
+        blob = json.dumps(
+            [{"title": e.title, "content": e.content, "pinned": e.pinned} for e in entries],
+            ensure_ascii=False,
+        )
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+    def _kind_lock(self, kind: str) -> asyncio.Lock:
+        lock = self._vec_locks.get(kind)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._vec_locks[kind] = lock
+        return lock
+
+    async def entry_vectors(self, kind: str, embedder) -> Tuple[List[LoreEntry], List[str], List[List[float]]]:
+        """返回该 kind 的 (条目, 向量化文本, 已归一向量)，按表签名缓存。"""
+        async with self._kind_lock(kind):
+            entries = self._table(kind)[:_RAG_MAX_EMBED]
+            sig = self._table_signature(entries)
+            cached = self._vec_cache.get(kind)
+            if cached and cached.get("sig") == sig:
+                return cached["entries"], cached["texts"], cached["vecs"]
+
+            texts = [((e.title or "") + "\n" + (e.content or ""))[:_EMBED_TEXT] for e in entries]
+            raw_vecs = await embedder.embed(texts)
+            vecs = [normalize(v) for v in raw_vecs]
+            self._vec_cache[kind] = {"sig": sig, "entries": entries, "texts": texts, "vecs": vecs}
+            return entries, texts, vecs
+
+    async def semantic_search(
+        self,
+        kind: str,
+        keyword: str,
+        embedder,
+        top_k: int,
+        threshold: float,
+    ) -> Optional[List[Tuple[float, LoreEntry]]]:
+        """语义检索：embed 失败返回 None（回退关键词）；全不达标返回空列表。"""
+        try:
+            qv = (await embedder.embed([keyword]))[0]
+            entries, _texts, vecs = await self.entry_vectors(kind, embedder)
+        except Exception:
+            return None
+        qn = normalize(qv)
+        scored = [(dot(qn, v), e) for e, v in zip(entries, vecs)]
+        if threshold and threshold > 0:
+            scored = [item for item in scored if item[0] >= threshold]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[: int(top_k or 4)]
+
+
+# ---- 对话范例 ----
+
+def parse_mes_example(raw: str, char_name: str, user_name: str = "用户") -> List[str]:
+    """把 <START> 分隔的范例原文拆成轮次，并替换 {{char}}/{{user}}。"""
+    rounds = [p.strip() for p in re.split(r"<START>", raw or "", flags=re.IGNORECASE) if p.strip()]
+    cn = char_name or "角色"
+    un = user_name or "用户"
+    out: List[str] = []
+    for r in rounds:
+        r = re.sub(r"\{\{\s*char\s*\}\}", cn, r, flags=re.IGNORECASE)
+        r = re.sub(r"\{\{\s*user\s*\}\}", un, r, flags=re.IGNORECASE)
+        out.append(r)
+    return out
+
+
+_MES_EXAMPLE_HEADER = (
+    "以下是该角色的对话风格范例，其中的剧情并未真实发生，仅供模仿语气、节奏与格式，"
+    "不要把范例内容当作已经发生过的事："
+)
+
+
+# ---- 统一提示词构建 ----
+
+@dataclass
+class PromptOptions:
+    """build_prompt 的选项。audience 非 None 即表示群聊成员路径。"""
+
+    base: str = ""
+    roleplay: Optional[RoleplaySettings] = None
+    user_character: Optional[Character] = None
+    # —— 群聊成员专属 ——
+    audience: Optional[List[str]] = None
+    memory: str = ""
+    current_attributes: Optional[Dict[str, Any]] = None
+    cross_memory_hint: bool = False
+
+
+def build_prompt(character: Optional[Character], world: Optional[World], opts: PromptOptions) -> str:
+    """把角色卡 + 世界观（含常驻条目/范例/预算截断）并入系统提示词。"""
+    rp = opts.roleplay
+    parts: List[str] = []
+
+    if character:
+        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
+        pinned = _pinned_block(character.table, "角色常驻资料", rp)
+        if pinned:
+            parts.append(pinned)
+        if character.intro:
+            parts.append(f"【角色简介】\n{fit_budget(character.intro, _budget(rp, 'intro_chars'))}")
+        if character.background:
+            parts.append(
+                f"【角色经历】\n{fit_budget(character.background, _budget(rp, 'background_chars'))}"
+            )
+        example = _mes_example_block(character, opts)
+        if example:
+            parts.append(example)
+        # 与旧构建器一致：角色 query_lore 引导无条件注入
+        parts.append(
+            "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
+        )
+
+    persona = _persona_block(opts.user_character)
+    if persona:
+        parts.append(persona)
+
+    if world and world.content:
+        parts.append(f"【世界观】\n{fit_budget(world.content, _budget(rp, 'world_chars'))}")
+    if world:
+        wpinned = _pinned_block(world.table, "世界常驻设定", rp)
+        if wpinned:
+            parts.append(wpinned)
+        if world.table:
+            parts.append(
+                "世界设定表的更多细节可通过 query_lore(kind='world', keyword=…) 查询。"
+            )
+
+    if opts.audience is not None:
+        names = "、".join(opts.audience)
+        parts.append(
+            f"【在场】你正与{names}以及用户在一个聊天窗口里自由群聊。"
+            "这是多人轮流发言的场合，每个在场者都要参与进来，请以你的角色自然、主动地回应当前话题与用户的发言。"
+            "不要替别人说话，也不要复读或机械重复别人已经说过的话。"
+        )
+        parts.append(
+            "【回应要求】轮到你的回合，请务必以自己的角色开口说点什么——哪怕只是一句简短的感想、"
+            "一个反应、一句反问或一个动作都可以，尽量简短自然，不要长篇大论、不要抢别人的话。"
+            "只有在极少数情况下（例如这条消息纯粹点的是别人的名字、或所聊的是与你完全无关的私人话题），"
+            "你才回复『略』来表示跳过。不要因为在你之前已有人开口就跟着沉默。"
+        )
+
+    if opts.memory:
+        parts.append(f"【你在这个聊天里的记忆】\n{opts.memory}")
+
+    if opts.audience is not None and opts.cross_memory_hint:
+        parts.append(
+            "你拥有跨对话记忆能力：可用工具 query_chat_memory 检索你自己参与的其它聊天窗口来确认过往；"
+            "遇到值得长期记住的新事实（重要信息、约定、状态变化等），用工具 update_chat_memory 把条目写进你的记忆。"
+        )
+
+    cur_attr_text = _current_attributes_text(opts.current_attributes)
+    if cur_attr_text:
+        parts.append(f"【你的属性】\n{cur_attr_text}")
+
+    # 角色卡自定义的系统级提示词（高优先级系统指令）
+    if character and character.system_prompt and character.system_prompt.strip():
+        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
+
+    # 无角色卡也无世界观时：以有用助手身份回答，不注入扮演格式/工具要求
+    if character or world:
+        req = _requirements_block(character, world, rp)
+        if req:
+            parts.append(req)
+
+    if character:
+        attr = _attribute_block(character, rp)
+        if attr:
+            parts.append(attr)
+
+    if not parts:
+        return opts.base
+    if opts.base:
+        parts.append(opts.base)
+    return "\n\n".join(parts)
+
+
+def _budget(rp: Optional[RoleplaySettings], field_name: str) -> int:
+    if rp is None:
+        return 0
+    return int(getattr(rp, field_name, 0) or 0)
+
+
+def _pinned_block(table: List[LoreEntry], label: str, rp: Optional[RoleplaySettings]) -> Optional[str]:
+    """渲染钉选条目为常驻块；无钉选返回 None。"""
+    blocks = [f"『{e.title or '(无标题)'}』\n{e.content or '(空内容)'}" for e in (table or []) if e.pinned]
+    if not blocks:
+        return None
+    kept, _dropped = fit_blocks(blocks, _budget(rp, "pinned_chars"))
+    if not kept:
+        return None
+    return f"【{label}】\n" + "\n\n".join(kept)
+
+
+def _mes_example_block(character: Character, opts: PromptOptions) -> Optional[str]:
+    """渲染对话范例块；无范例返回 None。"""
+    if not (character.mes_example or "").strip():
+        return None
+    user_name = opts.user_character.name if opts.user_character else "用户"
+    rounds = parse_mes_example(character.mes_example, character.name, user_name)
+    if not rounds:
+        return None
+    kept, _dropped = fit_blocks(rounds, _budget(opts.roleplay, "mes_example_chars"))
+    if not kept:
+        return None
+    return "【对话范例】\n" + _MES_EXAMPLE_HEADER + "\n" + "\n\n".join(kept)
+
+
+def _current_attributes_text(attributes: Optional[Dict[str, Any]]) -> str:
+    if not attributes:
+        return ""
+    lines = "；".join(f"{k}={v}" for k, v in attributes.items() if not str(k).startswith("_"))
+    return lines
+
 
 def build_system_prompt(
     character: Character,
@@ -57,49 +313,11 @@ def build_system_prompt(
 
     user_character：用户扮演的自设（persona），可选。设置后告诉 AI 用户正以该角色登场。
     """
-    parts: List[str] = []
-
-    if character:
-        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
-        if character.intro:
-            parts.append(f"【角色简介】\n{character.intro}")
-        if character.background:
-            parts.append(f"【角色经历】\n{character.background}")
-        parts.append(
-            "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
-        )
-
-    persona = _persona_block(user_character)
-    if persona:
-        parts.append(persona)
-
-    if world and world.content:
-        parts.append(f"【世界观】\n{world.content}")
-        if world.table:
-            parts.append(
-                "世界设定表的更多细节可通过 query_lore(kind='world', keyword=…) 查询。"
-            )
-
-    # 角色卡自定义的系统级提示词（高优先级系统指令）
-    if character and character.system_prompt and character.system_prompt.strip():
-        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
-
-    # 无角色卡也无世界观时：以有用助手身份回答，不注入扮演格式/工具要求
-    if character or world:
-        rp = _requirements_block(character, world, roleplay)
-        if rp:
-            parts.append(rp)
-
-    if character:
-        attr = _attribute_block(character, roleplay)
-        if attr:
-            parts.append(attr)
-
-    if not parts:
-        return base
-
-    parts.append(base)
-    return "\n\n".join(parts)
+    return build_prompt(
+        character,
+        world,
+        PromptOptions(base=base, roleplay=roleplay, user_character=user_character),
+    )
 
 
 def build_member_system_prompt(
@@ -115,74 +333,22 @@ def build_member_system_prompt(
 ) -> str:
     """Beta：为群聊中单个 AI 参与者构建系统提示词。
 
-    在 build_system_prompt 的基础上叠加该 AI 的本窗口记忆、属性与在场名单，
-    让每个 AI 在自己的角色卡/副本下、按自己的人物设定发言。
-
-    user_character：用户扮演的自设（persona），可选。设置后告诉 AI 用户正以该角色登场。
+    在统一构建器上叠加该 AI 的本窗口记忆、当前属性与在场名单。
+    name 参数保留兼容（扮演句使用角色卡名 character.name）。
     """
-    parts: List[str] = []
-
-    if character:
-        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆对话。")
-        if character.intro:
-            parts.append(f"【角色简介】\n{character.intro}")
-        if character.background:
-            parts.append(f"【角色经历】\n{character.background}")
-        parts.append(
-            "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
-        )
-
-    persona = _persona_block(user_character)
-    if persona:
-        parts.append(persona)
-
-    if world and world.content:
-        parts.append(f"【世界观】\n{world.content}")
-
-    if audience:
-        names = "、".join(audience)
-        parts.append(
-            f"【在场】你正与{names}以及用户在一个聊天窗口里自由群聊。"
-            "这是多人轮流发言的场合，每个在场者都要参与进来，请以你的角色自然、主动地回应当前话题与用户的发言。"
-            "不要替别人说话，也不要复读或机械重复别人已经说过的话。"
-        )
-        parts.append(
-            "【回应要求】轮到你的回合，请务必以自己的角色开口说点什么——哪怕只是一句简短的感想、"
-            "一个反应、一句反问或一个动作都可以，尽量简短自然，不要长篇大论、不要抢别人的话。"
-            "只有在极少数情况下（例如这条消息纯粹点的是别人的名字、或所聊的是与你完全无关的私人话题），"
-            "你才回复『略』来表示跳过。不要因为在你之前已有人开口就跟着沉默。"
-        )
-
-    if memory:
-        parts.append(f"【你在这个聊天里的记忆】\n{memory}")
-
-    if audience:
-        parts.append(
-            "你拥有跨对话记忆能力：可用工具 query_chat_memory 检索你自己参与的其它聊天窗口来确认过往；"
-            "遇到值得长期记住的新事实（重要信息、约定、状态变化等），用工具 update_chat_memory 把条目写进你的记忆。"
-        )
-
-    if attributes:
-        try:
-            import json
-
-            lines = "；".join(
-                f"{k}={v}" for k, v in attributes.items() if not str(k).startswith("_")
-            )
-        except Exception:
-            lines = ""
-        if lines:
-            parts.append(f"【你的属性】\n{lines}")
-
-    # 角色卡（含副本）自定义的系统级提示词
-    if character and character.system_prompt and character.system_prompt.strip():
-        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
-
-    if not parts:
-        return base
-    if base:
-        parts.append(base)
-    return "\n\n".join(parts)
+    return build_prompt(
+        character,
+        world,
+        PromptOptions(
+            base=base,
+            roleplay=roleplay,
+            user_character=user_character,
+            audience=audience,
+            memory=memory or "",
+            current_attributes=attributes,
+            cross_memory_hint=bool(audience),
+        ),
+    )
 
 
 def _persona_block(user_character: Optional[Character]) -> Optional[str]:
@@ -255,6 +421,8 @@ def _attribute_block(character: Optional[Character], roleplay: Optional[Roleplay
     own_attrs = bool(character and getattr(character, "attributes", None))
     if not own_attrs and (roleplay is None or not roleplay.attributes.enabled):
         return None
+    if roleplay is None:
+        roleplay = RoleplaySettings()
     defs: List[AttributeDef] = resolve_attribute_defs(character, roleplay)
     if not defs:
         return None

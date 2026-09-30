@@ -27,6 +27,9 @@ _DEFAULT_COMPRESS_SYS = (
     '"table": [{"title": "...", "content": "..."}]}}。'
     "自动分类：关于这个角色本人的归入 character，关于环境/世界/规则的归入 world；"
     "table 用于零散但重要的设定条目。没有变化的字段省略即可；不要编造对话中没出现过的信息。"
+    "内容表 table 按标题合并：已存在的标题只给需要更新的 content；新设定用新标题追加；"
+    "不要列出、不要改写你没提到的标题（未提到的条目会原样保留）；不要输出 pinned 字段；"
+    "严禁通过省略标题来删除条目。"
 )
 
 
@@ -154,14 +157,25 @@ def messages_to_script(messages, with_names: bool = False) -> str:
 
 
 def _messages_script(session) -> str:
-    """旧单 AI 会话包装：直接读 session.messages。"""
-    return messages_to_script(session.messages)
+    """单 AI 会话：读 session.messages；已迁移进线程的旧会话回退到主私聊窗口。
+
+    store.get() 会把带消息的旧会话自动迁移为成员+线程、并清空 session.messages，
+    不回退就会压缩空历史。
+    """
+    msgs = session.messages
+    if not msgs and session.threads:
+        from ..sessions.resolve import primary_thread
+
+        pt = primary_thread(session)
+        if pt is not None:
+            msgs = pt.messages
+    return messages_to_script(msgs)
 
 
-async def compress_conversation(
+async def build_conversation_compression(
     state, session, character: Character, world: World
-) -> Tuple[Character, World]:
-    """让 AI 把对话历史归纳进角色卡与世界设定，返回更新后的对象（不落库）。"""
+) -> Dict[str, Any]:
+    """让 AI 把对话历史归纳进角色卡与世界设定，返回原始 JSON dict（不落库）。"""
     provider = state.get_provider()
     if provider is None:
         raise RuntimeError("未配置可用提供商，请先在设置中添加")
@@ -172,24 +186,47 @@ async def compress_conversation(
         "【当前角色卡】\n"
         f"名称：{cur_char.get('name') or '（无）'}\n简介：{cur_char.get('intro') or '（空）'}\n"
         f"经历：{cur_char.get('background') or '（空）'}\n"
-        f"角色条目：{cur_char.get('table') and json.dumps(cur_char['table'], ensure_ascii=False) or '（空）'}\n\n"
+        f"角色条目标题：{_table_titles(cur_char.get('table')) or '（无）'}\n\n"
         "【当前世界观】\n"
         f"内容：{cur_world.get('content') or '（空）'}\n"
-        f"世界条目：{cur_world.get('table') and json.dumps(cur_world['table'], ensure_ascii=False) or '（空）'}\n\n"
+        f"世界条目标题：{_table_titles(cur_world.get('table')) or '（无）'}\n\n"
         "【对话历史】\n" + _messages_script(session) + "\n\n" +
-        "请把对话中新增且有价值的信息归纳进去，合并而非替换原有资料，仅输出 JSON。"
+        "请把对话中新增且有价值的信息归纳进去，按标题合并而非替换原有资料，仅输出 JSON。"
     )
     text = await complete(provider, [Message(role="user", content=user)], system_prompt=_DEFAULT_COMPRESS_SYS)
     data = _extract_json(text)
     if not isinstance(data, dict):
         raise ValueError("AI 输出不是对象")
+    return data
+
+
+def _table_titles(table) -> str:
+    if not table:
+        return ""
+    return "、".join(str(t.get("title", "")) for t in table if isinstance(t, dict))
+
+
+def apply_conversation_compression(
+    character: Optional[Character], world: Optional[World], data: Dict[str, Any]
+) -> Tuple[Character, World]:
+    """把压缩原始 JSON 合并进当前角色/世界，返回新对象（不落库）。"""
+    from .merge import merge_character_patch, merge_world_patch
 
     c_data = data.get("character") if isinstance(data.get("character"), dict) else {}
     w_data = data.get("world") if isinstance(data.get("world"), dict) else {}
-
-    new_char = _apply_char(cur_char, c_data, character)
-    new_world = _apply_world(cur_world, w_data, world)
+    base_char = character.to_dict() if character else {}
+    base_world = world.to_dict() if world else {}
+    new_char = Character.from_dict(merge_character_patch(base_char, c_data))
+    new_world = World.from_dict(merge_world_patch(base_world, w_data))
     return new_char, new_world
+
+
+async def compress_conversation(
+    state, session, character: Character, world: World
+) -> Tuple[Character, World]:
+    """旧入口：生成 + 合并（不落库）。新代码请直接调用 build/apply 两段。"""
+    data = await build_conversation_compression(state, session, character, world)
+    return apply_conversation_compression(character, world, data)
 
 
 _DEFAULT_ROOM_COMPRESS_SYS = (
@@ -201,6 +238,9 @@ _DEFAULT_ROOM_COMPRESS_SYS = (
     '"world": {"content": "世界观", "table": [{"title": "...", "content": "..."}]}}。'
     "对话行的 [名字] 前缀标明发言者；member_id 必须取自给出的参与者清单。"
     "没有变化的字段或成员省略即可；不要编造对话中没出现过的信息。"
+    "内容表 table 按标题合并：已存在的标题只给需要更新的 content；新设定用新标题追加；"
+    "不要列出、不要改写你没提到的标题（未提到的条目会原样保留）；不要输出 pinned 字段；"
+    "严禁通过省略标题来删除条目。"
 )
 
 
@@ -224,13 +264,24 @@ async def compress_room(state, session, lore) -> Dict[str, Any]:
         char = member_character(m, lore)
         summary = "（无角色卡）"
         if char is not None:
-            summary = f"简介：{char.intro or '（空）'}；经历：{char.background or '（空）'}"
+            titles = _table_titles([e.to_dict() for e in char.table])
+            summary = (
+                f"简介：{char.intro or '（空）'}；经历：{char.background or '（空）'}"
+                f"；现有条目标题：{titles or '（无）'}"
+            )
         parts.append(f"参与者 member_id={m.id}（{m.name}）当前资料：{summary}")
 
     for t in session.threads:
         parts.append(
             f"【窗口 {t.title or t.kind}】\n" + messages_to_script(t.messages, with_names=True)
         )
+
+    from ..sessions.resolve import effective_world
+
+    cur_world = effective_world(session, lore)
+    if cur_world is not None:
+        wtitles = _table_titles([e.to_dict() for e in cur_world.table])
+        parts.append(f"当前世界现有条目标题：{wtitles or '（无）'}")
 
     parts.append("参与者ID 清单：" + "、".join(member_ids))
     parts.append("请把对话中新增且有价值的信息按参与者归纳，合并而非替换原有资料，仅输出 JSON。")
@@ -242,26 +293,3 @@ async def compress_room(state, session, lore) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("AI 输出不是对象")
     return data
-
-
-def _apply_char(cur: Dict[str, Any], c_data: Dict[str, Any], base: Optional[Character]) -> Character:
-    merged = dict(cur)
-    for field in ("intro", "background"):
-        if c_data.get(field):
-            merged[field] = str(c_data[field]).strip()
-    table = c_data.get("table")
-    if isinstance(table, list) and table:
-        merged["table"] = [{"title": str(t.get("title", "")), "content": str(t.get("content", ""))} for t in table if isinstance(t, dict)]
-    new = Character.from_dict(merged)
-    return new
-
-
-def _apply_world(cur: Dict[str, Any], w_data: Dict[str, Any], base: Optional[World]) -> World:
-    merged = dict(cur)
-    if w_data.get("content"):
-        merged["content"] = str(w_data["content"]).strip()
-    table = w_data.get("table")
-    if isinstance(table, list) and table:
-        merged["table"] = [{"title": str(t.get("title", "")), "content": str(t.get("content", ""))} for t in table if isinstance(t, dict)]
-    new = World.from_dict(merged)
-    return new

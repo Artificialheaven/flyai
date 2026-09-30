@@ -7,6 +7,8 @@ import os
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from flyai.config import ImageGenSettings, ImageModelConfig
@@ -39,10 +41,9 @@ def _ctx(tmp_path, url_base="/uploads/u", history=None, model=None):
 
 
 def _patch_ark(monkeypatch, captured, result=None):
-    async def fake_ark(model_cfg, prompt, size,
-                       ref_media_type=None, ref_b64=None):
+    async def fake_ark(model_cfg, prompt, size, ref_images=None):
         captured.update(model=model_cfg.id, prompt=prompt, size=size,
-                        ref_media_type=ref_media_type, ref_b64=ref_b64)
+                        ref_images=ref_images)
         return result or (b"OUT-JPEG", ".jpg", "image/jpeg")
 
     monkeypatch.setattr(mod, "ark_generate", fake_ark)
@@ -59,8 +60,7 @@ def test_auto_reference_from_user_image(tmp_path, monkeypatch):
     ))
     assert result.ok
     assert captured["model"] == "m1"
-    assert captured["ref_media_type"] == "image/jpeg"
-    assert captured["ref_b64"] == JPEG_B64
+    assert captured["ref_images"] == [("image/jpeg", JPEG_B64)]
     assert result.output.startswith("[图片已生成] /uploads/u/gen_")
 
     # [图片参数]：云端图生图方式
@@ -86,7 +86,8 @@ def test_auto_reference_from_generated_marker(tmp_path, monkeypatch):
     result = asyncio.run(_tool().run(
         {"prompt": "把狗换成猫"}, _ctx(tmp_path, history=history)
     ))
-    assert result.ok and captured["ref_b64"] == JPEG_B64
+    assert result.ok
+    assert captured["ref_images"] == [("image/jpeg", JPEG_B64)]
 
 
 def test_user_image_preferred_over_older_generated(tmp_path, monkeypatch):
@@ -105,7 +106,9 @@ def test_user_image_preferred_over_older_generated(tmp_path, monkeypatch):
     asyncio.run(_tool().run(
         {"prompt": "p"}, _ctx(tmp_path, history=history)
     ))
-    assert captured["ref_b64"] == base64.b64encode(newer).decode()
+    assert captured["ref_images"] == [
+        ("image/jpeg", base64.b64encode(newer).decode())
+    ]
 
 
 def test_explicit_image_path(tmp_path, monkeypatch):
@@ -115,14 +118,103 @@ def test_explicit_image_path(tmp_path, monkeypatch):
     result = asyncio.run(_tool().run(
         {"prompt": "换成油画", "image": "/uploads/u/ref.jpg"}, _ctx(tmp_path)
     ))
-    assert result.ok and captured["ref_b64"] == JPEG_B64
+    assert result.ok
+    assert captured["ref_images"] == [("image/jpeg", JPEG_B64)]
+
+
+IMG2 = b"\xff\xd8\xff\xe0" + b"\x11" * 32
+IMG2_B64 = base64.b64encode(IMG2).decode()
+
+
+def test_auto_count_collects_two_user_images_chronological(tmp_path, monkeypatch):
+    """image_count=2：倒序收集两张用户图后翻回时间先后，先发=图1。"""
+    captured = {}
+    _patch_ark(monkeypatch, captured)
+    history = [
+        Message(role="user", content="图1", images=[
+            ImageAttachment(media_type="image/jpeg", data=JPEG_B64)]),
+        Message(role="user", content="图2", images=[
+            ImageAttachment(media_type="image/jpeg", data=IMG2_B64)]),
+    ]
+    result = asyncio.run(_tool().run(
+        {"prompt": "将图1人物的服装换成图2的服装", "image_count": 2},
+        _ctx(tmp_path, history=history)))
+    assert result.ok
+    assert captured["ref_images"] == [
+        ("image/jpeg", JPEG_B64), ("image/jpeg", IMG2_B64)]
+
+
+def test_auto_count_two_attachments_one_message(tmp_path, monkeypatch):
+    captured = {}
+    _patch_ark(monkeypatch, captured)
+    history = [Message(role="user", content="两张", images=[
+        ImageAttachment(media_type="image/jpeg", data=JPEG_B64),
+        ImageAttachment(media_type="image/jpeg", data=IMG2_B64)])]
+    result = asyncio.run(_tool().run(
+        {"prompt": "融合图1与图2", "image_count": 2},
+        _ctx(tmp_path, history=history)))
+    assert result.ok
+    assert len(captured["ref_images"]) == 2
+
+
+def test_auto_count_shortage_error(tmp_path):
+    """历史只有 1 张却要 2 张：报错且不静默少图。"""
+    history = [Message(role="user", content="一张", images=[
+        ImageAttachment(media_type="image/jpeg", data=JPEG_B64)])]
+    result = asyncio.run(_tool().run(
+        {"prompt": "p", "image_count": 2},
+        _ctx(tmp_path, history=history)))
+    assert not result.ok
+    assert "需要 2 张" in result.output and "只有 1 张" in result.output
+
+
+def test_explicit_array_of_paths(tmp_path, monkeypatch):
+    captured = {}
+    _patch_ark(monkeypatch, captured)
+    (tmp_path / "a.jpg").write_bytes(JPEG)
+    (tmp_path / "b.jpg").write_bytes(IMG2)
+    result = asyncio.run(_tool().run(
+        {"prompt": "把图1人物放进图2场景",
+         "image": ["/uploads/u/a.jpg", "/uploads/u/b.jpg"]},
+        _ctx(tmp_path)))
+    assert result.ok
+    assert captured["ref_images"] == [
+        ("image/jpeg", JPEG_B64), ("image/jpeg", IMG2_B64)]
+
+
+def test_too_many_explicit_paths(tmp_path):
+    paths = ["/uploads/u/%d.jpg" % i for i in range(15)]
+    result = asyncio.run(_tool().run(
+        {"prompt": "p", "image": paths}, _ctx(tmp_path)))
+    assert not result.ok and "最多 14 张" in result.output
+
+
+def test_refs_persisted_in_meta(tmp_path, monkeypatch):
+    _patch_ark(monkeypatch, {})
+    history = [
+        Message(role="user", content="图1", images=[
+            ImageAttachment(media_type="image/jpeg", data=JPEG_B64)]),
+        Message(role="user", content="图2", images=[
+            ImageAttachment(media_type="image/jpeg", data=IMG2_B64)]),
+    ]
+    result = asyncio.run(_tool().run(
+        {"prompt": "p", "image_count": 2},
+        _ctx(tmp_path, history=history)))
+    mm = re.search(r"^\[图片参数\] (\{.*\})$", result.output, re.M)
+    info = json.loads(mm.group(1))
+    assert info["ref_count"] == 2
+    refs = info["refs"]
+    assert len(refs) == 2
+    assert all(r.startswith("/uploads/u/ref_") for r in refs)
+    # 参考图实际落盘
+    assert all((tmp_path / r.rsplit("/", 1)[1]).is_file() for r in refs)
 
 
 def test_missing_reference_error(tmp_path):
     result = asyncio.run(_tool().run(
         {"prompt": "改图"}, _ctx(tmp_path, history=[])
     ))
-    assert not result.ok and "找不到" in result.output
+    assert not result.ok and "只有 0 张" in result.output
 
 
 def test_bad_reference_bytes(tmp_path):
@@ -175,12 +267,10 @@ def test_missing_api_key(tmp_path):
     assert result.output.startswith("[工具错误]")
 
 
-# ---- Ark base64 编码退化（data URI → 裸 base64）----
+# ---- Ark image 编码与退化（data URI → 裸 base64）----
 
-def test_ark_generate_retries_raw_base64_on_image_400():
+def _make_handler(calls, first_response):
     import httpx
-
-    calls = []
 
     def handler(request):
         if not request.url.path.endswith("/images/generations"):
@@ -189,18 +279,45 @@ def test_ark_generate_retries_raw_base64_on_image_400():
         body = json.loads(request.content)
         calls.append(body.get("image"))
         if len(calls) == 1:
-            return httpx.Response(400, json={"error": {"message": "invalid image base64"}})
+            return first_response
         return httpx.Response(200, json={"data": [{"url": "https://cdn/x.jpg"}]})
 
-    transport = httpx.MockTransport(handler)
-    model_cfg = _model()
-    out = asyncio.run(_run_with(transport, model_cfg))
+    return handler
+
+
+def test_ark_generate_retries_raw_base64_on_image_400():
+    import httpx
+
+    calls = []
+    handler = _make_handler(calls, httpx.Response(
+        400, json={"error": {"message": "invalid image base64"}}))
+
+    out = asyncio.run(_run_with(
+        httpx.MockTransport(handler), _model(),
+        refs=[("image/jpeg", JPEG_B64)]))
     assert out == JPEG
     assert calls[0].startswith("data:image/jpeg;base64,")
     assert calls[1] == JPEG_B64  # 裸 base64
 
 
-async def _run_with(transport, model_cfg):
+def test_ark_generate_multiple_refs_send_array():
+    """多张参考图：image 发 data URI 数组（顺序即图1、图2）；400 后退化裸 base64 数组。"""
+    import httpx
+
+    calls = []
+    handler = _make_handler(calls, httpx.Response(
+        400, json={"error": {"message": "invalid image"}}))
+
+    asyncio.run(_run_with(
+        httpx.MockTransport(handler), _model(),
+        refs=[("image/jpeg", "AAA"), ("image/png", "BBB")]))
+    assert isinstance(calls[0], list) and len(calls[0]) == 2
+    assert calls[0] == ["data:image/jpeg;base64,AAA",
+                        "data:image/png;base64,BBB"]
+    assert calls[1] == ["AAA", "BBB"]  # 裸 base64 数组
+
+
+async def _run_with(transport, model_cfg, refs=None):
     import httpx
 
     from flyai.tools.image_tool import ark_generate
@@ -215,12 +332,39 @@ async def _run_with(transport, model_cfg):
     httpx.AsyncClient.__init__ = patched_init
     try:
         content, ext, mt = await ark_generate(
-            model_cfg, "p", "1K",
-            ref_media_type="image/jpeg", ref_b64=JPEG_B64,
+            model_cfg, "p", "1K", ref_images=refs,
         )
     finally:
         httpx.AsyncClient.__init__ = orig_init
     return content
+
+
+def test_ark_generate_both_failures_surfaces_first_error():
+    """data URI 与裸 base64 都 400 时，异常必须含首次 data URI 的真实错误，
+    不能只抛裸 base64 的 invalid url specified（真实事故：真实原因被回退掩盖）。"""
+    import httpx
+
+    calls = []
+    handler = _make_handler(calls, httpx.Response(400, json={"error": {
+        "message": "image resolution ratio out of range"}}))
+    # 第二次（裸 base64）返回 invalid url specified：_make_handler 成功分支不同，
+    # 这里单独构造
+    def handler2(request):
+        body = json.loads(request.content)
+        calls.append(body.get("image"))
+        if len(calls) == 1:
+            return httpx.Response(400, json={"error": {
+                "message": "image resolution ratio out of range"}})
+        return httpx.Response(400, json={"error": {
+            "message": "invalid url specified"}})
+
+    with pytest.raises(RuntimeError) as ei:
+        asyncio.run(_run_with(
+            httpx.MockTransport(handler2), _model(),
+            refs=[("image/jpeg", JPEG_B64)]))
+    msg = str(ei.value)
+    assert "invalid url specified" in msg
+    assert "resolution ratio out of range" in msg  # 首次错误未被吞
 
 
 def test_error_mentions_image():

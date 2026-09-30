@@ -13,6 +13,7 @@ var state = {
   abortController: null,
   currentAssistant: null,
   currentAttrs: null,
+  authToken: null,  // 登录令牌（Bearer），唯一访问凭证
   userId: null,
   userName: "",
   userLevel: 0,     // 权限等级 0-255；admin 256
@@ -40,7 +41,8 @@ var state = {
   stickBottom: true,        // 用户贴底时新内容才自动滚动
   pendingSend: null,        // 本次已发送 {text, images}，请求失败时回填
   draftTimer: null,
-  tokenTotals: {},          // 会话 id -> 本次页面会话累计总 token
+  tokenTotals: {},          // 会话 id -> 累计总 token（含服务端持久值 + 本页面新增）
+  tokenDetails: {},         // 会话 id -> {p, c} 输入/输出明细，供 chip 悬停提示
 };
 
 var el = {};
@@ -60,7 +62,7 @@ function safeCloseDialogs() {
 }
 function authHeaders(extra) {
   var h = Object.assign({}, extra || {});
-  if (state.userId) h["X-User-Id"] = state.userId;
+  if (state.authToken) h["Authorization"] = "Bearer " + state.authToken;
   return h;
 }
 function goLogin() {
@@ -74,8 +76,10 @@ function renderUserBadge() {
   if (el.btnUsers) el.btnUsers.classList.toggle("hidden", state.role !== "admin");
 }
 function clearAuth() {
+  localStorage.removeItem("flyai-token");
   localStorage.removeItem("flyai-uid");
   localStorage.removeItem("flyai-role");
+  state.authToken = null;
   state.userId = null;
   state.role = "";
   state.currentSessionId = null;
@@ -84,14 +88,15 @@ function clearAuth() {
   try { clearMessages(); if (el.threads) el.threads.classList.add("hidden"); } catch (e) {}
 }
 function bootstrap() {
-  var saved = localStorage.getItem("flyai-uid");
-  if (!saved) { goLogin(); return; }  // 不登录不能进
-  state.userId = saved;
-  state.role = localStorage.getItem("flyai-role") || "user";
+  var token = localStorage.getItem("flyai-token");
+  if (!token) { goLogin(); return; }  // 不登录不能进
+  state.authToken = token;
   state.imageModelId = localStorage.getItem("flyai-image-model") || "";
   state.sdEngine = localStorage.getItem("flyai-sd-engine") === "sd";
   state.topbarCollapsed = localStorage.getItem("flyai-topbar-collapsed") === "1";
   fetchJSON("/api/auth/me").then(function (res) {
+    state.userId = res.id;
+    localStorage.setItem("flyai-uid", res.id);  // 供 owner 比对/调试，非凭证
     state.userName = res.name;
     state.role = res.role || "user";
     state.userLevel = parseInt(res.level, 10) || 0;
@@ -137,6 +142,21 @@ function renderUserList() {
       });
       levelWrap.appendChild(level);
       row.appendChild(levelWrap);
+      // 改密码：点击后行内展开密码输入
+      var pwdBtn = document.createElement("button");
+      pwdBtn.className = "btn small";
+      pwdBtn.textContent = "🔑 改密";
+      var pwdBox = makePasswordResetBox(u.id, u.name);
+      pwdBtn.addEventListener("click", function () {
+        pwdBtn.classList.add("hidden");
+        row.appendChild(pwdBox);
+        pwdBox.querySelector("input").focus();
+      });
+      pwdBox.addEventListener("done", function () {
+        pwdBox.remove();
+        pwdBtn.classList.remove("hidden");
+      });
+      row.appendChild(pwdBtn);
       var del = document.createElement("button");
       del.className = "btn small";
       del.textContent = "删除";
@@ -162,6 +182,50 @@ function changeUserLevel(uid, input) {
     el.userMsg.textContent = "等级修改失败: " + e.message;
     el.userMsg.className = "msg-bar err";
   });
+}
+/* 行内密码重置框：新密码输入 + 确认/取消；确认走 PATCH .../password */
+function makePasswordResetBox(uid, name) {
+  var box = document.createElement("span");
+  box.className = "pwd-reset";
+  var input = document.createElement("input");
+  input.type = "password";
+  input.placeholder = "输入新密码（留空=无密码）";
+  input.autocomplete = "new-password";
+  var ok = document.createElement("button");
+  ok.className = "btn small primary";
+  ok.textContent = "确认";
+  var cancel = document.createElement("button");
+  cancel.className = "btn small";
+  cancel.textContent = "取消";
+  function finish() { box.dispatchEvent(new Event("done")); }
+  function submit() {
+    var password = input.value;
+    ok.disabled = true;
+    fetchJSON("/api/auth/users/" + encodeURIComponent(uid) + "/password", {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ password: password }),
+    }).then(function (r) {
+      el.userMsg.textContent = "已重置「" + name + "」的密码，其现有登录已全部失效"
+        + "（吊销 " + intOr(r.revoked_sessions, 0) + " 个会话）";
+      el.userMsg.className = "msg-bar ok";
+      finish();
+    }).catch(function (e) {
+      el.userMsg.textContent = "密码重置失败: " + e.message;
+      el.userMsg.className = "msg-bar err";
+      ok.disabled = false;
+    });
+  }
+  ok.addEventListener("click", submit);
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+    if (e.key === "Escape") finish();
+  });
+  cancel.addEventListener("click", finish);
+  box.appendChild(input);
+  box.appendChild(ok);
+  box.appendChild(cancel);
+  return box;
 }
 function deleteUser(uid, name, row, btn) {
   if (!confirm("确定删除用户「" + name + "」？其角色卡/世界观/会话数据也会被一并移除。")) return;
@@ -279,9 +343,12 @@ function cacheElements() {
   el.exportDialog = document.getElementById("export-dialog");
   el.exportBody = document.getElementById("export-body");
   el.exportSub = document.getElementById("export-sub");
+  el.exportMsg = document.getElementById("export-msg");
   el.btnExportClose = document.getElementById("btn-export-close");
   el.btnExportDownload = document.getElementById("btn-export-download");
   el.btnExportPublish = document.getElementById("btn-export-publish");
+  el.btnExportApply = document.getElementById("btn-export-apply");
+  el.btnExportDiscard = document.getElementById("btn-export-discard");
   el.btnNav = document.getElementById("btn-nav");
   el.overlay = document.getElementById("overlay");
   el.setRpFormat = document.getElementById("set-rp-format");
@@ -471,6 +538,8 @@ function bindEvents() {
   if (el.btnExportClose) el.btnExportClose.addEventListener("click", function () { if (el.exportDialog) el.exportDialog.close(); });
   if (el.btnExportDownload) el.btnExportDownload.addEventListener("click", downloadConversation);
   if (el.btnExportPublish) el.btnExportPublish.addEventListener("click", publishConversationCharacter);
+  if (el.btnExportApply) el.btnExportApply.addEventListener("click", applyCompressProposal);
+  if (el.btnExportDiscard) el.btnExportDiscard.addEventListener("click", discardCompressProposal);
   if (el.userPasswordInput) el.userPasswordInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); createUser(); }
   });
@@ -652,29 +721,241 @@ function downloadConversation() {
     .then(function (obj) { downloadJSON(obj, (obj.name || "conversation") + ".json"); })
     .catch(function (e) { showToast("导出对话失败: " + e.message, "err"); });
 }
+var compressReview = null; // {sid, room, pid}
+
+function _hideBtn(b) { if (b) b.classList.add("hidden"); }
+function _showBtn(b) { if (b) b.classList.remove("hidden"); }
+
 function openCompressDialog() {
   var s = currentSession(); if (!s) return;
-  el.exportSub.textContent = "AI 正在把对话历史归纳进角色卡与世界观并分类…";
+  compressReview = null;
+  el.exportSub.textContent = "AI 正在归纳对话并按标题合并进角色卡与世界观…";
   el.exportBody.innerHTML = '<div class="sub">压缩中，请稍候…</div>';
-  el.btnExportDownload.classList.add("hidden");
-  el.btnExportPublish.classList.add("hidden");
+  el.exportMsg.textContent = "";
+  el.exportMsg.className = "msg-bar";
+  [el.btnExportApply, el.btnExportDiscard, el.btnExportClose, el.btnExportDownload, el.btnExportPublish].forEach(_hideBtn);
   safeCloseDialogs();
   if (el.exportDialog.showModal) el.exportDialog.showModal();
   fetchJSON("/api/sessions/" + s.id + "/compress", { method: "POST" }).then(function (res) {
-    el.exportSub.textContent = "压缩完成，已写入当前会话副本（库主卡不受影响）。";
-    if (res.room) {
-      el.exportBody.innerHTML = renderRoomCompressSummary(res.members || {}, res.world);
-    } else {
-      el.exportBody.innerHTML = renderCompressSummary(res.character, res.world);
-      if (res.character && res.character.name) el.btnExportPublish.classList.remove("hidden");
-    }
-    el.btnExportDownload.classList.remove("hidden");
-    // 重新拉取会话：房间成员副本写入后刷新头部与当前窗口，后续对话即可感知压缩设定
-    selectSession(s.id);
+    compressReview = { sid: s.id, room: !!res.room, pid: res.proposal_id };
+    el.exportSub.textContent = "压缩提案 · 确认后写入当前会话副本（库主卡不受影响，漏列的条目会原样保留）";
+    el.exportBody.innerHTML = res.room ? renderRoomCompressDiff(res) : renderSingleCompressDiff(res);
+    _showBtn(el.btnExportApply);
+    _showBtn(el.btnExportDiscard);
   }).catch(function (e) {
     el.exportSub.textContent = "压缩失败";
     el.exportBody.innerHTML = '<div class="msg-bar err">' + escapeHtml(e.message) + "</div>";
+    _showBtn(el.btnExportClose);
   });
+}
+
+function discardCompressProposal() {
+  // 整体放弃：提案 30 分钟后自动过期，无需通知后端
+  compressReview = null;
+  if (el.exportDialog) el.exportDialog.close();
+}
+
+function applyCompressProposal() {
+  if (!compressReview) return;
+  var review = compressReview;
+  el.exportSub.textContent = "正在写入…";
+  el.exportBody.innerHTML = '<div class="sub">写入会话副本中…</div>';
+  el.exportMsg.textContent = "";
+  el.exportMsg.className = "msg-bar";
+  [el.btnExportApply, el.btnExportDiscard].forEach(_hideBtn);
+  fetchJSON("/api/sessions/" + review.sid + "/compress/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: review.pid }),
+  }).then(function (out) {
+    compressReview = null;
+    el.exportSub.textContent = "压缩完成，已写入当前会话副本（库主卡不受影响）。";
+    if (review.room) {
+      el.exportBody.innerHTML = renderRoomCompressSummary(out.members || {}, out.world);
+    } else {
+      el.exportBody.innerHTML = renderCompressSummary(out.character, out.world);
+      if (out.character && out.character.name) _showBtn(el.btnExportPublish);
+    }
+    _showBtn(el.btnExportDownload);
+    _showBtn(el.btnExportClose);
+    // 写入后才刷新：房间成员副本生效，后续对话即可感知压缩设定
+    selectSession(review.sid);
+  }).catch(function (e) {
+    el.exportSub.textContent = "写入失败";
+    el.exportMsg.className = "msg-bar err";
+    el.exportMsg.textContent = e.message;
+    el.exportBody.innerHTML = '<div class="sub">提案未被使用（通常是提案生成后设定又被改过），请关闭后重新点「☁ 压缩」。</div>';
+    compressReview = null;
+    _showBtn(el.btnExportClose);
+    selectSession(review.sid);
+  });
+}
+
+/* ==== 提案 diff 渲染 ==== */
+
+function renderSingleCompressDiff(res) {
+  var h = '<div class="cs-block"><b>📇 角色卡变更</b>' + renderCharacterDiffBody(res.diff.character) + "</div>";
+  h += '<div class="cs-block"><b>🌍 世界观变更</b>' + renderWorldDiffBody(res.diff.world) + "</div>";
+  return h;
+}
+
+function renderRoomCompressDiff(res) {
+  var h = '<div class="cs-block"><b>👥 各参与者变更</b>';
+  var ids = Object.keys(res.diff.members || {});
+  if (!ids.length) h += "<div class='sub'>（无）</div>";
+  ids.forEach(function (mid) {
+    var d = res.diff.members[mid];
+    var seat = (state.roomMembers || []).find(function (m) { return m.id === mid; });
+    var afterC = res.after.members[mid] || {};
+    var name = (seat && memberDisplayName(seat)) || cardDisplayName(afterC) || mid;
+    h += '<details class="member-diff"' + (_charDiffEmpty(d) ? "" : " open") + ">"
+      + "<summary><b>" + escapeHtml(name) + "</b><span class='sub'>" + escapeHtml(_charDiffCounts(d)) + "</span></summary>"
+      + renderCharacterDiffBody(d) + "</details>";
+  });
+  h += "</div>";
+  h += '<div class="cs-block"><b>🌍 世界观变更</b>' + renderWorldDiffBody(res.diff.world) + "</div>";
+  return h;
+}
+
+function _charDiffEmpty(d) {
+  if (!d) return true;
+  return d.intro.before === d.intro.after
+    && d.background.before === d.background.after
+    && !(d.table.added || []).length
+    && !(d.table.changed || []).length;
+}
+
+function _charDiffCounts(d) {
+  if (_charDiffEmpty(d)) return "无变更";
+  var parts = [];
+  if (d.intro.before !== d.intro.after) parts.push("简介更新");
+  if (d.background.before !== d.background.after) parts.push("经历更新");
+  var addN = (d.table.added || []).length;
+  var chgN = (d.table.changed || []).length;
+  if (addN) parts.push("新增条目 " + addN);
+  if (chgN) parts.push("更新条目 " + chgN);
+  return parts.join(" · ");
+}
+
+function renderCharacterDiffBody(d) {
+  if (!d) return "<div class='sub'>（无）</div>";
+  var h = "";
+  if (d.intro.before !== d.intro.after) {
+    h += "<div class='diff-field'><span class='diff-k'>简介</span>" + renderTextDiff(d.intro.before, d.intro.after) + "</div>";
+  }
+  if (d.background.before !== d.background.after) {
+    h += "<div class='diff-field'><span class='diff-k'>经历</span>" + renderTextDiff(d.background.before, d.background.after) + "</div>";
+  }
+  h += renderTableDiff(d.table);
+  if (!h) h = "<div class='sub'>无变更</div>";
+  return h;
+}
+
+function renderWorldDiffBody(d) {
+  if (!d) return "<div class='sub'>（无）</div>";
+  var h = "";
+  if (d.content.before !== d.content.after) {
+    h += "<div class='diff-field'><span class='diff-k'>世界观</span>" + renderTextDiff(d.content.before, d.content.after) + "</div>";
+  }
+  h += renderTableDiff(d.table);
+  if (!h) h = "<div class='sub'>无变更</div>";
+  return h;
+}
+
+function renderTableDiff(td) {
+  if (!td) return "";
+  var h = "";
+  (td.added || []).forEach(function (e) {
+    h += '<div class="diff-run diff-add"><span class="diff-sign">＋</span><b>' + escapeHtml(e.title || "") + "</b>："
+      + escapeHtml(e.content || "") + (e.pinned ? pinBadge() : "") + "</div>";
+  });
+  (td.changed || []).forEach(function (e) {
+    h += '<div class="diff-field table-changed"><span class="diff-sign">≣</span><b>' + escapeHtml(e.title || "") + "</b>"
+      + (e.pinned ? pinBadge() : "") + renderTextDiff(e.before, e.after) + "</div>";
+  });
+  var unchanged = td.unchanged || [];
+  if (unchanged.length) {
+    var pinN = unchanged.filter(function (e) { return e.pinned; }).length;
+    var label = unchanged.length + " 条未变" + (pinN ? "（含常驻 " + pinN + " 条）" : "");
+    h += '<details class="diff-unchanged"><summary>' + label + "</summary>"
+      + unchanged.map(function (e) {
+        return '<div class="diff-eq"><b>' + escapeHtml(e.title || "") + "</b>："
+          + escapeHtml(e.content || "") + (e.pinned ? pinBadge() : "") + "</div>";
+      }).join("") + "</details>";
+  }
+  if ((td.removed || []).length) {
+    h += '<div class="msg-bar err">异常：有 ' + td.removed.length + " 条条目在合并中丢失，请放弃并重试。</div>";
+  }
+  return h;
+}
+
+function pinBadge() {
+  return '<span class="pin-badge" title="常驻：无条件注入系统提示词">常驻</span>';
+}
+
+/* 行级 LCS：>1000 行时返回 null，调用方退化为前后整块渲染 */
+function lineLCS(a, b) {
+  if (a.length > 1000 || b.length > 1000) return null;
+  var n = a.length, m = b.length;
+  var dp = new Array(n + 1);
+  for (var i = 0; i <= n; i++) {
+    dp[i] = new Array(m + 1).fill(0);
+  }
+  for (i = n - 1; i >= 0; i--) {
+    for (var j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  var ops = [];
+  i = 0; j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push({ t: "eq", x: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ t: "del", x: a[i] }); i++; }
+    else { ops.push({ t: "add", x: b[j] }); j++; }
+  }
+  while (i < n) ops.push({ t: "del", x: a[i++] });
+  while (j < m) ops.push({ t: "add", x: b[j++] });
+  return ops;
+}
+
+function renderTextDiff(before, after) {
+  before = before || "";
+  after = after || "";
+  if (!before && !after) return "";
+  var ops = lineLCS(before.split("\n"), after.split("\n"));
+  if (ops === null) {
+    return '<div class="diff-block"><div class="diff-run diff-del">' + escapeHtml(before) + "</div>"
+      + '<div class="diff-run diff-add">' + escapeHtml(after) + "</div></div>";
+  }
+  var h = '<div class="diff-block">';
+  var i = 0;
+  while (i < ops.length) {
+    var t = ops[i].t;
+    var lines = [];
+    while (i < ops.length && ops[i].t === t) { lines.push(ops[i].x); i++; }
+    h += renderDiffRun(t, lines);
+  }
+  return h + "</div>";
+}
+
+function renderDiffRun(t, lines) {
+  if (t === "eq") {
+    if (lines.length <= 3) {
+      return '<div class="diff-run diff-eq">' + lines.map(_eqLine).join("") + "</div>";
+    }
+    return '<details class="diff-eq details-eq"><summary>' + lines.length + " 行未变（点击展开）</summary>"
+      + lines.map(_eqLine).join("") + "</details>";
+  }
+  var cls = t === "del" ? "diff-del" : "diff-add";
+  var sign = t === "del" ? "−" : "＋";
+  var body = lines.map(function (ln) {
+    return '<div><span class="diff-sign">' + sign + "</span> " + escapeHtml(ln) + "</div>";
+  }).join("");
+  return '<div class="diff-run ' + cls + '">' + body + "</div>";
+}
+
+function _eqLine(ln) {
+  return '<div><span class="diff-sign dim">·</span> ' + escapeHtml(ln) + "</div>";
 }
 function renderRoomCompressSummary(members, world) {
   var h = '<div class="cs-block"><b>👥 各参与者压缩结果</b>';
@@ -1270,8 +1551,14 @@ function makeTokenChip() {
   var chip = document.createElement("span");
   chip.className = "chip token-chip";
   var total = state.currentSessionId ? intOr(state.tokenTotals[state.currentSessionId], 0) : 0;
-  chip.textContent = total ? "🪙 " + fmtNum(total) + " tokens" : "";
-  chip.title = "本次打开页面以来该会话的累计 token（刷新即清零）";
+  chip.textContent = "🪙 " + fmtCompact(total) + " tokens";
+  var d = state.currentSessionId ? state.tokenDetails[state.currentSessionId] : null;
+  if (d) {
+    chip.title = "会话累计 token（持久保存）：共 " + fmtNum(total) +
+      "\n输入 " + fmtNum(intOr(d.p, 0)) + " · 输出 " + fmtNum(intOr(d.c, 0));
+  } else {
+    chip.title = "会话累计 token（持久保存）";
+  }
   return chip;
 }
 
@@ -1634,6 +1921,10 @@ function selectSession(id) {
     var sess = currentSession();
     if (sess) { sess.character_id = s.character_id; sess.world_id = s.world_id; sess.title = s.title; }
     state.currentAttrs = s.attributes || null;
+    // 累计 token：以服务端持久值为准（页面周期内再叠加新 done 事件）
+    var tu = s.token_usage || {};
+    state.tokenTotals[id] = intOr(tu.total_tokens, 0);
+    state.tokenDetails[id] = { p: intOr(tu.prompt_tokens, 0), c: intOr(tu.completion_tokens, 0) };
     state.scopeCache[id] = { char: s.character || null, world: s.world || null, scoped: !!s.scoped };
     // beta：多 AI 房间；有窗口时左侧栏切换为该房间的窗口导航
     state.roomMembers = s.members || [];
@@ -1924,6 +2215,16 @@ function loreVariantRow(c, isRoot) {
   });
   actions.appendChild(edit);
 
+  var exportBtn = document.createElement("button");
+  exportBtn.type = "button"; exportBtn.className = "btn small";
+  exportBtn.textContent = "导出";
+  exportBtn.title = "导出为 JSON";
+  exportBtn.addEventListener("click", function () {
+    el.cardDetailDialog.close();
+    exportLore("characters", c.id);
+  });
+  actions.appendChild(exportBtn);
+
   var more = document.createElement("button");
   more.type = "button"; more.className = "flat-btn"; more.textContent = "...";
   more.title = "查看卡片数据";
@@ -1937,6 +2238,10 @@ function loreVariantRow(c, isRoot) {
         onClick: function () { forkToMine(c.id, function () { el.cardDetailDialog.close(); }); },
       });
     }
+    acts.push({
+      label: "导出 JSON",
+      onClick: function () { exportLore("characters", c.id); },
+    });
     openCardDetail(c, acts);
   });
   actions.appendChild(more);
@@ -2122,6 +2427,12 @@ function characterEditorHtml(c, scoped, parentForNew) {
     '<label class="f-label">角色简介<textarea id="ed-intro" rows="2">' + escapeHtml(v.intro) + "</textarea></label>" +
     '<label class="f-label">角色经历<textarea id="ed-bg" rows="4">' + escapeHtml(v.background) + "</textarea></label>" +
     "<div class='spacer'></div>" +
+    "<h4>对话范例（few-shot，维持原创角色语气的关键）</h4>" +
+    '<p class="sub">3~5 轮范例对白，轮与轮之间单独一行写 &lt;START&gt;；可用 {{char}} 代表本角色、{{user}} 代表用户。' +
+    "范例剧情不会真实发生，仅供 AI 模仿语气、节奏与格式。</p>" +
+    '<label class="f-label">对话范例 mes_example<textarea id="ed-mes-example" rows="7" placeholder="{{user}}：你今天怎么来了？&#10;&lt;START&gt;&#10;{{char}}：（挑眉）不然呢，等你请我？">'
+    + escapeHtml(v.mes_example || "") + "</textarea></label>" +
+    "<div class='spacer'></div>" +
     "<h4>系统级提示词</h4>" +
     '<label class="f-label">高优先级系统指令，直接约束模型行为（留空则不注入）<textarea id="ed-system" rows="3">' + escapeHtml(v.system_prompt || "") + "</textarea></label>" +
     "<div class='spacer'></div>" +
@@ -2247,6 +2558,8 @@ function bindEditorCommon(kind, id, saveFn, opts) {
       payload.name = document.getElementById("ed-name").value;
       payload.intro = document.getElementById("ed-intro").value;
       payload.background = document.getElementById("ed-bg").value;
+      var mesEl = document.getElementById("ed-mes-example");
+      if (mesEl) payload.mes_example = mesEl.value;
       payload.avatar = (avatarEl && avatarEl.dataset.avatar) || (v.avatar || "");
       if (attrsEl) payload.attributes = readAttrs(attrsEl);
       if (!opts.scoped) {
@@ -2300,17 +2613,23 @@ function bindEditorCommon(kind, id, saveFn, opts) {
   }
 }
 
-function entryRowHtml(title, content) {
+function entryRowHtml(title, content, pinned) {
   return (
     '<div class="entry-row">' +
     '<input type="text" class="ed-title" placeholder="标题" value="' + escapeAttr(title) + '" />' +
     '<textarea class="ed-content" rows="2" placeholder="内容">' + escapeHtml(content) + "</textarea>" +
+    '<label class="ed-pin" title="常驻：无条件注入系统提示词，等同世界书 Constant"><input type="checkbox" class="ed-pinned"'
+      + (pinned ? " checked" : "") + " />常驻</label>" +
     '<button class="btn small ed-del">✕</button></div>'
   );
 }
 function addEntryRow(container, entry) {
   var row = document.createElement("div");
-  row.innerHTML = entryRowHtml(entry ? entry.title || "" : "", entry ? entry.content || "" : "");
+  row.innerHTML = entryRowHtml(
+    entry ? entry.title || "" : "",
+    entry ? entry.content || "" : "",
+    entry ? !!entry.pinned : false
+  );
   row.querySelector(".ed-del").addEventListener("click", function () { row.remove(); });
   container.appendChild(row);
 }
@@ -2352,7 +2671,8 @@ function readEntries(container) {
   container.querySelectorAll(".entry-row").forEach(function (row) {
     var title = row.querySelector(".ed-title").value;
     var content = row.querySelector(".ed-content").value;
-    out.push({ title: title, content: content });
+    var pinnedEl = row.querySelector(".ed-pinned");
+    out.push({ title: title, content: content, pinned: pinnedEl ? pinnedEl.checked : false });
   });
   return out;
 }
@@ -3182,6 +3502,9 @@ function buildImageInfoPanel(meta) {
     if (meta.model) chips.push(meta.model);
     if (meta.size) chips.push(meta.size);
     if (chips.length) box.appendChild(makeInfoChips(chips));
+    if (isEdit && meta.refs && meta.refs.length) {
+      box.appendChild(makeInfoRefs(meta.refs));
+    }
     if (meta.prompt) box.appendChild(makeInfoBlock("提示词", meta.prompt, null));
   } else {
     box.appendChild(makeInfoHeader("🖼", "图片信息", ""));
@@ -3198,6 +3521,37 @@ function makeInfoHeader(icon, title, sub) {
     (sub ? '<div class="iv-info-sub">' + escapeHtml(sub) + "</div>" : "") +
     "</div>";
   return h;
+}
+function makeInfoRefs(refs) {
+  var wrap = document.createElement("div");
+  wrap.className = "iv-block";
+  var bar = document.createElement("div");
+  bar.className = "iv-block-bar";
+  var lab = document.createElement("span");
+  lab.className = "iv-block-label";
+  lab.textContent = "参考图片（" + refs.length + "）· 点击放大";
+  bar.appendChild(lab);
+  var body = document.createElement("div");
+  body.className = "iv-refs";
+  refs.forEach(function (url, i) {
+    var fig = document.createElement("button");
+    fig.type = "button";
+    fig.className = "iv-ref";
+    var img = document.createElement("img");
+    img.loading = "lazy";
+    img.src = url;
+    img.alt = "图" + (i + 1);
+    var cap = document.createElement("span");
+    cap.className = "iv-ref-cap";
+    cap.textContent = "图" + (i + 1);
+    fig.appendChild(img);
+    fig.appendChild(cap);
+    fig.addEventListener("click", function () { openImageViewer(url); });
+    body.appendChild(fig);
+  });
+  wrap.appendChild(bar);
+  wrap.appendChild(body);
+  return wrap;
 }
 function makeInfoBlock(label, text, extraClass) {
   var wrap = document.createElement("div");
@@ -3284,7 +3638,7 @@ function onDone(data) {
   recordUsage(data && data.usage);
   finalizeTurn();
 }
-/* Token 用量：本轮 toast + 会话内累计（本页面周期，刷新归零）*/
+/* Token 用量：本轮 toast + 会话内累计（服务端持久，页面内实时叠加）*/
 function recordUsage(usage) {
   if (!usage) return;
   var p = intOr(usage.prompt_tokens, 0), c = intOr(usage.completion_tokens, 0);
@@ -3292,6 +3646,8 @@ function recordUsage(usage) {
   if (!state.currentSessionId) return;
   var sid = state.currentSessionId;
   state.tokenTotals[sid] = intOr(state.tokenTotals[sid], 0) + intOr(usage.total_tokens, p + c);
+  var d = state.tokenDetails[sid] || { p: 0, c: 0 };
+  state.tokenDetails[sid] = { p: intOr(d.p, 0) + p, c: intOr(d.c, 0) + c };
   renderSessionMeta();
 }
 function intOr(v, d) {
@@ -3300,6 +3656,20 @@ function intOr(v, d) {
 }
 function fmtNum(n) {
   return String(intOr(n, 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+/* 紧凑数字：999 以下原样；千级 10.5k（整千去小数 12k）；百万级 7M / 1.2M */
+function fmtCompact(n) {
+  n = intOr(n, 0);
+  if (n >= 1000000) return trim1(n / 1000000) + "M";
+  if (n >= 1000) {
+    var k = trim1(n / 1000);
+    return k === "1000" ? "1M" : k + "k";
+  }
+  return String(n);
+}
+function trim1(x) {
+  var s = x.toFixed(1);
+  return s.slice(-2) === ".0" ? s.slice(0, -2) : s;
 }
 function finalizeTurn() {
   var a = state.currentAssistant;
@@ -3469,6 +3839,17 @@ function openSettings() {
   el.dialog.showModal();
 }
 
+function _fillNum(id, val) {
+  var elx = document.getElementById(id);
+  if (elx) elx.value = val != null && val !== "" ? val : 0;
+}
+
+function _readNum(id) {
+  var elx = document.getElementById(id);
+  var n = elx ? parseInt(elx.value, 10) : 0;
+  return isNaN(n) || n < 0 ? 0 : n;
+}
+
 function fillAdminForm() {
   el.setMaxIters.value = state.config.tools ? state.config.tools.max_iterations : 8;
   el.setTimeout.value = state.config.tools ? state.config.tools.timeout_seconds : 60;
@@ -3477,11 +3858,18 @@ function fillAdminForm() {
   el.setRpFormat.checked = !!(rp.format_enabled);
   el.setAttrEnabled.checked = !!(rp.attributes && rp.attributes.enabled);
   el.setAttrAi.checked = !!(rp.attributes && rp.attributes.ai_provided);
+  _fillNum("set-budget-intro", rp.intro_chars);
+  _fillNum("set-budget-bg", rp.background_chars);
+  _fillNum("set-budget-world", rp.world_chars);
+  _fillNum("set-budget-mes", rp.mes_example_chars);
+  _fillNum("set-budget-pinned", rp.pinned_chars);
   var emb = state.config.embeddings || {};
   el.setEmbBase.value = emb.base_url || "";
   el.setEmbKey.value = emb.api_key || "";
   el.setEmbModel.value = emb.model || "";
   el.setEmbTopk.value = emb.top_k || 4;
+  _fillNum("set-emb-threshold", emb.score_threshold != null ? emb.score_threshold : 0.55);
+  _fillNum("set-emb-keylimit", emb.keyword_limit || 8);
   var img = state.config.image_generation || {};
   el.setImgEnabled.checked = img.enabled !== false;
   el.setImgSize.value = img.default_size || "2K";
@@ -3693,13 +4081,24 @@ function saveConfig() {
   var roleplay = {
     format_enabled: !!el.setRpFormat.checked,
     attributes: { enabled: !!el.setAttrEnabled.checked, ai_provided: !!el.setAttrAi.checked },
+    intro_chars: _readNum("set-budget-intro"),
+    background_chars: _readNum("set-budget-bg"),
+    world_chars: _readNum("set-budget-world"),
+    mes_example_chars: _readNum("set-budget-mes"),
+    pinned_chars: _readNum("set-budget-pinned"),
   };
   var curEmb = state.config.embeddings || {};
+  var thresholdEl = document.getElementById("set-emb-threshold");
+  var threshold = parseFloat(thresholdEl.value);
+  if (isNaN(threshold)) threshold = 0.55;
+  threshold = Math.min(1, Math.max(0, threshold));
   var embeddings = {
     base_url: el.setEmbBase.value.trim(),
     api_key: el.setEmbKey.value.trim(),
     model: el.setEmbModel.value.trim(),
     top_k: parseInt(el.setEmbTopk.value, 10) || 4,
+    score_threshold: threshold,
+    keyword_limit: _readNum("set-emb-keylimit") || 8,
     cache_file: curEmb.cache_file || "",
   };
   var imageGeneration = {

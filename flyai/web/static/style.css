@@ -215,6 +215,38 @@ body {
 .cs-block .sub { font-size: 12px; color: var(--text-dim); }
 .export-summary .sub { white-space: pre-wrap; }
 
+/* 压缩提案 diff */
+.export-summary { max-height: 55vh; overflow: auto; }
+.diff-block { margin: 4px 0; border-radius: 6px; overflow: hidden; }
+.diff-run { white-space: pre-wrap; word-break: break-word; padding: 2px 8px; font-size: 13px; line-height: 1.55; }
+.diff-run > div { min-height: 1.2em; }
+.diff-del { background: rgba(255,107,122,.14); color: var(--err); }
+.diff-add { background: rgba(103,201,138,.14); color: var(--ok); }
+.diff-eq { color: var(--text-dim); }
+.diff-sign { display: inline-block; width: 1em; user-select: none; }
+.diff-sign.dim { opacity: .6; }
+.diff-field { margin: 8px 0; }
+.diff-field > .diff-block { margin-top: 2px; }
+.diff-k { display: inline-block; font-size: 12px; color: var(--text-dim); margin-bottom: 2px; }
+.table-changed { padding-left: 4px; border-left: 2px solid var(--border); }
+.details-eq summary, .diff-unchanged summary, .member-diff summary {
+  cursor: pointer; font-size: 12px; color: var(--text-dim); padding: 2px 0; user-select: none;
+}
+.diff-unchanged { margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.member-diff { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; background: var(--bg-2); }
+.member-diff summary { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.member-diff summary .sub { white-space: normal; }
+.pin-badge {
+  display: inline-block; font-size: 10px; line-height: 1; padding: 2px 5px; margin-left: 4px;
+  border-radius: 4px; background: var(--accent); color: var(--accent-fg); vertical-align: middle;
+}
+
+/* 条目编辑器：常驻勾选 + 预算输入 */
+.ed-pin { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.ed-pin input { margin: 0; }
+.budget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px 12px; margin: 4px 0 8px; }
+.budget-grid .f-label { margin: 0; font-size: 12px; color: var(--text-dim); }
+
 .msg { max-width: 860px; margin: 0 auto 12px; }
 .msg.user { text-align: right; }
 .msg.user .bubble {
@@ -562,8 +594,9 @@ label.f-label input:focus, label.f-label textarea:focus { border-color: var(--ac
 .lore-item .l-actions { display: flex; gap: 6px; }
 
 /* 条目编辑器 */
-.entry-row { display: grid; grid-template-columns: 160px 1fr auto; gap: 8px; align-items: start; margin-bottom: 8px; }
+.entry-row { display: grid; grid-template-columns: 160px 1fr auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
 .entry-row input, .entry-row textarea { width: 100%; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical; }
+.entry-row input[type="checkbox"] { width: auto; padding: 0; border: none; accent-color: var(--accent); }
 .entry-row input:focus, .entry-row textarea:focus { border-color: var(--accent); outline: none; }
 /* 角色卡属性编辑行 */
 .attr-row { display: grid; grid-template-columns: 1fr 1fr 70px 70px 70px auto; gap: 8px; align-items: center; margin-bottom: 8px; }
@@ -657,6 +690,9 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
 .user-list .user-row.item { justify-content: space-between; padding: 8px 10px; border-radius: 8px; }
 .user-list .user-row.item:hover { background: var(--bg-hover); }
 .user-list .user-name { color: var(--text); }
+.pwd-reset { display: inline-flex; align-items: center; gap: 4px; width: 100%; margin-top: 6px; }
+.pwd-reset input { flex: 1; min-width: 0; background: var(--input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
 /* ==== Beta：多 AI 群聊 ==== */
 .threads { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .threads.hidden { display: none; }
@@ -911,6 +947,27 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
 .iv-mono {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 12px; line-height: 1.7; color: var(--text);
+}
+
+/* 图生图参考图缩略图 */
+.iv-refs {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+}
+.iv-ref {
+  position: relative; padding: 0; border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; cursor: pointer;
+  background: var(--bg); aspect-ratio: 1;
+}
+.iv-ref:hover { border-color: var(--accent); }
+.iv-ref img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.iv-ref-cap {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  font-size: 11px; font-weight: 600; text-align: center;
+  color: #fff; background: rgba(0, 0, 0, 0.55);
+  padding: 2px 0;
 }
 
 /* SD 参数扁平网格 */

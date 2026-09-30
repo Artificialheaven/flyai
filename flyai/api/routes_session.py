@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 
+from ..lore.diff import character_diff, world_diff
 from ..sessions.resolve import (
     apply_room_compression,
     clear_character_override,
@@ -18,6 +19,8 @@ from ..sessions.resolve import (
     fork_character,
     is_character_scoped,
     member_character,
+    plan_room_compression,
+    room_base_signatures,
     set_character_override,
     set_world_override,
 )
@@ -260,14 +263,33 @@ def session_export(sid: str, request: Request):
     )
 
 
+class CompressApplyBody(BaseModel):
+    proposal_id: str
+
+
+def _single_base_signatures(s, lore) -> Dict[str, str]:
+    """单 AI 会话当前有效角色/世界的签名（无则空签名）。"""
+    from ..lore.diff import content_signature
+
+    char = effective_character(s, lore)
+    world = effective_world(s, lore)
+    return {
+        "character": content_signature(char.to_dict() if char else None),
+        "world": content_signature(world.to_dict() if world else None),
+    }
+
+
 @router.post("/sessions/{sid}/compress")
 async def session_compress(sid: str, request: Request):
-    """AI 压缩对话历史。
+    """AI 生成压缩「提案」：只计算并暂存，不写入任何数据。
 
-    - 房间：按窗口/发言者归纳，结果写入各成员副本（member.override）。
-    - 旧单 AI：归纳进角色卡与世界观，写会话级副本；无角色卡时以空白卡为底。
+    返回 before/after/diff；前端确认后调 /compress/apply 才写入会话副本。
     """
-    from ..lore.gen import compress_conversation, compress_room
+    from ..lore.gen import (
+        apply_conversation_compression,
+        build_conversation_compression,
+        compress_room,
+    )
 
     state = request.app.state.flyai
     sc = state.user(request)
@@ -278,13 +300,28 @@ async def session_compress(sid: str, request: Request):
             data = await compress_room(state, s, sc.lore)
         except Exception as exc:
             raise HTTPException(500, f"压缩失败: {exc}")
-        applied = apply_room_compression(s, data, sc.lore)
-        sc.store.save(s)
+        planned = plan_room_compression(s, data, sc.lore)
+
+        before_members: Dict[str, dict] = {}
+        for mid in planned["members"]:
+            m = s.member(mid)
+            cur = member_character(m, sc.lore)
+            before_members[mid] = cur.to_dict() if cur else (m.override or {"name": m.name})
+        cur_world = effective_world(s, sc.lore)
+        before_world = cur_world.to_dict() if cur_world else None
+
+        basesig = room_base_signatures(s, sc.lore)
+        pid = state.put_compress_proposal(sc.uid, s.id, True, data, basesig)
+
+        member_diffs = {mid: character_diff(before_members[mid], planned["members"][mid])
+                        for mid in planned["members"]}
         return {
             "room": True,
-            "members": applied["members"],
-            "world": applied["world"],
+            "proposal_id": pid,
             "scoped": True,
+            "before": {"members": before_members, "world": before_world},
+            "after": {"members": planned["members"], "world": planned["world"]},
+            "diff": {"members": member_diffs, "world": world_diff(before_world, planned["world"])},
         }
 
     char = effective_character(s, sc.lore)
@@ -294,14 +331,81 @@ async def session_compress(sid: str, request: Request):
 
         char = Character(author=sc.uid)
     try:
-        new_char, new_world = await compress_conversation(state, s, char, world)
+        data = await build_conversation_compression(state, s, char, world)
     except Exception as exc:
         raise HTTPException(500, f"压缩失败: {exc}")
-    # 写入会话副本（隔离主卡）
+    new_char, new_world = apply_conversation_compression(char, world, data)
+
+    before_char = char.to_dict()
+    before_world = world.to_dict() if world else None
+    basesig = _single_base_signatures(s, sc.lore)
+    pid = state.put_compress_proposal(sc.uid, s.id, False, data, basesig)
+
+    return {
+        "room": False,
+        "proposal_id": pid,
+        "scoped": True,
+        "before": {"character": before_char, "world": before_world},
+        "after": {
+            "character": new_char.to_dict(),
+            "world": new_world.to_dict() if new_world else None,
+        },
+        "diff": {
+            "character": character_diff(before_char, new_char.to_dict()),
+            "world": world_diff(before_world, new_world.to_dict() if new_world else None),
+        },
+    }
+
+
+@router.post("/sessions/{sid}/compress/apply")
+async def session_compress_apply(sid: str, body: CompressApplyBody, request: Request):
+    """确认写入压缩提案：校验归属与 base 未变化后写入会话副本并持久化。"""
+    from ..lore.gen import apply_conversation_compression
+
+    state = request.app.state.flyai
+    sc = state.user(request)
+    s = _must_get_session(sc, sid)
+
+    pid = (body.proposal_id or "").strip()
+    existing = state._compress_proposals.get(pid)
+    if existing is None:
+        raise HTTPException(404, "压缩提案不存在或已过期，请重新压缩")
+    if existing.get("uid") != sc.uid:
+        raise HTTPException(403, "无权使用该压缩提案")
+    p = state.get_compress_proposal(pid, sc.uid)
+    if p is None:
+        raise HTTPException(404, "压缩提案不存在或已过期，请重新压缩")
+    if p.get("sid") != s.id:
+        raise HTTPException(400, "提案不属于该会话")
+
+    if p.get("room"):
+        if room_base_signatures(s, sc.lore) != p.get("basesig"):
+            raise HTTPException(409, "提案生成后会话设定已变化，请重新压缩")
+        applied = apply_room_compression(s, p["raw"], sc.lore)
+        sc.store.save(s)
+        state.drop_compress_proposal(pid)
+        return {
+            "room": True,
+            "members": applied["members"],
+            "world": applied["world"],
+            "scoped": True,
+        }
+
+    if _single_base_signatures(s, sc.lore) != p.get("basesig"):
+        raise HTTPException(409, "提案生成后会话设定已变化，请重新压缩")
+
+    char = effective_character(s, sc.lore)
+    world = effective_world(s, sc.lore)
+    if char is None:
+        from ..lore.models import Character
+
+        char = Character(author=sc.uid)
+    new_char, new_world = apply_conversation_compression(char, world, p["raw"])
     set_character_override(s, new_char)
     if new_world is not None and (new_world.content or new_world.table):
         set_world_override(s, new_world)
     sc.store.save(s)
+    state.drop_compress_proposal(pid)
     return {
         "character": new_char.to_dict(),
         "world": new_world.to_dict() if new_world else None,
@@ -323,6 +427,7 @@ def _session_dict(s, with_messages: bool = False, lore=None):
         "scoped": is_character_scoped(s),
         "members": [m.to_dict() for m in s.members],
         "threads": [t.to_dict() for t in s.threads],
+        "token_usage": s.token_usage or {},
     }
     if with_messages:
         d["messages"] = [m.to_dict() for m in s.messages]

@@ -1,7 +1,8 @@
-"""认证接口（本地工具级，无会话 cookie，前端带 X-User-Id 头）。
+"""认证接口：随机 Bearer 令牌 + 登录限速。
 
 - 管理员：凭据在 `config/config.json` 的 `auth.admin`，不在用户库内，入口为 ADMIN_UID。
 - 普通用户：存在 `data/users.json`，由管理员创建（登录仅验密，不自动注册）。
+- 登录成功签发随机 token，之后所有请求带 Authorization: Bearer <token>。
 - 用户管理相关接口仅管理员可用。
 """
 
@@ -10,29 +11,33 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ..auth_sessions import extract_token
 from ..errors import ProviderError  # noqa: F401  (保持错误统一导出)
 from ..user import ADMIN_LEVEL, ADMIN_UID
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _admin(request: Request):
-    """返回当前用户；未登录返回 None。"""
+def _identity(request: Request):
+    """按 Bearer 令牌返回当前用户；无令牌/已过期/用户已删除返回 None。"""
     state = request.app.state.flyai
-    uid = (request.headers.get("x-user-id") or "").strip()
+    rec = state.auth_sessions.resolve(extract_token(request))
+    if rec is None:
+        return None
+    uid = rec.get("uid")
     if uid == ADMIN_UID:
         return {"id": ADMIN_UID, "name": state.config.auth.admin.username,
                 "role": "admin", "level": ADMIN_LEVEL}
-    u = state.user_store.get_by_id(uid) if uid else None
+    u = state.user_store.get_by_id(uid)
     return ({"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0)}
             if u else None)
 
 
 def _require_admin(request: Request):
-    """要求当前用户是管理员（即 X-User-Id 为管理员标识），否则 403。"""
-    cur = _admin(request)
+    """要求当前用户是管理员，否则 401（未登录）/403（普通用户）。"""
+    cur = _identity(request)
     if cur is None:
-        raise HTTPException(401, "未登录或用户不存在")
+        raise HTTPException(401, "未登录或登录已失效")
     if cur["id"] != ADMIN_UID:
         raise HTTPException(403, "需要管理员权限")
     return cur
@@ -53,35 +58,57 @@ class UpdateUserPayload(BaseModel):
     level: int
 
 
+class PasswordPayload(BaseModel):
+    password: str = ""
+
+
+def _client_ip(request: Request) -> str:
+    # 直连部署取对端地址；置于反代后可按需扩展 X-Forwarded-For
+    client = request.client
+    return client.host if client is not None else "unknown"
+
+
 @router.post("/login")
 def login(payload: LoginPayload, request: Request):
-    """登录：先匹配管理员（config.auth.admin），再匹配普通用户（仅验密）。"""
+    """登录：限速（IP+用户名）→ 匹配管理员/普通用户 → 签发随机令牌。"""
     state = request.app.state.flyai
     name = (payload.name or "").strip()
     if not name:
         raise HTTPException(400, "请输入用户名")
 
+    limit_key = _client_ip(request) + "|" + name
+    wait = state.login_limiter.locked_seconds(limit_key)
+    if wait:
+        raise HTTPException(429, f"登录失败次数过多，请 {wait} 秒后再试")
+
     admin = state.config.auth.admin
     if name == admin.username:
-        # 管理员：精确比对 config 中的密码
         if payload.password != admin.password:
-            raise HTTPException(401, "密码错误")
-        return {"id": ADMIN_UID, "name": admin.username, "role": "admin",
-                "level": ADMIN_LEVEL}
+            _record_login_fail(state, limit_key)
+        else:
+            state.login_limiter.record_success(limit_key)
+            return _issue_login(state, ADMIN_UID, admin.username, "admin", ADMIN_LEVEL)
 
     u = state.user_store.get_by_name(name)
     if u is None:
-        raise HTTPException(401, "用户不存在（需管理员创建）")
-    if not u.check_password(payload.password):
-        raise HTTPException(401, "密码错误")
-    return {"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0)}
+        # 用户不存在同样记一次失败，避免用限速侧信道区分用户是否存在
+        _record_login_fail(state, limit_key)
+    elif not u.check_password(payload.password):
+        _record_login_fail(state, limit_key)
+    else:
+        state.login_limiter.record_success(limit_key)
+        return _issue_login(state, u.id, u.name, "user", int(u.level or 0))
 
 
-@router.get("/names")
-def list_names(request: Request):
-    """登录页选用户用的公开用户名清单（普通用户；管理员不含在内）。"""
-    state = request.app.state.flyai
-    return {"names": [u.name for u in state.user_store.list()]}
+def _record_login_fail(state, limit_key: str) -> None:
+    """记一次失败，本次请求始终 401；锁定从下一次请求开始生效。"""
+    state.login_limiter.record_failure(limit_key)
+    raise HTTPException(401, "用户名或密码错误")
+
+
+def _issue_login(state, uid: str, name: str, role: str, level: int) -> dict:
+    token = state.auth_sessions.issue(uid, name, role, level)
+    return {"token": token, "id": uid, "name": name, "role": role, "level": level}
 
 
 @router.get("/users")
@@ -130,6 +157,20 @@ def update_user(uid: str, payload: UpdateUserPayload, request: Request):
     return {"ok": True, "level": level}
 
 
+@router.patch("/users/{uid}/password")
+def reset_user_password(uid: str, payload: PasswordPayload, request: Request):
+    """管理员重置普通用户密码；重置后该用户现有令牌全部吊销，需重新登录。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    u = state.user_store.get_by_id(uid)
+    if u is None:
+        raise HTTPException(404, "用户不存在")
+    u.set_password(payload.password or "")
+    state.user_store._save()
+    revoked = state.auth_sessions.revoke_for_uid(uid)
+    return {"ok": True, "revoked_sessions": revoked}
+
+
 @router.delete("/users/{uid}")
 def delete_user(uid: str, request: Request):
     """删除普通用户（仅管理员）。"""
@@ -142,13 +183,16 @@ def delete_user(uid: str, request: Request):
 
 @router.get("/me")
 def me(request: Request):
-    """校验当前 X-User-Id 是否有效并返回信息。"""
-    cur = _admin(request)
+    """校验当前令牌是否有效并返回信息。"""
+    cur = _identity(request)
     if cur is None:
-        raise HTTPException(401, "未登录或用户不存在")
+        raise HTTPException(401, "未登录或登录已失效")
     return cur
 
 
 @router.post("/logout")
-def logout():
+def logout(request: Request):
+    """吊销当前令牌，使其立即失效。"""
+    state = request.app.state.flyai
+    state.auth_sessions.revoke(extract_token(request))
     return {"ok": True}

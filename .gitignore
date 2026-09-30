@@ -5,3 +5,8 @@ config/config.json
 data/
 .idea/
 .PyCharm*
+
+# 本地临时产物（勿入库）
+tmp_*.json
+last_review.md
+test/temp/

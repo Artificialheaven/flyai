@@ -34,7 +34,8 @@ from flyai.config import (
     load_config,
     mask_api_key,
 )
-from flyai.user import ADMIN_UID
+from flyai.auth_sessions import AuthSessionStore, LoginRateLimiter
+from flyai.user import ADMIN_LEVEL, ADMIN_UID
 
 EMB_KEY = "sk-emb-secret-key-123"
 CHAT_KEY = "sk-chat-secret-key-456"
@@ -79,13 +80,20 @@ def _mkstate(tmp_path):
         config_path=tmp_path / "config.json",
         user_store=FakeUserStore(),
         _scopes={},
+        auth_sessions=AuthSessionStore(),
+        login_limiter=LoginRateLimiter(),
         reload_providers=lambda: None,
     )
 
 
 def _req(state, uid=ADMIN_UID):
+    is_admin = uid == ADMIN_UID
+    token = state.auth_sessions.issue(
+        uid, uid, "admin" if is_admin else "user", ADMIN_LEVEL if is_admin else 0
+    )
     return SimpleNamespace(
-        headers={"x-user-id": uid},
+        headers={"authorization": "Bearer " + token},
+        client=SimpleNamespace(host="127.0.0.1"),
         app=SimpleNamespace(state=SimpleNamespace(flyai=state)),
     )
 
@@ -225,8 +233,14 @@ def test_put_config_forbidden_for_user(tmp_path):
 
 def test_unknown_uid_rejected(tmp_path):
     state = _mkstate(tmp_path)
+    # 无令牌（伪造/过期令牌同理）→ 401
+    req = SimpleNamespace(
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+        app=SimpleNamespace(state=SimpleNamespace(flyai=state)),
+    )
     with pytest.raises(HTTPException) as ei:
-        get_config(_req(state, "ghost"))
+        get_config(req)
     assert ei.value.status_code == 401
 
 

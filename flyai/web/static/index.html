@@ -116,6 +116,14 @@
         <label class="f-label toggle"><input type="checkbox" id="set-rp-format" /> 启用对话格式规范（动作/内心/对白 / 空行分段 / 样式区分）</label>
         <label class="f-label toggle"><input type="checkbox" id="set-attr-enabled" /> 启用属性跟踪（好感度、金钱等，AI 每回合可修改）</label>
         <label class="f-label toggle"><input type="checkbox" id="set-attr-ai" /> AI 自行提供属性增减值（关闭则仅供展示）</label>
+        <p class="sub">提示词注入预算（字符数，0=不限；填正值后超长部分按段落/整轮丢弃，绝不截半轮）</p>
+        <div class="budget-grid">
+          <label class="f-label">角色简介<input type="number" id="set-budget-intro" value="0" min="0" /></label>
+          <label class="f-label">角色经历<input type="number" id="set-budget-bg" value="0" min="0" /></label>
+          <label class="f-label">世界观<input type="number" id="set-budget-world" value="0" min="0" /></label>
+          <label class="f-label">对话范例<input type="number" id="set-budget-mes" value="0" min="0" /></label>
+          <label class="f-label">常驻条目<input type="number" id="set-budget-pinned" value="0" min="0" /></label>
+        </div>
 
         <h4>嵌入检索（RAG 记忆）</h4>
         <p class="sub">配置后 query_chat_memory 使用语义检索；留空则回退关键词检索。</p>
@@ -130,6 +138,12 @@
         </label>
         <label class="f-label">返回条数 top_k
           <input type="number" id="set-emb-topk" value="4" min="1" max="20" />
+        </label>
+        <label class="f-label">语义相似度门槛（0~1，低于此值回退关键词；0=不筛选）
+          <input type="number" id="set-emb-threshold" value="0.55" min="0" max="1" step="0.05" />
+        </label>
+        <label class="f-label">关键词结果上限（搜标题+正文）
+          <input type="number" id="set-emb-keylimit" value="8" min="1" max="50" />
         </label>
 
         <h4>AI 生图</h4>
@@ -241,17 +255,20 @@
     </div>
   </dialog>
 
-  <!-- 压缩导出确认弹窗 -->
+  <!-- 压缩提案确认弹窗 -->
   <dialog id="export-dialog">
     <div class="dialog-body">
       <h3>☁ 压缩对话并导出</h3>
-      <p id="export-sub" class="sub">AI 正在把对话历史归纳进角色卡与世界观并分类…</p>
+      <p id="export-sub" class="sub">AI 正在归纳对话并按标题合并进角色卡与世界观…</p>
       <div id="export-body" class="export-summary"></div>
       <div class="dialog-actions">
-        <button id="btn-export-close" class="btn ghost">关 闭</button>
+        <button id="btn-export-discard" class="btn ghost hidden">放 弃</button>
+        <button id="btn-export-apply" class="btn primary hidden">✓ 确认写入</button>
+        <button id="btn-export-close" class="btn ghost hidden">关 闭</button>
         <button id="btn-export-publish" class="btn hidden">💾 角色卡入角色库</button>
         <button id="btn-export-download" class="btn primary hidden">⬇ 下载压缩对话包</button>
       </div>
+      <div id="export-msg" class="msg-bar"></div>
     </div>
   </dialog>
 
@@ -259,7 +276,7 @@
   <dialog id="user-dialog">
     <div class="dialog-body">
       <h3>👥 用户管理</h3>
-      <p class="sub">创建 / 删除用户，设置权限等级（0-255，越大越高）。登录仅验密，普通用户需在此由管理员创建。</p>
+      <p class="sub">创建 / 删除用户、设置权限等级（0-255，越大越高）、重置密码（重置后其现有登录全部失效）。普通用户需在此由管理员创建。</p>
       <div id="user-list" class="user-list"></div>
       <label class="f-label">新用户名<input type="text" id="user-new-name" placeholder="请输入新用户名" /></label>
       <label class="f-label">密码<input type="password" id="user-new-password" placeholder="密码（可留空）" /></label>

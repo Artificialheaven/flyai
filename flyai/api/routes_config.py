@@ -28,6 +28,7 @@ from ..config import (
     save_config,
 )
 from ..models_access import model_visible, visible_image_models, visible_providers
+from ..auth_sessions import resolve_uid
 from ..user import ADMIN_UID
 from ..errors import ProviderError  # noqa: F401
 
@@ -139,11 +140,11 @@ def _credit_key(incoming: str, existing: str) -> str:
 
 
 def _uid(request: Request) -> str:
-    uid = (request.headers.get("x-user-id") or "").strip()
     state = request.app.state.flyai
+    uid = (resolve_uid(state, request) or "").strip()
     valid = (uid == ADMIN_UID) or bool(state.user_store.get_by_id(uid))
     if not uid or not valid:
-        raise HTTPException(401, "未登录或用户不存在")
+        raise HTTPException(401, "未登录或登录已失效")
     return uid
 
 

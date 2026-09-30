@@ -12,7 +12,7 @@ import os
 import shutil
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -178,6 +178,26 @@ class UserScope:
     lore: LoreStore
     upload_dir: Path
     level: int = 0
+    # LoreQuerier 复用缓存：key=角色/世界内容签名，容量 32 FIFO
+    _querier_cache: Dict[str, Any] = field(default_factory=dict, compare=False)
+
+    _QUERIER_CACHE_MAX = 32
+
+    def get_querier(self, character, world):
+        """按角色/世界内容签名复用 LoreQuerier；内容变化即不命中，无需显式失效。"""
+        from .lore.diff import content_signature
+        from .lore.query import LoreQuerier
+
+        csig = content_signature(character.to_dict()) if character is not None else ""
+        wsig = content_signature(world.to_dict()) if world is not None else ""
+        key = csig + ":" + wsig
+        q = self._querier_cache.get(key)
+        if q is None:
+            q = LoreQuerier(character, world)
+            self._querier_cache[key] = q
+            if len(self._querier_cache) > self._QUERIER_CACHE_MAX:
+                self._querier_cache.pop(next(iter(self._querier_cache)))
+        return q
 
     @classmethod
     def build(cls, uid: str, config: AppConfig, data_dir: Path,

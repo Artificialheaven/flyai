@@ -18,7 +18,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -189,14 +189,16 @@ async def ark_generate(
     model_cfg: ImageModelConfig,
     prompt: str,
     size: str,
-    ref_media_type: Optional[str] = None,
-    ref_b64: Optional[str] = None,
+    ref_images: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[bytes, str, str]:
     """提交生图任务并下载图片。
 
-    传 ref_b64 时为图生图（seedream 的 image 字段）。参考图编码先试 data URI，
-    若接口报 image 相关 400 再退化为裸 base64 —— 两种形态各有文档示例。
-    返回 (图片字节, 扩展名, media_type)。
+    传 ref_images=[(media_type, base64), ...] 时为图生图（seedream 的 image 字段）。
+    1 张时 image 发字符串，多张时发数组（数组顺序即接口侧「图1、图2…」）。
+    参考图用 data URI（data:image/<格式>;base64,...，格式小写——seedream 5
+    文档规定的形态）；若接口报 image 相关 400，再兼容旧形态裸 base64 重试一次，
+    两次都失败时必须把两段错误都抛出，避免回退响应（invalid url specified）
+    掩盖真实原因。返回 (图片字节, 扩展名, media_type)。
     """
     url = model_cfg.base_url.rstrip("/") + "/images/generations"
     headers = {
@@ -204,7 +206,8 @@ async def ark_generate(
         "Authorization": f"Bearer {model_cfg.api_key}",
     }
 
-    def payload(image_value: Optional[str]):
+    def payload(image_value):
+        # image_value：str（单张）/ list[str]（多张）/ None（文生图）
         body = {
             "model": model_cfg.model,
             "prompt": prompt,
@@ -214,23 +217,38 @@ async def ark_generate(
             "watermark": True,
         }
         if image_value is not None:
-            # 明确禁用「连续生成」，图生图只取一张结果
             body["image"] = image_value
-            body["sequential_image_generation"] = "disabled"
         return body
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        data_uri = None
-        if ref_b64 is not None:
-            data_uri = f"data:{ref_media_type or 'image/jpeg'};base64,{ref_b64}"
-        resp = await client.post(url, headers=headers, json=payload(data_uri))
+        data_value = None
+        raw_value = None
+        if ref_images:
+            data_uris = [
+                f"data:{mt or 'image/jpeg'};base64,{b64}"
+                for mt, b64 in ref_images
+            ]
+            raw = [b64 for _mt, b64 in ref_images]
+            # 单张保持字符串（与单图文档一致），多张发数组
+            data_value = data_uris[0] if len(data_uris) == 1 else data_uris
+            raw_value = raw[0] if len(raw) == 1 else raw
+        resp = await client.post(url, headers=headers, json=payload(data_value))
+        first_text = ""
         if (
-            ref_b64 is not None
+            ref_images
             and resp.status_code == 400
             and _error_mentions_image(resp.text)
         ):
-            resp = await client.post(url, headers=headers, json=payload(ref_b64))
+            # 兼容旧形态：裸 base64。seedream 5 已将其按 URL 校验（invalid url specified），
+            # 两次都失败时一起抛出，第一次的错误才是 data URI 被拒的真实原因
+            first_text = resp.text
+            resp = await client.post(url, headers=headers, json=payload(raw_value))
         if resp.status_code >= 400:
+            if first_text:
+                raise RuntimeError(
+                    f"HTTP {resp.status_code} [裸base64重试]: {resp.text[:300]}\n"
+                    f"[首次 data URI 请求的错误]: {first_text[:300]}"
+                )
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
         data = resp.json()
         images = data.get("data") or []
@@ -253,6 +271,32 @@ async def ark_generate(
 def _error_mentions_image(text: str) -> bool:
     low = (text or "").lower()
     return ("image" in low) or ("base64" in low) or ("图片" in text)
+
+
+_MEDIA_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def save_reference_image(
+    services: Dict[str, Any], raw: bytes, media_type: str
+) -> str:
+    """把一张参考图落进上传目录（ref_ 前缀），返回站内 URL。
+
+    用户上传的图在历史里只有 base64、没有路径；不另存一份，看图器的
+    提示词面板就无法回看「用了哪张参考图」。
+    """
+    upload_dir = Path(services["upload_dir"])
+    upload_url_base = (services["upload_url_base"] or "").rstrip("/")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    ext = _MEDIA_EXT.get(media_type or "", ".jpg")
+    filename = f"ref_{stamp}_{uuid.uuid4().hex[:8]}{ext}"
+    (upload_dir / filename).write_bytes(raw)
+    return f"{upload_url_base}/{filename}"
 
 
 def save_generated_image(

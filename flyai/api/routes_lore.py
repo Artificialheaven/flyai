@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api", tags=["lore"])
 class LoreEntryPayload(BaseModel):
     title: str = ""
     content: str = ""
+    pinned: bool = False
 
 
 class CharacterPayload(BaseModel):
@@ -28,6 +29,7 @@ class CharacterPayload(BaseModel):
     avatar: str = ""
     intro: str = ""
     background: str = ""
+    mes_example: str = ""
     table: List[LoreEntryPayload] = []
     attributes: List[Dict[str, Any]] = []
     prompt_format: str = ""
@@ -56,7 +58,11 @@ def _build_character(payload) -> Character:
         avatar=payload.avatar,
         intro=payload.intro,
         background=payload.background,
-        table=[LoreEntry(title=e.title, content=e.content) for e in payload.table],
+        mes_example=payload.mes_example or "",
+        table=[
+            LoreEntry(title=e.title, content=e.content, pinned=e.pinned)
+            for e in payload.table
+        ],
         attributes=[dict(a) for a in (payload.attributes or [])],
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
@@ -74,7 +80,10 @@ def _build_world(payload) -> World:
         name=payload.name,
         avatar=payload.avatar,
         content=payload.content,
-        table=[LoreEntry(title=e.title, content=e.content) for e in payload.table],
+        table=[
+            LoreEntry(title=e.title, content=e.content, pinned=e.pinned)
+            for e in payload.table
+        ],
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
     )

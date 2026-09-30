@@ -56,6 +56,7 @@ class JsonSessionStore(SessionStore):
             members=[RoomMember.from_dict(m) for m in data.get("members", [])],
             threads=[Thread.from_dict(t) for t in data.get("threads", [])],
             pinned=bool(data.get("pinned", False)),
+            token_usage=data.get("token_usage", {}) or {},
         )
         # 旧单 AI 会话（beta 前）：迁移为一个用户座位 + 一个 AI 参与者 + 一条私聊线程
         migrated = False
@@ -121,6 +122,7 @@ class JsonSessionStore(SessionStore):
             "members": [m.to_dict() for m in session.members],
             "threads": [t.to_dict() for t in session.threads],
             "pinned": session.pinned,
+            "token_usage": session.token_usage or {},
         }
         p = self._path(session.id)
         tmp = p.with_suffix(".json.tmp")

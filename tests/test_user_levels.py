@@ -18,6 +18,7 @@ from flyai.api.routes_auth import (
     me,
     update_user,
 )
+from flyai.auth_sessions import AuthSessionStore, LoginRateLimiter
 from flyai.config import AppConfig
 from flyai.user import ADMIN_LEVEL, ADMIN_UID, UserStore
 
@@ -27,12 +28,17 @@ def _state(tmp_path):
         config=AppConfig(),
         user_store=UserStore(tmp_path),
         _scopes={},
+        auth_sessions=AuthSessionStore(),
+        login_limiter=LoginRateLimiter(),
     )
 
 
 def _req(state, uid=ADMIN_UID):
+    token = state.auth_sessions.issue(uid, uid, "admin" if uid == ADMIN_UID else "user",
+                                     ADMIN_LEVEL if uid == ADMIN_UID else 0)
     return SimpleNamespace(
-        headers={"x-user-id": uid},
+        headers={"authorization": "Bearer " + token},
+        client=SimpleNamespace(host="127.0.0.1"),
         app=SimpleNamespace(state=SimpleNamespace(flyai=state)),
     )
 

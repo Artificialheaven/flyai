@@ -109,6 +109,8 @@ class Session:
     members: List[RoomMember] = field(default_factory=list)
     threads: List[Thread] = field(default_factory=list)
     pinned: bool = False              # 置顶（侧栏排序优先）
+    # 整个会话自创建以来的累计 token（跨刷新持久），各轮 done.usage 累加
+    token_usage: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.id:
@@ -116,6 +118,22 @@ class Session:
 
     def set_title(self, title: str) -> None:
         self.title = title or self.title
+
+    def add_usage(self, usage: Optional[Dict[str, Any]]) -> None:
+        """把一轮（可能含多次 LLM 调用）的用量累加进会话级持久计数。"""
+        if not usage:
+            return
+        p = int(usage.get("prompt_tokens") or 0)
+        c = int(usage.get("completion_tokens") or 0)
+        t = int(usage.get("total_tokens") or (p + c))
+        if not (p or c or t):
+            return
+        cur = self.token_usage or {}
+        self.token_usage = {
+            "prompt_tokens": int(cur.get("prompt_tokens") or 0) + p,
+            "completion_tokens": int(cur.get("completion_tokens") or 0) + c,
+            "total_tokens": int(cur.get("total_tokens") or 0) + t,
+        }
 
     def member(self, mid: str) -> Optional[RoomMember]:
         for m in self.members:

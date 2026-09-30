@@ -1,17 +1,15 @@
 """query_lore 工具：角色/世界观内容表统一查询。
 
 通过 ToolContext.services['lore']（LoreQuerier）访问当前会话绑定的活动角色/世界观。
+检索顺序：语义检索（配了 embedder 时，含相似度阈值）→ 关键词检索（标题+正文打分）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from ..providers.embedding import dot, normalize
+from ..lore.query import _KEYWORD_LIMIT_DEFAULT
 from .base import Tool, ToolContext, ToolResult
-
-_RAG_MAX_EMBED = 300   # 语义检索最多向量化的条目数
-_EMBED_TEXT = 1000     # 每条目用于向量化的文本截断长度
 
 
 class QueryLoreTool(Tool):
@@ -20,7 +18,7 @@ class QueryLoreTool(Tool):
         "查询角色或世界观的内容记录表，返回与主题最相关的记录内容。"
         "kind 传 'character' 查角色资料表，传 'world' 查世界设定表；"
         "keyword 填要查询的主题/关键词（为空则列出全部条目标题）。"
-        "配置了语义检索时会按内容含义匹配，而不只是标题。"
+        "检索同时匹配标题与正文并按相关度返回（有数量上限）；标记为常驻的条目已直接注入，无需查询。"
     )
     parameters = {
         "type": "object",
@@ -32,7 +30,7 @@ class QueryLoreTool(Tool):
             },
             "keyword": {
                 "type": "string",
-                "description": "主题/关键词，按标题模糊匹配；留空返回该表全部条目标题",
+                "description": "主题/关键词，匹配标题与正文；留空返回该表全部条目标题",
             },
         },
         "required": ["kind"],
@@ -56,14 +54,22 @@ class QueryLoreTool(Tool):
 
         table = querier._table(kind)
         matches = None
-        # 有关键词 + 配置了 embeddings → 语义检索；服务出错静默回退标题关键词
-        if keyword and table and services.get("embedder") is not None:
-            self._rag_entries = None
-            if await self._rag_search(services.get("embedder"), table, keyword):
-                matches = self._rag_entries
+        embedder = services.get("embedder")
+        # 有关键词 + 配置了 embeddings → 语义检索；服务出错/全不达标静默回退关键词
+        if keyword and table and embedder is not None:
+            top_k = int(getattr(embedder.cfg, "top_k", 4) or 4)
+            threshold = float(getattr(embedder.cfg, "score_threshold", 0.55))
+            limit = int(getattr(embedder.cfg, "keyword_limit", _KEYWORD_LIMIT_DEFAULT))
+            rag = await querier.semantic_search(kind, keyword, embedder, top_k, threshold)
+            if rag:
+                matches = [e for _s, e in rag]
+            else:
+                matches = querier.search(kind, keyword, limit)
         if matches is None:
-            # 关键词检索（标题模糊）或没配 RAG 时的原逻辑
-            matches = querier.search(kind, keyword)
+            limit = _KEYWORD_LIMIT_DEFAULT
+            if embedder is not None:
+                limit = int(getattr(embedder.cfg, "keyword_limit", _KEYWORD_LIMIT_DEFAULT))
+            matches = querier.search(kind, keyword, limit)
 
         if not matches:
             titles = "、".join(querier.list_titles(kind)) or "（空）"
@@ -85,23 +91,3 @@ class QueryLoreTool(Tool):
             output="\n\n".join(blocks),
             meta={"kind": kind, "keyword": keyword, "count": len(matches)},
         )
-
-    async def _rag_search(self, embedder, table, keyword: str):
-        """对内容表条目做语义检索，按相关度取 top-k。返回 True（成功并存到 self._rag_entries）／None（失败回退）。"""
-        entries = table[:_RAG_MAX_EMBED]
-        if not entries:
-            return None
-        texts = [((e.title or "") + "\n" + (e.content or ""))[:_EMBED_TEXT] for e in entries]
-        try:
-            qv = (await embedder.embed([keyword]))[0]
-            vecs = await embedder.embed(texts)
-        except Exception:
-            return None
-        qn = normalize(qv)
-        scored = []
-        for e, txt, v in zip(entries, texts, vecs):
-            scored.append((dot(qn, normalize(v)), e, txt))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top_k = int(getattr(embedder.cfg, "top_k", 4) or 4)
-        self._rag_entries = [e for _s, e, _t in scored[:top_k]]
-        return True

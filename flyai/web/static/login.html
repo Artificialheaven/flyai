@@ -13,7 +13,6 @@
     .login-card .sub { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; }
     .login-card label.f-label { margin: 10px 0; }
     .login-card .btn.primary { width: 100%; padding: 11px; font-size: 15px; margin-top: 8px; }
-    .login-users { margin: 6px 0 6px; }
     .login-hint { margin-top: 14px; font-size: 12px; color: var(--text-dim); text-align: center; }
     .icp-footer { margin: 16px 0 0; text-align: center; }
     .icp-footer a { font-size: 12px; color: var(--text-dim); text-decoration: none; }
@@ -24,8 +23,6 @@
     <div class="login-card">
       <div class="logo"><span class="dot"></span>FlyAI</div>
       <p class="sub">本地 AI 聊天工具</p>
-
-      <div id="login-users" class="login-users"></div>
 
       <label class="f-label">用户名
         <input type="text" id="login-name" placeholder="输入用户名" autocomplete="username" />
@@ -57,6 +54,7 @@
         if (!r.ok) return r.json().then(function (b) { throw new Error(b.detail || "登录失败"); });
         return r.json();
       }).then(function (res) {
+        localStorage.setItem("flyai-token", res.token);
         localStorage.setItem("flyai-uid", res.id);
         localStorage.setItem("flyai-role", res.role || "user");
         localStorage.setItem("flyai-level", String(res.level == null ? 0 : res.level));
@@ -74,24 +72,6 @@
     $("login-name").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); $("login-password").focus(); }
     });
-
-    // 列出已有用户，点选填充用户名
-    fetch("/api/auth/names").then(function (r) { return r.json(); })
-      .then(function (data) {
-        var wrap = $("login-users");
-        var names = data.names || [];
-        if (!names.length) return;
-        names.forEach(function (n) {
-          var b = document.createElement("button");
-          b.className = "btn small login-user";
-          b.textContent = n;
-          b.addEventListener("click", function () {
-            $("login-name").value = n;
-            $("login-password").focus();
-          });
-          wrap.appendChild(b);
-        });
-      }).catch(function () {});
   </script>
 </body>
 </html>

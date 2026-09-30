@@ -32,6 +32,14 @@ logger = logging.getLogger("flyai.chat")
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
+
+def _get_querier(sc, character, world):
+    """优先用 UserScope 的签名缓存工厂；简易测试 scope 无此方法时直接构造。"""
+    factory = getattr(sc, "get_querier", None)
+    if factory is not None:
+        return factory(character, world)
+    return LoreQuerier(character, world)
+
 # 图片输入约束
 _ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 _MAX_IMAGES = 4
@@ -144,7 +152,7 @@ async def chat(req: ChatRequest, request: Request):
     )
     services = {}
     if character or world:
-        services["lore"] = LoreQuerier(character, world)
+        services["lore"] = _get_querier(sc, character, world)
     # 图生图自动取参考图：让工具能扫历史
     services["history"] = session.messages
     # 当前提供商是否支持视觉（搜图工具据此决定筛选指引文案）
@@ -206,6 +214,8 @@ async def chat(req: ChatRequest, request: Request):
                 session_id=session.id,
                 services=services,
             ):
+                if ev == "done":
+                    session.add_usage(data.get("usage"))
                 yield sse_event(ev, data)
             sc.store.save(session)
         except ProviderError as exc:
@@ -348,7 +358,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                 )
                 services = {}
                 if char or world:
-                    services["lore"] = LoreQuerier(char, world)
+                    services["lore"] = _get_querier(sc, char, world)
                 # 图生图自动取参考图：让工具能扫该窗口历史
                 services["history"] = history
                 # 当前提供商是否支持视觉（搜图工具据此决定筛选指引文案）
@@ -438,6 +448,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                         )
                         continue
                     break
+                if done_data:
+                    session.add_usage(done_data.get("usage"))
                 yield sse_event("done", done_data or {"reason": "stop", "iterations": attempts})
                 # 隐藏遗留的空白 assistant 消息（被重试舍弃的空白回合）；真正的跳过则隐藏最后一条。
                 if skipped and ender is not None and ender.role == "assistant":

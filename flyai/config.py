@@ -127,6 +127,20 @@ class RoleplaySettings(BaseModel):
     # 字段保留仅为兼容旧配置文件，内容会被忽略。
     format_example: str = ""
     attributes: AttributeSettings = AttributeSettings()
+    # 提示词注入字符预算（0=不限，默认全部关闭；手动填值后超长部分按段落截断）
+    intro_chars: int = 0          # 角色简介
+    background_chars: int = 0     # 角色经历
+    world_chars: int = 0          # 世界观内容
+    mes_example_chars: int = 0    # 对话范例（整块丢弃后轮）
+    pinned_chars: int = 0         # 常驻条目（角色/世界各自独立计）
+
+    @validator("intro_chars", "background_chars", "world_chars", "mes_example_chars", "pinned_chars")
+    def _non_negative_budget(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return v if v >= 0 else 0
 
 
 class EmbeddingsConfig(BaseModel):
@@ -137,12 +151,38 @@ class EmbeddingsConfig(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
-    top_k: int = 4          # 语义检索返回的命中消息数
-    cache_file: str = ""    # 向量持久化缓存路径；留空则仅进程内缓存
+    top_k: int = 4              # 语义检索返回的命中消息数
+    cache_file: str = ""        # 向量持久化缓存路径；留空则仅进程内缓存
+    score_threshold: float = 0.55   # 语义命中余弦阈值；0.0=不筛选
+    keyword_limit: int = 8          # 关键词检索返回上限
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url.strip() and self.model.strip() and self.api_key.strip())
+
+    @validator("score_threshold")
+    def _clamp_threshold(cls, v: float) -> float:
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 0.55
+        if v < 0.0:
+            return 0.0
+        if v > 1.0:
+            return 1.0
+        return v
+
+    @validator("keyword_limit")
+    def _clamp_keyword_limit(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 8
+        if v < 1:
+            return 1
+        if v > 50:
+            return 50
+        return v
 
 
 class ImageGenSettings(BaseModel):
