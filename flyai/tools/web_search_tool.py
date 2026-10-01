@@ -439,6 +439,8 @@ class _TextExtractor(HTMLParser):
         self.skip_depth = 0
         self.title = ""
         self._in_title = False
+        # 当前打开的正文链接：[href, 开始时 parts 长度]，供结束时判断是否有链接文字
+        self._anchor_stack: List[List[Any]] = []
 
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP_TAGS:
@@ -446,6 +448,12 @@ class _TextExtractor(HTMLParser):
             return
         if tag == "title":
             self._in_title = True
+        if tag == "a" and not self.skip_depth:
+            href = _clean_href(dict(attrs).get("href"))
+            if href:
+                self.parts.append("[")
+                # 记录 "[" 之后的位置：其后有内容才算有链接文字
+                self._anchor_stack.append([href, len(self.parts)])
         if tag in self.BLOCK_TAGS:
             if tag in ("h1", "h2"):
                 prefix = "\n\n## "
@@ -463,6 +471,15 @@ class _TextExtractor(HTMLParser):
             return
         if tag == "title":
             self._in_title = False
+        if tag == "a" and self._anchor_stack:
+            href, started = self._anchor_stack.pop()
+            if len(self.parts) > started:
+                # 正常 [文字](href)
+                self.parts.append("](%s)" % href)
+            else:
+                # 图片链接等无文字情况：去掉孤立的 "["，直接给地址
+                self.parts.pop()
+                self.parts.append(href)
         if tag in self.BLOCK_TAGS:
             self.parts.append("\n")
 
@@ -474,6 +491,29 @@ class _TextExtractor(HTMLParser):
         t = re.sub(r"\s+", " ", data)
         if t.strip():
             self.parts.append(t)
+
+
+_HREF_DROP_SCHEMES = ("javascript:", "mailto:", "tel:", "data:", "vbscript:")
+
+
+def _clean_href(href: Optional[str]) -> str:
+    """规范化正文链接地址；不可用（空/纯锚点/脚本协议）返回 ""。
+
+    保留相对链接、协议相对（//host/...）与 http(s) 绝对链接，
+    让 AI 能从列表页直接拿到详情页真实 URL，不必猜测拼接。
+    """
+    h = unescape((href or "").strip())
+    if not h or h.startswith("#"):
+        return ""
+    low = h.lower()
+    if low.startswith(_HREF_DROP_SCHEMES):
+        return ""
+    if ":" in h.split("/", 1)[0]:
+        # 绝对 URL：只放行 http/https
+        scheme = low.split(":", 1)[0]
+        if scheme not in ("http", "https"):
+            return ""
+    return h
 
 
 def html_to_markdown(html_text: str) -> Tuple[str, List[str]]:

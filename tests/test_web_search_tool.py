@@ -563,3 +563,59 @@ def test_detect_encoding_meta():
 ])
 def test_is_blocked_host(host, blocked):
     assert mod._is_blocked_host(host) is blocked
+
+
+# ---------- 正文链接保留为 markdown ----------
+
+@pytest.mark.parametrize("href,expected", [
+    ("/detail/3", "/detail/3"),
+    ("https://wiki.example.com/p", "https://wiki.example.com/p"),
+    ("//cdn.example.com/a.png", "//cdn.example.com/a.png"),
+    ("/p?a=1&amp;b=2", "/p?a=1&b=2"),
+    ("#section", ""),
+    ("javascript:alert(1)", ""),
+    ("mailto:a@b.com", ""),
+    ("ftp://example.com/x", ""),
+    ("", ""),
+])
+def test_clean_href(href, expected):
+    assert mod._clean_href(href) == expected
+
+
+def test_extract_body_links_markdown():
+    html = """<html><body>
+      <p>列表如下：</p>
+      <a href="/detail/%E6%97%B6%E5%B4%8E">时崎狂三·时崎狂三</a>
+      <a href="https://x.com/news">外部新闻</a>
+      <a href="#top">纯锚点丢弃</a>
+      <a href="javascript:x">脚本链接丢弃</a>
+    </body></html>"""
+    title, lines = mod.html_to_markdown(html)
+    text = "\n".join(lines)
+    assert "[时崎狂三·时崎狂三](/detail/%E6%97%B6%E5%B4%8E)" in text
+    assert "[外部新闻](https://x.com/news)" in text
+    # 被丢弃的链接只留文字
+    assert "纯锚点丢弃" in text
+    assert "](#" not in text
+    assert "脚本链接丢弃" in text
+
+
+def test_extract_image_link_empty_text_emits_href_only():
+    html = """<html><body>
+      <a href="/files/a.png"><img src="/files/a.png" alt="图" /></a>
+    </body></html>"""
+    _, lines = mod.html_to_markdown(html)
+    text = "\n".join(lines)
+    assert text.strip() == "/files/a.png"
+    assert "[](" not in text
+
+
+def test_links_inside_skipped_nav_not_present():
+    html = """<html><body>
+      <nav><a href="/secret-nav">导航链接</a></nav>
+      <a href="/real">正文链接</a>
+    </body></html>"""
+    _, lines = mod.html_to_markdown(html)
+    text = "\n".join(lines)
+    assert "/secret-nav" not in text
+    assert "[正文链接](/real)" in text
