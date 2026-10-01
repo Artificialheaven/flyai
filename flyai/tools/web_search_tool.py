@@ -122,6 +122,43 @@ class WebSearchTool(Tool):
         return ToolResult(ok=True, output=_format_results(query, results))
 
 
+# 抓取后完整正文的缓存时长 / 容量（分页翻页期间不重复下载）
+_PAGE_CACHE_TTL = 600
+_PAGE_CACHE_MAX = 64
+
+
+class PageTextCache:
+    """final_url -> (完整正文, 抓取时间)。短 TTL，供 web_fetch 分页切片。"""
+
+    def __init__(self, ttl: int = _PAGE_CACHE_TTL, max_entries: int = _PAGE_CACHE_MAX):
+        self._ttl = int(ttl)
+        self._max = int(max_entries)
+        self._data: Dict[str, Tuple[str, float]] = {}
+
+    def get(self, key: str) -> Optional[str]:
+        item = self._data.get(key)
+        if item is None:
+            return None
+        if time.time() - item[1] > self._ttl:
+            self._data.pop(key, None)
+            return None
+        return item[0]
+
+    def put(self, key: str, text: str) -> None:
+        self._prune()
+        if key not in self._data and len(self._data) >= self._max:
+            # 容量满：淘汰最旧的一条
+            oldest = min(self._data.items(), key=lambda kv: kv[1][1])[0]
+            self._data.pop(oldest, None)
+        self._data[key] = (text, time.time())
+
+    def _prune(self) -> None:
+        now = time.time()
+        dead = [k for k, v in self._data.items() if now - v[1] > self._ttl]
+        for k in dead:
+            self._data.pop(k, None)
+
+
 class WebFetchTool(Tool):
     name = "web_fetch"
     description = (
@@ -129,18 +166,28 @@ class WebFetchTool(Tool):
         "把结果列表中你判断最相关的 URL 传入，一次只传一个 URL；"
         "需要多个页面就多次调用。支持 HTML 网页（整理为 markdown）、"
         "JSON 数据接口、纯文本与 RSS/Atom 订阅源。"
+        "**长页面分页读取，不会丢失后半部分**：每次返回约 N 字（默认 6000），"
+        "头部标明当前区间与总字数；读完这一段仍需要后面的内容时，"
+        "用相同 url 并把 offset 设为下一段起点再次调用（如 offset=6000、"
+        "再下一段 offset=12000），直到提示已到末尾。不要对同一 offset 重复抓取。"
         "如果抓回来的页面像空壳（只有导航、几乎没有正文），"
         "说明其内容由 JavaScript 动态加载，本工具不执行 JS，"
         "请改用以下来源再抓：①移动版页面（域名换成 m. 开头，"
         "如 m.example.com/...）；②AMP 页面（链接后加 /amp 或 ?amp=1）；"
         "③站点的 RSS/Atom 订阅（如 /feed、/rss、/atom.xml）；"
         "④站点的数据接口（常见 /api/ 开头，返回 JSON）。"
-        "不要抓取与问题无关的链接，也不要对同一个 URL 重复抓取。"
+        "不要抓取与问题无关的链接。"
     )
     parameters = {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "要抓取的网页地址（http/https）"},
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "从正文中第几个字符开始读（默认 0=从头；"
+                               "翻页按上一次返回的起点递增）",
+            },
         },
         "required": ["url"],
         "additionalProperties": False,
@@ -154,6 +201,12 @@ class WebFetchTool(Tool):
         if not url:
             return ToolResult(ok=False, output="[参数错误] 请提供要抓取的网址（url）")
         try:
+            offset = int(arguments.get("offset") or 0)
+        except (TypeError, ValueError):
+            return ToolResult(ok=False, output="[参数错误] offset 必须是非负整数")
+        if offset < 0:
+            return ToolResult(ok=False, output="[参数错误] offset 不能为负数")
+        try:
             parsed = urlsplit(url)
         except ValueError as exc:
             return ToolResult(ok=False, output=f"[参数错误] URL 无法解析: {exc}")
@@ -164,56 +217,85 @@ class WebFetchTool(Tool):
         if _is_blocked_host(parsed.hostname):
             return ToolResult(ok=False, output="[参数错误] 不允许访问内网或本机地址")
 
-        proxy = (self.settings.proxy or "").strip() or None
-        started = time.monotonic()
-        logger.info("web_fetch 开始: url=%s proxy=%s", url, proxy or "直连")
+        services = ctx.services or {}
+        cache = services.get("page_cache")
+        page_size = int(self.settings.max_page_chars or 6000)
 
-        # follow_redirects=False：手动跟随重定向，逐跳检查目标主机（防重定向 SSRF）
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0),
-            follow_redirects=False,
-            proxy=proxy,
-        ) as client:
+        # 缓存命中（同一段正文 10 分钟内）：直接分页，不重复下载
+        entry = cache.get(url) if cache is not None else None
+        if entry is None:
+            proxy = (self.settings.proxy or "").strip() or None
+            started = time.monotonic()
+            logger.info("web_fetch 开始: url=%s proxy=%s", url, proxy or "直连")
+
+            # follow_redirects=False：手动跟随重定向，逐跳检查目标主机（防重定向 SSRF）
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0),
+                follow_redirects=False,
+                proxy=proxy,
+            ) as client:
+                try:
+                    resp, final_url = await _fetch_with_redirect_checks(client, url)
+                except Exception as exc:
+                    logger.warning("网页抓取失败: %s: %s", type(exc).__name__, exc)
+                    return ToolResult(
+                        ok=False,
+                        output=f"[工具错误] 网页抓取失败: {type(exc).__name__}: {exc}",
+                    )
+
+                if resp.status_code >= 400:
+                    logger.info("web_fetch %s -> HTTP %d", url, resp.status_code)
+                    return ToolResult(
+                        ok=False, output=f"[工具错误] 网页返回 HTTP {resp.status_code}"
+                    )
+                ctype = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                if len(resp.content) > _MAX_FETCH_BYTES:
+                    return ToolResult(ok=False, output="[工具错误] 内容过大（超过 10MB）")
+
             try:
-                resp, final_url = await _fetch_with_redirect_checks(client, url)
-            except Exception as exc:
-                logger.warning("网页抓取失败: %s: %s", type(exc).__name__, exc)
-                return ToolResult(
-                    ok=False,
-                    output=f"[工具错误] 网页抓取失败: {type(exc).__name__}: {exc}",
-                )
+                kind, title, full_text, enc = _convert_payload(resp, ctype)
+            except ValueError as exc:
+                return ToolResult(ok=False, output=f"[工具错误] {exc}")
+            if not full_text:
+                return ToolResult(ok=False, output="[工具错误] 没有可提取的正文内容")
 
-            if resp.status_code >= 400:
-                logger.info("web_fetch %s -> HTTP %d", url, resp.status_code)
-                return ToolResult(
-                    ok=False, output=f"[工具错误] 网页返回 HTTP {resp.status_code}"
-                )
-            ctype = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-            if len(resp.content) > _MAX_FETCH_BYTES:
-                return ToolResult(ok=False, output="[工具错误] 内容过大（超过 10MB）")
+            # 以最终 URL 缓存完整正文（redirect 之后的地址）
+            if cache is not None:
+                cache.put(final_url, full_text)
+            logger.info(
+                "web_fetch 抓取完成: %s -> %s, 全文 %d 字符 (enc=%s, %.1fs)",
+                final_url, kind, len(full_text), enc, time.monotonic() - started,
+            )
+        else:
+            # 翻页：从缓存取，kind/title 用默认网页标签即可
+            kind, title, final_url, full_text = "html", "", url, entry
 
-        try:
-            kind, title, text, enc = _convert_payload(resp, ctype)
-        except ValueError as exc:
-            return ToolResult(ok=False, output=f"[工具错误] {exc}")
-        if not text:
-            return ToolResult(ok=False, output="[工具错误] 没有可提取的正文内容")
+        total = len(full_text)
+        if offset >= total:
+            return ToolResult(
+                ok=False,
+                output="[参数错误] offset=%d 已超出正文总长度 %d；"
+                       "如需重读请用更小的 offset（0 为从头）。" % (offset, total),
+            )
 
-        max_chars = int(self.settings.max_page_chars or 6000)
-        truncated = False
-        if len(text) > max_chars:
-            text = text[:max_chars]
-            truncated = True
-
+        chunk = full_text[offset:offset + page_size]
+        end = min(offset + page_size, total)
         tag, label = _KIND_LABELS[kind]
-        header = f"{tag} {label(title)}\nURL: {final_url}\n\n"
-        output = header + text
-        if truncated:
-            output += f"\n\n（内容过长，仅保留前 {max_chars} 字符；可用更具体的 URL 重新抓取）"
-        logger.info(
-            "web_fetch 完成: %s -> %s, %d 字符 (enc=%s, %.1fs)",
-            final_url, kind, len(text), enc, time.monotonic() - started,
+        title_part = label(title)
+        head = tag + (" " + title_part if title_part else "")
+        header = "%s\nURL: %s\n内容 %d–%d / 共 %d 字\n\n" % (
+            head, final_url, offset + 1, end, total,
         )
+        output = header + chunk
+        if end < total:
+            output += (
+                "\n\n（还有 %d 字未读：再次调用 web_fetch，url 相同、"
+                "offset=%d 取下一段）" % (total - end, end)
+            )
+        else:
+            output += "\n\n（已到正文末尾，共 %d 字）" % total
+        logger.info("web_fetch 分页: %s offset=%d 返 %d 字 / 共 %d",
+                    final_url, offset, len(chunk), total)
         return ToolResult(ok=True, output=output)
 
 

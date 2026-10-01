@@ -27,6 +27,7 @@ from .providers.base import BaseProvider
 from .providers.factory import create_provider
 from .tools.attributes_tool import UpdateAttributesTool
 from .tools.image_tool import GenerateImageTool
+from .tools.web_search_tool import PageTextCache
 from .tools.loader import PluginLoader
 from .tools.lore_tool import QueryLoreTool
 from .tools.memory_tool import QueryChatMemoryTool, UpdateChatMemoryTool
@@ -58,6 +59,8 @@ class AppState:
     login_limiter: LoginRateLimiter = field(default_factory=LoginRateLimiter)
     # 待确认的压缩提案：{proposal_id: {uid,sid,room,raw,basesig,ts}}
     _compress_proposals: Dict[str, dict] = field(default_factory=dict)
+    # web_fetch 完整正文缓存（分页翻页不重复下载，短 TTL）
+    page_cache: PageTextCache = field(default_factory=PageTextCache)
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32

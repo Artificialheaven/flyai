@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import sys
 from html import unescape
 
@@ -234,7 +235,7 @@ def test_fetch_gbk_encoding(monkeypatch):
     assert result.ok and "这是 GBK 编码的正文内容" in result.output
 
 
-def test_fetch_truncated_to_max_page_chars(monkeypatch):
+def test_fetch_pagination_first_page_hint(monkeypatch):
     def handler(request):
         return _html_response(_page_html("长页面", "正文内容" * 200))
 
@@ -242,7 +243,88 @@ def test_fetch_truncated_to_max_page_chars(monkeypatch):
     result = asyncio.run(WebFetchTool(_settings(max_page_chars=200)).run(
         {"url": "https://example.com/"}, _ctx()
     ))
-    assert result.ok and "仅保留前 200 字符" in result.output
+    assert result.ok
+    assert "内容 1–200 / 共" in result.output
+    assert "offset=200 取下一段" in result.output
+    assert "已到正文末尾" not in result.output
+
+
+def test_fetch_pagination_uses_cache_no_refetch(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return _html_response(_page_html("长页面", "正文内容" * 200))
+
+    _install_transport(monkeypatch, handler)
+    cache = mod.PageTextCache()
+    ctx = _ctx(page_cache=cache)
+    tool = WebFetchTool(_settings(max_page_chars=200))
+
+    first = asyncio.run(tool.run({"url": "https://example.com/"}, ctx))
+    assert first.ok and calls["n"] == 1
+    # 第二页：缓存命中，不重复下载
+    second = asyncio.run(tool.run(
+        {"url": "https://example.com/", "offset": 200}, ctx
+    ))
+    assert second.ok and calls["n"] == 1
+    assert "内容 201–400 / 共" in second.output
+    assert "offset=400 取下一段" in second.output
+
+
+def test_fetch_pagination_walk_to_end(monkeypatch):
+    def handler(request):
+        return _html_response(_page_html("长页面", "正文内容" * 200))
+
+    _install_transport(monkeypatch, handler)
+    cache = mod.PageTextCache()
+    ctx = _ctx(page_cache=cache)
+    tool = WebFetchTool(_settings(max_page_chars=200))
+
+    offset = 0
+    pages = 0
+    out = asyncio.run(tool.run({"url": "https://example.com/"}, ctx))
+    while "已到正文末尾" not in out.output:
+        m = re.search(r"offset=(\d+) 取下一段", out.output)
+        assert m, out.output
+        offset = int(m.group(1))
+        out = asyncio.run(tool.run(
+            {"url": "https://example.com/", "offset": offset}, ctx
+        ))
+        pages += 1
+        assert pages <= 6
+    # 最后一段区间以总字数收尾
+    total = int(re.search(r"共 (\d+) 字", out.output).group(1))
+    assert "内容 %d–%d / 共 %d 字" % (offset + 1, total, total) in out.output
+    assert "取下一段" not in out.output
+
+
+def test_fetch_offset_beyond_total(monkeypatch):
+    def handler(request):
+        return _html_response(_page_html("短页", "正文"))
+
+    _install_transport(monkeypatch, handler)
+    result = asyncio.run(WebFetchTool(_settings()).run(
+        {"url": "https://example.com/", "offset": 500},
+        _ctx(page_cache=mod.PageTextCache()),
+    ))
+    assert not result.ok and "超出正文总长度" in result.output
+
+
+def test_page_cache_expiry():
+    c = mod.PageTextCache(ttl=-10)
+    c.put("u", "正文")
+    assert c.get("u") is None
+
+
+def test_page_cache_max_entries_evicts_oldest():
+    c = mod.PageTextCache(ttl=600, max_entries=2)
+    c.put("a", "1")
+    c.put("b", "2")
+    c.put("c", "3")
+    assert c.get("a") is None
+    assert c.get("b") == "2"
+    assert c.get("c") == "3"
 
 
 # ---------- web_fetch：参数 / 安全边界 ----------

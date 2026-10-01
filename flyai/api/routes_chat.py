@@ -155,6 +155,8 @@ async def chat(req: ChatRequest, request: Request):
         services["lore"] = _get_querier(sc, character, world)
     # 图生图自动取参考图：让工具能扫历史
     services["history"] = session.messages
+    # web_fetch 分页缓存
+    services["page_cache"] = getattr(state, "page_cache", None)
     # 当前提供商是否支持视觉（搜图工具据此决定筛选指引文案）
     services["vision"] = bool(getattr(getattr(provider, "cfg", None), "vision", False))
     # 生图工具保存目录（该用户的上传目录，经 /uploads/<uid> 访问）
@@ -365,6 +367,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                     services["lore"] = _get_querier(sc, char, world)
                 # 图生图自动取参考图：让工具能扫该窗口历史
                 services["history"] = history
+                # web_fetch 分页缓存
+                services["page_cache"] = getattr(state, "page_cache", None)
                 # 当前提供商是否支持视觉（搜图工具据此决定筛选指引文案）
                 services["vision"] = bool(getattr(getattr(provider, "cfg", None), "vision", False))
                 # 记忆工具：让该 AI 能检索其它对话、并更新本会话记忆（注入同一 session/member 引用）
