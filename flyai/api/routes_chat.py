@@ -219,6 +219,9 @@ async def chat(req: ChatRequest, request: Request):
                 system_prompt=system_prompt,
                 session_id=session.id,
                 services=services,
+                web_max_iterations=getattr(
+                    getattr(state.config, "web_search", None), "max_iterations", None
+                ),
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -424,6 +427,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                         system_prompt=sys_prompt + retry_nudge,
                         session_id=session.id,
                         services=services,
+                        web_max_iterations=getattr(
+                            getattr(state.config, "web_search", None), "max_iterations", None
+                        ),
                     ):
                         if ev == "done":
                             done_data = data
@@ -447,11 +453,14 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider):
                         skipped = True
                         break
                     # 空回复（没写出任何字）→ 提醒一次后重试，最多尝试 3 次
+                    # 达到工具轮数上限时的空结尾不重试（再跑一遍只会再次撞上限）
                     if (
                         allow_skip
                         and ender is not None
                         and ender.role == "assistant"
                         and not ender_txt
+                        and (done_data or {}).get("reason")
+                        not in ("max_iterations", "max_web_iterations")
                         and attempts < 3
                     ):
                         retry_nudge = (

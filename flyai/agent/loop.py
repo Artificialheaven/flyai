@@ -88,6 +88,10 @@ def _render_status(call: ToolCall) -> str:
     return f"正在调用工具 {call.name}"
 
 
+# 拥有独立轮数预算的联网工具
+WEB_TOOL_NAMES = {"web_search", "web_fetch"}
+
+
 async def run_agent_loop(
     history: List[Message],
     provider: Any,
@@ -96,10 +100,13 @@ async def run_agent_loop(
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     session_id: str = "",
     services: Optional[Dict[str, Any]] = None,
+    web_max_iterations: Optional[int] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
     services: 注入到 ToolContext 的服务（如 {'lore': LoreQuerier}）。
+    web_max_iterations：web_search/web_fetch 的独立轮数预算，与通用工具轮数
+    （settings.max_iterations）分开计数、互不占用；None 时回退为通用值。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -114,7 +121,13 @@ async def run_agent_loop(
     usage_in = 0
     usage_out = 0
 
-    for iteration in range(1, settings.max_iterations + 1):
+    web_limit = int(web_max_iterations or settings.max_iterations)
+    # 两套独立计数：非联网轮 / 联网轮（一轮混合两类调用则两边各记一次）
+    general_used = 0
+    web_used = 0
+    iteration = 0
+    while True:
+        iteration += 1
         tool_specs = registry.specs() if settings.enabled else []
         request_messages = list(history)
         if system_prompt:
@@ -148,6 +161,40 @@ async def run_agent_loop(
 
         if not calls:
             yield ("done", {"reason": "stop", "iterations": iteration,
+                            "usage": _usage_payload(usage_in, usage_out)})
+            return
+
+        # 先判定本轮类型：纯联网轮只占 web 预算，纯其他轮只占通用预算
+        call_names = {c.name for c in calls}
+        web_round = bool(call_names & WEB_TOOL_NAMES)
+        other_round = bool(call_names - WEB_TOOL_NAMES)
+
+        # 预算检查：上一轮结束后某类可能已触顶。
+        # 上限只拦截同类工具的下一轮调用——已用满 N 轮后模型仍可直接给出最终回复；
+        # 纯另一类工具的调用也不受影响（两套预算不共享）。
+        cap_reason = None
+        cap_message = ""
+        if other_round and general_used >= settings.max_iterations:
+            cap_reason = "max_iterations"
+            cap_message = f"已达到最大工具调用轮数（{settings.max_iterations}），停止执行"
+        elif web_round and web_used >= web_limit:
+            cap_reason = "max_web_iterations"
+            cap_message = (f"已达到联网工具最大轮数（web_search/web_fetch 共 {web_limit} 轮），"
+                           "停止执行")
+        if cap_reason is not None:
+            yield ("tool_calls", {"calls": [c.to_dict() for c in calls]})
+            for call in calls:
+                yield ("tool_start", {"id": call.id, "name": call.name,
+                                      "arguments": call.arguments,
+                                      "status_text": "已达到轮数上限"})
+                yield ("tool_end", {"id": call.id, "name": call.name, "ok": False,
+                                    "preview": cap_message})
+                # 补 tool 消息占位：assistant 的 tool_calls 必须有对应 tool 消息，
+                # 否则历史回灌给提供商时格式非法
+                history.append(Message(role="tool", tool_call_id=call.id, name=call.name,
+                                       content=cap_message, ok=False))
+            yield ("error", {"message": cap_message, "fatal": False})
+            yield ("done", {"reason": cap_reason, "iterations": iteration,
                             "usage": _usage_payload(usage_in, usage_out)})
             return
 
@@ -191,13 +238,11 @@ async def run_agent_loop(
         if attr_changed and "attributes" in ctx.services:
             yield ("attributes", {"attributes": ctx.services["attributes"].get_all()})
 
-    # 达到轮数上限
-    yield (
-        "error",
-        {"message": f"已达到最大工具调用轮数（{settings.max_iterations}），停止执行", "fatal": False},
-    )
-    yield ("done", {"reason": "max_iterations", "iterations": settings.max_iterations,
-                    "usage": _usage_payload(usage_in, usage_out)})
+        # 本轮执行完再计数：上限在下一轮同类工具调用时才拦截
+        if other_round:
+            general_used += 1
+        if web_round:
+            web_used += 1
 
 
 def _usage_payload(usage_in: int, usage_out: int) -> Dict[str, int]:

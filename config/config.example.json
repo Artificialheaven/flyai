@@ -102,7 +102,8 @@
     "enabled": true,
     "proxy": "",
     "results_num": 8,
-    "max_page_chars": 6000
+    "max_page_chars": 6000,
+    "max_iterations": 15
   },
   "browser": {
     "enabled": false,

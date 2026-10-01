@@ -213,6 +213,10 @@
         <label class="f-label">单页正文字数上限
           <input type="number" id="set-ws-pagechars" value="6000" min="1000" step="1000" />
         </label>
+        <label class="f-label">联网工具轮数上限
+          <input type="number" id="set-ws-iters" value="15" min="1" max="50" />
+          <span class="sub">web_search/web_fetch 专用，与通用工具轮数（8）互不占用</span>
+        </label>
 
         <h4>AI 浏览器（Playwright）</h4>
         <p class="sub">AI 可像人一样逐级浏览网页：打开 → 查看编号元素 → 点链接/按钮进入内部页面。需先安装：<code>pip install -r requirements-browser.txt</code> 然后 <code>playwright install chromium</code>（Ubuntu 另需 <code>sudo playwright install-deps chromium</code>）。未装时勾选也无法使用。</p>

@@ -219,6 +219,17 @@ class WebSearchSettings(BaseModel):
     proxy: str = ""           # 留空直连；如 http://127.0.0.1:7897
     results_num: int = 8      # 搜索结果条数（全部抓正文）
     max_page_chars: int = 6000   # 单页正文截取上限，控 token
+    # web_search/web_fetch 专属工具轮数，与 tools.max_iterations 不共享
+    # （搜索→抓 1~3 页→分页翻读很容易超过通用的 8 轮，故联网单独放宽）
+    max_iterations: int = 15
+
+    @validator("max_iterations")
+    def _clamp_web_max_iterations(cls, v: int) -> int:
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 15
+        return v if 1 <= v <= 50 else 15
 
 
 class BrowserSettings(BaseModel):

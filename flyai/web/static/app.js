@@ -326,6 +326,7 @@ function cacheElements() {
   el.setWsProxy = document.getElementById("set-ws-proxy");
   el.setWsNum = document.getElementById("set-ws-num");
   el.setWsPagechars = document.getElementById("set-ws-pagechars");
+  el.setWsIters = document.getElementById("set-ws-iters");
   el.setBrowserEnabled = document.getElementById("set-browser-enabled");
   el.setBrowserHeadless = document.getElementById("set-browser-headless");
   el.setBrowserProxy = document.getElementById("set-browser-proxy");
@@ -3899,6 +3900,7 @@ function fillAdminForm() {
   el.setWsProxy.value = ws.proxy || "";
   el.setWsNum.value = ws.results_num || 8;
   el.setWsPagechars.value = ws.max_page_chars || 6000;
+  el.setWsIters.value = ws.max_iterations || 15;
   var br = state.config.browser || {};
   el.setBrowserEnabled.checked = !!br.enabled;
   el.setBrowserHeadless.checked = br.headless !== false;
@@ -4139,6 +4141,7 @@ function saveConfig() {
     proxy: el.setWsProxy.value.trim(),
     results_num: parseInt(el.setWsNum.value, 10) || 8,
     max_page_chars: parseInt(el.setWsPagechars.value, 10) || 6000,
+    max_iterations: parseInt(el.setWsIters.value, 10) || 15,
   };
   // 合并已有 browser 配置：UI 只暴露部分字段，保留 executable_path 等
   var browser = Object.assign({}, state.config.browser || {}, {
