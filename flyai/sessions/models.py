@@ -20,6 +20,11 @@ class RoomMember:
     override: Optional[Dict[str, Any]] = None  # R7 会话专属角色副本（to_dict）
     memory: str = ""                # 该 AI 在本房间的记忆簿（各窗口共享）
     attributes: Dict[str, Any] = field(default_factory=dict)
+    provider_id: str = ""           # 座位专属 LLM 提供商；空=用请求级（房间默认）
+    # 角色级全局记忆簿挂载：""=不挂载；"rw"=可读写；"ro"=只读
+    memory_mode: str = ""
+    # 挂载的记忆簿归属角色 id；空=自己的角色（继承别的卡时填那张卡 id，限同一用户）
+    memory_char_id: str = ""
 
     def __post_init__(self):
         if not self.id:
@@ -34,6 +39,9 @@ class RoomMember:
             "override": self.override,
             "memory": self.memory,
             "attributes": self.attributes,
+            "provider_id": self.provider_id,
+            "memory_mode": self.memory_mode,
+            "memory_char_id": self.memory_char_id,
         }
 
     @classmethod
@@ -47,6 +55,9 @@ class RoomMember:
             override=d.get("override"),
             memory=d.get("memory", "") or "",
             attributes=d.get("attributes", {}) or {},
+            provider_id=d.get("provider_id", "") or "",
+            memory_mode=d.get("memory_mode", "") or "",
+            memory_char_id=d.get("memory_char_id", "") or "",
         )
 
 
@@ -146,3 +157,39 @@ class Session:
             if t.id == tid:
                 return t
         return None
+
+    def remove_member(self, mid: str) -> Optional[RoomMember]:
+        """移除成员；调用方负责级联清理（其专属 DM 窗口、各 group.member_ids）。"""
+        for i, m in enumerate(self.members):
+            if m.id == mid:
+                return self.members.pop(i)
+        return None
+
+    def remove_thread(self, tid: str) -> Optional[Thread]:
+        for i, t in enumerate(self.threads):
+            if t.id == tid:
+                return self.threads.pop(i)
+        return None
+
+
+def bootstrap_room(session: Session) -> Thread:
+    """把旧形态会话（顶层 messages、无 members/threads）就地升级为房间形态。
+
+    生成一个用户座位 + 一个 AI 参与者 + 一条私聊线程，原消息移入线程。
+    routes_chat 在发消息前调用：保证后台 drive 与刷新时的 get() 迁移看到
+    同一形态，避免 drive 用旧形态覆盖迁移结果、线程 id 反复随机变化。
+    """
+    user = RoomMember(name="你", is_user=True)
+    ai = RoomMember(
+        name="AI",
+        character_id=session.character_id,
+        override=session.character_override,
+    )
+    session.members = [user, ai]
+    thread = Thread(
+        kind="dm", title="私聊", member_ids=[ai.id],
+        messages=list(session.messages),
+    )
+    session.threads = [thread]
+    session.messages = []
+    return thread

@@ -130,3 +130,30 @@ def test_world_prompt_tools_fallback_to_builtin():
     rp = RoleplaySettings(format_enabled=True, tool_instruction="全局工具要求")
     prompt = build_system_prompt(None, w, "你是一个助手。", roleplay=rp)
     assert "全局工具要求" in prompt
+
+
+def test_character_voice_roundtrip():
+    c = Character(id="c1", name="小梅", voice="S_NkpD5org2")
+    d = c.to_dict()
+    assert d["voice"] == "S_NkpD5org2"
+    assert Character.from_dict(d).voice == "S_NkpD5org2"
+
+
+def test_character_voice_defaults_empty_and_legacy_compat():
+    d = Character(id="c2", name="无音色").to_dict()
+    assert d["voice"] == ""
+    # 旧卡数据缺 voice 键也能正常读取
+    d.pop("voice")
+    assert Character.from_dict(d).voice == ""
+
+
+def test_build_character_carries_voice():
+    from flyai.api.routes_lore import CharacterPayload, _build_character
+
+    c = _build_character(
+        CharacterPayload(id="c3", name="小梅", voice=" S_X ")
+    )
+    assert c.voice == "S_X"
+
+    c2 = _build_character(CharacterPayload(id="c4", name="阿明"))
+    assert c2.voice == ""

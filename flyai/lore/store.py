@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..config import PROJECT_ROOT
+from ..ids import safe_child
 from .models import Character, World
 
 
@@ -58,7 +59,10 @@ class LoreStore:
 
     @staticmethod
     def _read_character(directory: Path, cid: str) -> Optional[Character]:
-        p = directory / f"{cid}.json"
+        try:
+            p = safe_child(directory, f"{cid}.json")
+        except Exception:
+            return None
         if not p.exists():
             return None
         try:
@@ -67,18 +71,22 @@ class LoreStore:
             return None
 
     def character_source(self, cid: str) -> Optional[str]:
-        """角色卡所在位置：own（可改可删）/ shared（只读）/ None（不存在）。"""
-        if (self._char_dir / f"{cid}.json").exists():
-            return "own"
-        if self._shared_char_dir is not None and (self._shared_char_dir / f"{cid}.json").exists():
-            return "shared"
+        """角色卡所在位置：own（可改可删）/ shared（只读）/ None（不存在/非法名）。"""
+        fname = f"{cid}.json"
+        try:
+            if safe_child(self._char_dir, fname).exists():
+                return "own"
+            if self._shared_char_dir is not None and safe_child(self._shared_char_dir, fname).exists():
+                return "shared"
+        except Exception:
+            return None
         return None
 
     def save_character(self, c: Character) -> None:
         self._write(self._char_dir, c.id, c.to_dict())
 
     def delete_character(self, cid: str) -> None:
-        (self._char_dir / f"{cid}.json").unlink(missing_ok=True)
+        safe_child(self._char_dir, f"{cid}.json").unlink(missing_ok=True)
 
     def delete_character_cascade(self, cid: str) -> None:
         """删除根卡时一并删除其全部副本（仅自身目录）。"""
@@ -120,7 +128,10 @@ class LoreStore:
         return out
 
     def get_world(self, wid: str) -> World:
-        p = self._world_dir / f"{wid}.json"
+        try:
+            p = safe_child(self._world_dir, f"{wid}.json")
+        except Exception:
+            return None
         if not p.exists():
             return None
         return World.from_dict(json.loads(p.read_text(encoding="utf-8")))
@@ -129,12 +140,13 @@ class LoreStore:
         self._write(self._world_dir, w.id, w.to_dict())
 
     def delete_world(self, wid: str) -> None:
-        (self._world_dir / f"{wid}.json").unlink(missing_ok=True)
+        # 裸 id 直接拼文件名删除：非法名（穿越/分隔符）在此收口
+        safe_child(self._world_dir, f"{wid}.json").unlink(missing_ok=True)
 
     @staticmethod
     def _write(directory: Path, cid: str, data: dict) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        p = directory / f"{cid}.json"
+        p = safe_child(directory, f"{cid}.json")
         tmp = p.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

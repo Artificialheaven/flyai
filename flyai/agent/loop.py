@@ -9,6 +9,7 @@ run_agent_loop 是一个异步生成器，产出 (event_name, data) 元组；
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -92,6 +93,35 @@ def _render_status(call: ToolCall) -> str:
 WEB_TOOL_NAMES = {"web_search", "web_fetch"}
 
 
+def _tag_actor(m: Message, actor: str) -> Message:
+    if actor:
+        m.actor_id = actor
+    return m
+
+
+def _actor_view(history: List[Message], actor: str) -> List[Message]:
+    """群聊发言视图：别人座位产生的工具调用/工具结果/思考对当前发言者隐藏，
+    只保留对方说出口的正文（复制成不带 tool_calls 的干净 assistant 消息）；
+    自己座位与没有 actor 标记的旧消息原样保留。
+    """
+    if not actor:
+        return list(history)
+    view: List[Message] = []
+    for m in history:
+        owner = getattr(m, "actor_id", "") or ""
+        if not owner or owner == actor:
+            view.append(m)
+            continue
+        # 其他发言者：只留正文（跳过隐藏的「略」与工具回合）
+        if (m.role == "assistant" and not m.hidden
+                and (m.content or "").strip()):
+            view.append(
+                Message(role="assistant", id=m.id,
+                        content=m.content, name=m.name)
+            )
+    return view
+
+
 async def run_agent_loop(
     history: List[Message],
     provider: Any,
@@ -101,12 +131,17 @@ async def run_agent_loop(
     session_id: str = "",
     services: Optional[Dict[str, Any]] = None,
     web_max_iterations: Optional[int] = None,
+    actor: str = "",
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
     services: 注入到 ToolContext 的服务（如 {'lore': LoreQuerier}）。
     web_max_iterations：web_search/web_fetch 的独立轮数预算，与通用工具轮数
     （settings.max_iterations）分开计数、互不占用；None 时回退为通用值。
+    actor：群聊里当前发言座位 id。本轮回灌的消息都带上该标记；构建请求时，
+    其他发言者的工具调用/工具结果/思考对其不可见，只能看到对方说出口的内容
+    （见 _actor_view），避免后发言者看到别人已调 update_chat_memory 就不写
+    自己的记忆，也避免他人记忆内容串场。actor 为空时不过滤。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -129,25 +164,44 @@ async def run_agent_loop(
     while True:
         iteration += 1
         tool_specs = registry.specs() if settings.enabled else []
-        request_messages = list(history)
+        request_messages = _actor_view(history, actor)
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
 
         thinking_parts: List[str] = []
         content_parts: List[str] = []
         calls: Optional[List[ToolCall]] = None
-        async for ev in provider.stream_chat(request_messages, tool_specs):
-            if ev.type == StreamEventType.THINKING_DELTA:
-                thinking_parts.append(ev.text)
-                yield ("thinking_delta", {"text": ev.text})
-            elif ev.type == StreamEventType.CONTENT_DELTA:
-                content_parts.append(ev.text)
-                yield ("content_delta", {"text": ev.text})
-            elif ev.type == StreamEventType.TOOL_CALLS:
-                calls = ev.tool_calls
-            elif ev.type == StreamEventType.USAGE and ev.usage:
-                usage_in += int(ev.usage.get("prompt_tokens") or 0)
-                usage_out += int(ev.usage.get("completion_tokens") or 0)
+        try:
+            async for ev in provider.stream_chat(request_messages, tool_specs):
+                if ev.type == StreamEventType.THINKING_DELTA:
+                    thinking_parts.append(ev.text)
+                    yield ("thinking_delta", {"text": ev.text})
+                elif ev.type == StreamEventType.CONTENT_DELTA:
+                    content_parts.append(ev.text)
+                    yield ("content_delta", {"text": ev.text})
+                elif ev.type == StreamEventType.TOOL_CALLS:
+                    calls = ev.tool_calls
+                elif ev.type == StreamEventType.USAGE and ev.usage:
+                    usage_in += int(ev.usage.get("prompt_tokens") or 0)
+                    usage_out += int(ev.usage.get("completion_tokens") or 0)
+        except (asyncio.CancelledError, GeneratorExit):
+            # 用户点停止：把已经流式产出的半截回复补进历史（drive finally 会保存），
+            # 不再像旧版那样中止后答案整段消失
+            partial_text = "".join(content_parts)
+            partial_think = "".join(thinking_parts).strip()
+            if partial_text or partial_think or calls:
+                history.append(
+                    _tag_actor(
+                        Message(
+                            role="assistant",
+                            content=partial_text or None,
+                            thinking=partial_think or None,
+                            tool_calls=calls,
+                        ),
+                        actor,
+                    )
+                )
+            raise
 
         assistant = Message(
             role="assistant",
@@ -157,7 +211,7 @@ async def run_agent_loop(
             thinking="".join(thinking_parts).strip() or None,
             tool_calls=calls,
         )
-        history.append(assistant)
+        history.append(_tag_actor(assistant, actor))
 
         if not calls:
             yield ("done", {"reason": "stop", "iterations": iteration,
@@ -191,8 +245,10 @@ async def run_agent_loop(
                                     "preview": cap_message})
                 # 补 tool 消息占位：assistant 的 tool_calls 必须有对应 tool 消息，
                 # 否则历史回灌给提供商时格式非法
-                history.append(Message(role="tool", tool_call_id=call.id, name=call.name,
-                                       content=cap_message, ok=False))
+                history.append(_tag_actor(
+                    Message(role="tool", tool_call_id=call.id, name=call.name,
+                            content=cap_message, ok=False),
+                    actor))
             yield ("error", {"message": cap_message, "fatal": False})
             yield ("done", {"reason": cap_reason, "iterations": iteration,
                             "usage": _usage_payload(usage_in, usage_out)})
@@ -224,13 +280,16 @@ async def run_agent_loop(
             if result.meta and _provider_supports_vision(provider):
                 tool_images = _meta_images(result.meta)
             history.append(
-                Message(
-                    role="tool",
-                    tool_call_id=call.id,
-                    name=call.name,
-                    content=result.output,
-                    ok=result.ok,
-                    images=tool_images,
+                _tag_actor(
+                    Message(
+                        role="tool",
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=result.output,
+                        ok=result.ok,
+                        images=tool_images,
+                    ),
+                    actor,
                 )
             )
 

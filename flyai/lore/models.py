@@ -50,6 +50,7 @@ class Character:
     system_prompt: str = ""   # 系统级提示词（高优先级自定义系统指令，空则不注入）
     parent_id: str = ""       # 空=根卡（主角色卡）；非空=该根卡下的副本
     alias: str = ""           # 副本在列表中显示的别名（空则回退 name）
+    voice: str = ""           # 绑定音色的 speaker ID（空=用全局默认音色）
     author: str = ""          # 创建者 uid（服务端注入）；对外以 author:id 唯一标识
     public: bool = False      # 是否已发布为全体用户共享（admin 操作）
 
@@ -82,6 +83,7 @@ class Character:
             "system_prompt": self.system_prompt,
             "parent_id": self.parent_id,
             "alias": self.alias,
+            "voice": self.voice,
             "author": self.author,
             "public": self.public,
         }
@@ -102,6 +104,7 @@ class Character:
             system_prompt=d.get("system_prompt", "") or "",
             parent_id=d.get("parent_id", "") or "",
             alias=d.get("alias", "") or "",
+            voice=d.get("voice", "") or "",
             author=d.get("author", "") or "",
             public=bool(d.get("public", False)),
         )

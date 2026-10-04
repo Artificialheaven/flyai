@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import ImageGenSettings
@@ -28,6 +29,7 @@ from .base import ToolContext, ToolResult
 from .image_tool import (
     _ALLOWED_SIZES,
     ark_generate,
+    logger,
     save_generated_image,
     save_reference_image,
     select_image_model,
@@ -151,6 +153,7 @@ class EditImageTool(ReadImageTool):
                 ref_images=ref_payload,
             )
         except Exception as exc:
+            logger.exception("图生图失败（云端路径）")
             return ToolResult(
                 ok=False, output=f"[工具错误] 图生图失败: {type(exc).__name__}: {exc}"
             )

@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 
+from ..ids import InvalidName, check_safe_name
 from ..lore.diff import character_diff, world_diff
+from ..sessions.models import RoomMember, Session, Thread
 from ..sessions.resolve import (
     apply_room_compression,
     clear_character_override,
@@ -26,6 +28,13 @@ from ..sessions.resolve import (
 )
 
 router = APIRouter(prefix="/api", tags=["session"])
+
+
+def _safe_sid(sid: str) -> str:
+    try:
+        return check_safe_name(sid, "会话 ID")
+    except InvalidName:
+        raise HTTPException(400, "会话 ID 非法")
 
 
 class SessionCreate(BaseModel):
@@ -69,6 +78,7 @@ def create_session(req: SessionCreate, request: Request):
 def update_session(sid: str, req: SessionUpdate, request: Request):
     """重命名/置顶，或切换会话绑定的角色/世界观（角色扮演开关）。"""
     sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
     s = sc.store.get(sid)
     if s is None:
         raise HTTPException(404, "会话不存在")
@@ -97,6 +107,7 @@ def update_session(sid: str, req: SessionUpdate, request: Request):
 @router.get("/sessions/{sid}")
 def get_session(sid: str, request: Request):
     sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
     s = sc.store.get(sid)
     if s is None:
         raise HTTPException(404, "会话不存在")
@@ -106,6 +117,7 @@ def get_session(sid: str, request: Request):
 @router.delete("/sessions/{sid}")
 def delete_session(sid: str, request: Request):
     sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
     sc.store.delete(sid)
     return {"ok": True}
 
@@ -116,10 +128,12 @@ class BatchDeleteBody(BaseModel):
 
 @router.post("/sessions/batch-delete")
 def batch_delete_sessions(body: BatchDeleteBody, request: Request):
-    """批量删除会话：逐个删除，不存在的跳过。返回实际删除数。"""
+    """批量删除：逐个删除，不存在的跳过。返回实际删除数。
+    body 里的 id 同样校验（正斜杠穿越在请求体里全平台成立）。"""
     sc = request.app.state.flyai.user(request)
     deleted = 0
     for sid in body.ids or []:
+        _safe_sid(sid)
         if sc.store.get(sid) is not None:
             sc.store.delete(sid)
             deleted += 1
@@ -129,6 +143,7 @@ def batch_delete_sessions(body: BatchDeleteBody, request: Request):
 @router.post("/sessions/{sid}/clear")
 def clear_session(sid: str, request: Request):
     sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
     if sc.store.get(sid) is None:
         raise HTTPException(404, "会话不存在")
     sc.store.clear(sid)
@@ -261,6 +276,89 @@ def session_export(sid: str, request: Request):
         content=body,
         headers={"Content-Disposition": f'attachment; filename="conversation-{s.id[:8]}.json"'},
     )
+
+
+class SessionImportPayload(BaseModel):
+    type: str = ""
+    version: int = 0
+    name: str = ""
+    data: dict = {}
+
+
+@router.post("/sessions/import")
+def import_session(payload: SessionImportPayload, request: Request):
+    """导入 flyai-conversation 导出包：重建为全新会话（新 id，不覆盖已有会话）。
+
+    随包角色卡：本库按 id 已存在 → 复用库引用；不存在 → 降为会话专属副本
+    （member.override），不塞进角色卡库。世界观同理。
+    """
+    if payload.type != "flyai-conversation":
+        raise HTTPException(400, "不是 FlyAI 对话导出包（type 应为 flyai-conversation）")
+    if payload.version != 2:
+        raise HTTPException(400, "不支持的导出包版本: %s（仅支持 2）" % payload.version)
+    sc = request.app.state.flyai.user(request)
+    d = payload.data or {}
+    if not isinstance(d, dict) or not isinstance(d.get("session"), dict):
+        raise HTTPException(400, "导出包内容不完整")
+    meta = d.get("session") or {}
+
+    s = Session(
+        id=uuid.uuid4().hex,  # 新会话 id：store 以 id 为文件名，复用会覆盖原会话
+        title=(meta.get("title") or payload.name or "导入的对话").strip() or "导入的对话",
+        provider_id=meta.get("provider_id", "") or "",
+        created_at=meta.get("created_at", "") or "",  # 保留原始创建时间
+        attributes=meta.get("attributes", {}) or {},
+        members=[RoomMember.from_dict(m) for m in d.get("members", []) or []],
+        threads=[Thread.from_dict(t) for t in d.get("threads", []) or []],
+        pinned=False,  # 不导入置顶，避免打乱当前排序
+    )
+
+    # 随包角色卡按 id 索引；导出时补的 ref 字段不属于卡本身，副本落盘前去掉
+    packaged = {}
+    for c in d.get("characters", []) or []:
+        if isinstance(c, dict) and c.get("id"):
+            card = dict(c)
+            card.pop("ref", None)
+            packaged[c["id"]] = card
+
+    reused = 0
+    converted = 0
+
+    def resolve_card(member):
+        nonlocal reused, converted
+        if member.override or not member.character_id:
+            return  # 原本就是会话副本 / 无角色座位（如未挂自设的用户座）
+        cid = member.character_id
+        if sc.lore.get_character(cid) is not None:
+            reused += 1
+            return
+        card = packaged.get(cid)
+        if card is not None:
+            # 库里没有：降为会话副本，不强行入库
+            member.override = card
+            converted += 1
+        member.character_id = ""  # 清掉悬空引用（含包里也找不到卡的情况）
+
+    for m in s.members:
+        resolve_card(m)
+
+    # 世界观：随包世界卡的 id 在本库存在 → 复用引用；否则用随包世界做会话副本
+    world_pkg = d.get("world")
+    wid = world_pkg.get("id", "") if isinstance(world_pkg, dict) else ""
+    if wid and sc.lore.get_world(wid) is not None:
+        s.world_id = wid
+    elif isinstance(world_pkg, dict) and wid:
+        s.world_override = world_pkg
+
+    # 窗口引用的成员 id 必须存在（导出包残缺时自保，heal_thread 之后还会处理消息）
+    known_mids = {m.id for m in s.members}
+    for t in s.threads:
+        t.member_ids = [mid for mid in t.member_ids if mid in known_mids]
+
+    sc.store.save(s)
+    out = _session_dict(s)
+    out["import_summary"] = {"reused_cards": reused, "scoped_cards": converted}
+    return out
 
 
 class CompressApplyBody(BaseModel):

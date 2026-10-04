@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Optional
 
@@ -24,12 +25,14 @@ from ..config import (
     StableDiffusionSettings,
     WebSearchSettings,
     BrowserSettings,
+    TtsSettings,
     RoleplaySettings,
     mask_api_key,
     save_config,
 )
 from ..models_access import model_visible, visible_image_models, visible_providers
 from ..auth_sessions import resolve_uid
+from ..ids import InvalidName, check_model_id
 from ..user import ADMIN_UID
 from ..errors import ProviderError  # noqa: F401
 
@@ -77,6 +80,7 @@ class ConfigPayload(BaseModel):
     pixiv: Optional[dict] = None
     web_search: Optional[dict] = None
     browser: Optional[dict] = None
+    tts: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -132,7 +136,14 @@ def _masked_config(state, uid: Optional[str] = None):
         "pixiv": cfg.pixiv.dict(),
         "web_search": cfg.web_search.dict(),
         "browser": cfg.browser.dict(),
+        "tts": _masked_tts(cfg),
     }
+
+
+def _masked_tts(cfg: AppConfig) -> dict:
+    d = cfg.tts.dict()
+    d["api_key"] = mask_api_key(cfg.tts.api_key) if cfg.tts.api_key else ""
+    return d
 
 
 def _credit_key(incoming: str, existing: str) -> str:
@@ -154,6 +165,8 @@ def _uid(request: Request) -> str:
 def _persist(state) -> None:
     save_config(state.config, state.config_path)
     state.reload_providers()
+    # 按最新配置热重建工具表：API Key / 启用开关等保存后立即生效，无需重启
+    state.reload_tools()
 
 
 # ---- 全局配置 ----
@@ -229,9 +242,22 @@ def put_config(payload: ConfigPayload, request: Request):
 
     if payload.web_search is not None:
         cfg.web_search = WebSearchSettings.parse_obj(dict(payload.web_search))
+        # 代理/引擎等设置可能已变：关掉旧浏览器搜索器，下次使用按新配置重建
+        old = state.search_browser
+        if old is not None:
+            state.search_browser = None
+            try:
+                asyncio.create_task(old.aclose())
+            except RuntimeError:
+                pass
 
     if payload.browser is not None:
         cfg.browser = BrowserSettings.parse_obj(dict(payload.browser))
+
+    if payload.tts is not None:
+        td = dict(payload.tts)
+        td["api_key"] = _credit_key(td.get("api_key", ""), cfg.tts.api_key)
+        cfg.tts = TtsSettings.parse_obj(td)
 
     _persist(state)
     return _masked_config(state, ADMIN_UID)
@@ -285,6 +311,12 @@ def create_provider_model(payload: ProviderPayload, request: Request):
     uid = _uid(request)
     state = request.app.state.flyai
     mid = (payload.id or "").strip() or uuid.uuid4().hex
+    try:
+        check_model_id(mid)
+    except InvalidName:
+        raise HTTPException(
+            400, "模型 ID 只能以字母或数字开头，仅含字母/数字/点/下划线/短横线"
+        )
     if _find_provider(state.config, mid) is not None:
         raise HTTPException(400, "模型 ID 已存在")
     item = ProviderConfig(
@@ -367,6 +399,12 @@ def create_image_model(payload: ImageModelPayload, request: Request):
     uid = _uid(request)
     state = request.app.state.flyai
     mid = (payload.id or "").strip() or uuid.uuid4().hex
+    try:
+        check_model_id(mid, "生图模型 ID")
+    except InvalidName:
+        raise HTTPException(
+            400, "模型 ID 只能以字母或数字开头，仅含字母/数字/点/下划线/短横线"
+        )
     if _find_image_model(state.config, mid) is not None:
         raise HTTPException(400, "模型 ID 已存在")
     item = ImageModelConfig(

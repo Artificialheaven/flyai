@@ -330,12 +330,22 @@ async def _run_with(transport, model_cfg, refs=None):
         orig_init(self, *a, **k)
 
     httpx.AsyncClient.__init__ = patched_init
+
+    from flyai.tools import image_tool as _imod
+
+    async def _fake_resolve(host):
+        import ipaddress as _ipa
+        return [_ipa.ip_address("203.0.113.1")]
+
+    orig_resolve = _imod.resolve_and_check
+    _imod.resolve_and_check = _fake_resolve
     try:
         content, ext, mt = await ark_generate(
             model_cfg, "p", "1K", ref_images=refs,
         )
     finally:
         httpx.AsyncClient.__init__ = orig_init
+        _imod.resolve_and_check = orig_resolve
     return content
 
 

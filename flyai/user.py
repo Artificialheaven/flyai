@@ -177,6 +177,7 @@ class UserScope:
     store: SessionStore
     lore: LoreStore
     upload_dir: Path
+    char_memory: Any = None      # CharacterMemoryStore：角色级跨会话记忆簿
     level: int = 0
     # LoreQuerier 复用缓存：key=角色/世界内容签名，容量 32 FIFO
     _querier_cache: Dict[str, Any] = field(default_factory=dict, compare=False)
@@ -210,6 +211,9 @@ class UserScope:
         upload_dir = (data_dir / "uploads" / uid)
         upload_dir.mkdir(parents=True, exist_ok=True)
         lore = LoreStore(user_dir, shared_base=data_dir / "shared")
+        from .lore.character_memory import CharacterMemoryStore
+
+        char_memory = CharacterMemoryStore(user_dir)
         if uid == ADMIN_UID:
             level = ADMIN_LEVEL
         elif user_store is not None:
@@ -217,4 +221,5 @@ class UserScope:
             level = int(u.level or 0) if u else 0
         else:
             level = 0
-        return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir, level=level)
+        return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir,
+                   char_memory=char_memory, level=level)

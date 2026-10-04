@@ -18,6 +18,9 @@ from flyai.tools.web_search_tool import WebFetchTool, WebSearchTool
 
 
 def _settings(**kw):
+    # 测试助手显式默认 httpx 路径（大量用 MockTransport 的离线测试）；
+    # 产品代码的真实默认值由 test_engine_defaults 单独断言
+    kw.setdefault("engine", "http")
     return WebSearchSettings(**kw)
 
 
@@ -502,15 +505,29 @@ def test_fetch_empty_body(monkeypatch):
 
 # ---------- web_fetch：重定向 ----------
 
+def _fake_resolver(monkeypatch, blocked_hosts=()):
+    """把 DNS 校验替换成假解析：blocked_hosts 抛 BlockedHost，其余返稳定假 IP。"""
+    async def fake_resolve_and_check(hostname):
+        h = (hostname or "").strip().lower().rstrip(".")
+        if h in blocked_hosts:
+            raise mod.BlockedHost("域名 %s 解析到内网或本机地址" % h)
+        import ipaddress as _ipa
+        return [_ipa.ip_address("203.0.113.%d" % (1 + (abs(hash(h)) % 250)))]
+
+    monkeypatch.setattr(mod, "resolve_and_check", fake_resolve_and_check)
+
+
 def test_fetch_follows_redirect(monkeypatch):
     def handler(request):
-        if request.url.host == "start.com":
+        # pin 之后 URL 主机已是假 IP：按保留下来的 Host 头分发
+        if request.headers.get("host") == "start.com":
             return httpx.Response(
                 302, headers={"location": "https://final.com/page"}
             )
         return _html_response(_page_html("最终页", "最终正文内容"))
 
     _install_transport(monkeypatch, handler)
+    _fake_resolver(monkeypatch)
     result = asyncio.run(WebFetchTool(_settings()).run(
         {"url": "https://start.com/"}, _ctx()
     ))
@@ -521,7 +538,7 @@ def test_fetch_follows_redirect(monkeypatch):
 
 def test_fetch_redirect_to_private_is_blocked(monkeypatch):
     def handler(request):
-        if request.url.host == "start.com":
+        if request.headers.get("host") == "start.com":
             return httpx.Response(
                 302, headers={"location": "http://127.0.0.1:8080/"}
             )
@@ -529,6 +546,7 @@ def test_fetch_redirect_to_private_is_blocked(monkeypatch):
         return httpx.Response(200, text="内网响应")
 
     _install_transport(monkeypatch, handler)
+    _fake_resolver(monkeypatch, blocked_hosts=("127.0.0.1",))
     result = asyncio.run(WebFetchTool(_settings()).run(
         {"url": "https://start.com/"}, _ctx()
     ))
@@ -542,6 +560,7 @@ def test_fetch_too_many_redirects(monkeypatch):
         )
 
     _install_transport(monkeypatch, handler)
+    _fake_resolver(monkeypatch)
     result = asyncio.run(WebFetchTool(_settings()).run(
         {"url": "https://loop.com/"}, _ctx()
     ))
@@ -701,3 +720,170 @@ def test_links_inside_skipped_nav_not_present():
     text = "\n".join(lines)
     assert "/secret-nav" not in text
     assert "[正文链接](/real)" in text
+
+
+# ---------- 配置字段：engine / search_engine ----------
+
+def test_engine_defaults():
+    ws = WebSearchSettings()
+    assert ws.engine == "chromium"
+    assert ws.search_engine == "bing"
+
+
+@pytest.mark.parametrize("value", ["http", "chromium"])
+def test_engine_accepts_legal(value):
+    assert _settings(engine=value).engine == value
+
+
+@pytest.mark.parametrize("value", ["", "webkit", "CHROMIUM", " chrome"])
+def test_engine_falls_back_on_illegal(value):
+    assert WebSearchSettings(engine=value).engine == "chromium"
+
+
+@pytest.mark.parametrize("value", ["bing", "baidu"])
+def test_search_engine_accepts_legal(value):
+    assert _settings(search_engine=value).search_engine == value
+
+
+@pytest.mark.parametrize("value", ["", "google", "Bing", " baidu"])
+def test_search_engine_falls_back_on_illegal(value):
+    assert _settings(search_engine=value).search_engine == "bing"
+
+
+# ---------- Chromium 引擎分支 ----------
+
+class _FakeSearcher:
+    """记录调用参数的假 ChromiumSearcher。"""
+
+    def __init__(self, results=None, raises=None):
+        self._results = results if results is not None else []
+        # engine_name -> 异常；或单一异常对所有引擎生效
+        self._raises = raises or {}
+        self.calls = []
+
+    async def search(self, query, engine_name, num):
+        self.calls.append((query, engine_name, num))
+        exc = self._raises.get(engine_name) if isinstance(self._raises, dict) \
+            else self._raises
+        if exc is not None:
+            raise exc
+        return list(self._results)
+
+
+def _chromium_results(n=3):
+    return [
+        {"title": "浏览器标题%d" % i, "url": "https://cr.example/p%d" % i,
+         "snippet": "浏览器摘要%d" % i}
+        for i in range(n)
+    ]
+
+
+def test_chromium_search_returns_results():
+    searcher = _FakeSearcher(results=_chromium_results())
+    result = asyncio.run(WebSearchTool(_settings(engine="chromium")).run(
+        {"query": "测试"}, _ctx(chromium_search=searcher)
+    ))
+    assert result.ok
+    assert "共 3 条结果" in result.output
+    assert "1. 浏览器标题0" in result.output
+    assert "URL: https://cr.example/p0" in result.output
+    assert "浏览器摘要0" in result.output
+    # 调用参数：默认 bing，num 取 results_num
+    assert searcher.calls == [("测试", "bing", 8)]
+
+
+def test_chromium_search_passes_engine_and_num():
+    searcher = _FakeSearcher(results=_chromium_results(2))
+    settings = _settings(engine="chromium", search_engine="baidu", results_num=5)
+    asyncio.run(WebSearchTool(settings).run(
+        {"query": "x"}, _ctx(chromium_search=searcher)
+    ))
+    assert searcher.calls == [("x", "baidu", 5)]
+
+
+def test_chromium_search_num_clamped():
+    searcher = _FakeSearcher(results=[])
+    # 空列表仍正常返回（共 0 条），num 已按 3..10 夹取
+    settings = _settings(engine="chromium", results_num=99)
+    result = asyncio.run(WebSearchTool(settings).run(
+        {"query": "x"}, _ctx(chromium_search=searcher)
+    ))
+    assert result.ok and "共 0 条结果" in result.output
+    assert searcher.calls[0][2] == 10
+
+
+def test_chromium_search_missing_service():
+    result = asyncio.run(WebSearchTool(_settings(engine="chromium")).run(
+        {"query": "x"}, _ctx()
+    ))
+    assert not result.ok and "Chromium 搜索服务不可用" in result.output
+
+
+def test_chromium_search_generic_error():
+    searcher = _FakeSearcher(raises=RuntimeError("boom"))
+    result = asyncio.run(WebSearchTool(_settings(engine="chromium")).run(
+        {"query": "x"}, _ctx(chromium_search=searcher)
+    ))
+    assert not result.ok and "浏览器搜索失败" in result.output
+    assert "RuntimeError" in result.output and "boom" in result.output
+    assert len(searcher.calls) == 1
+
+
+def test_http_engine_rejects_baidu():
+    result = asyncio.run(WebSearchTool(
+        _settings(engine="http", search_engine="baidu")
+    ).run({"query": "x"}, _ctx()))
+    assert not result.ok
+    assert "百度搜索仅支持 Chromium 引擎" in result.output
+
+
+def test_baidu_captcha_falls_back_to_bing():
+    from flyai.browser.search import BaiduCaptcha
+
+    searcher = _FakeSearcher(
+        results=_chromium_results(),
+        raises={"baidu": BaiduCaptcha("安全验证"), "bing": None},
+    )
+    settings = _settings(engine="chromium", search_engine="baidu")
+    result = asyncio.run(WebSearchTool(settings).run(
+        {"query": "测试词"}, _ctx(chromium_search=searcher)
+    ))
+    assert result.ok
+    # 先百度、后 Bing，同一 query/num
+    assert searcher.calls == [
+        ("测试词", "baidu", 8),
+        ("测试词", "bing", 8),
+    ]
+    # 标题行之后注明回退，且含 Bing 路径的结果
+    lines = result.output.splitlines()
+    assert lines[0] == "（web_search「测试词」，共 3 条结果）"
+    assert lines[1] == "（百度要求安全验证，已自动改用 Bing 搜索）"
+    assert "浏览器标题0" in result.output
+
+
+def test_baidu_captcha_fallback_notice_only_for_baidu():
+    # Bing 自己抛 BaiduCaptcha 不应触发回退逻辑（按普通错误处理）
+    from flyai.browser.search import BaiduCaptcha
+
+    searcher = _FakeSearcher(raises={"bing": BaiduCaptcha("奇怪")})
+    settings = _settings(engine="chromium", search_engine="bing")
+    result = asyncio.run(WebSearchTool(settings).run(
+        {"query": "x"}, _ctx(chromium_search=searcher)
+    ))
+    assert not result.ok and "浏览器搜索失败" in result.output
+    assert len(searcher.calls) == 1
+
+
+def test_baidu_captcha_then_bing_also_fails():
+    from flyai.browser.search import BaiduCaptcha
+
+    searcher = _FakeSearcher(
+        raises={"baidu": BaiduCaptcha("验证"), "bing": RuntimeError("down")}
+    )
+    settings = _settings(engine="chromium", search_engine="baidu")
+    result = asyncio.run(WebSearchTool(settings).run(
+        {"query": "x"}, _ctx(chromium_search=searcher)
+    ))
+    assert not result.ok and "浏览器搜索失败" in result.output
+    assert "RuntimeError" in result.output and "down" in result.output
+    assert len(searcher.calls) == 2

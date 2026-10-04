@@ -26,7 +26,12 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from ..config import WebSearchSettings
-from ..netguard import is_blocked_host
+from ..netguard import (
+    BlockedHost,
+    is_blocked_host,
+    pin_request,
+    resolve_and_check,
+)
 from .base import Tool, ToolContext, ToolResult
 
 # 兼容旧引用（tests 以 mod._is_blocked_host 调用）
@@ -72,6 +77,58 @@ class WebSearchTool(Tool):
         if not query:
             return ToolResult(ok=False, output="[参数错误] 请提供搜索关键词（query）")
 
+        if getattr(self.settings, "engine", "chromium") == "chromium":
+            return await self._run_chromium(query, ctx)
+        if getattr(self.settings, "search_engine", "bing") == "baidu":
+            return ToolResult(
+                ok=False,
+                output="[参数错误] 百度搜索仅支持 Chromium 引擎：请在设置中把"
+                       "「搜索方式」改为 Chromium，或把搜索引擎改回 Bing",
+            )
+
+        return await self._run_http(query)
+
+    async def _run_chromium(self, query: str, ctx: ToolContext) -> ToolResult:
+        """真实浏览器打开搜索引擎；百度遇验证码自动回退 Bing。"""
+        services = ctx.services or {}
+        searcher = services.get("chromium_search")
+        if searcher is None:
+            return ToolResult(
+                ok=False, output="[工具错误] Chromium 搜索服务不可用（未注入）"
+            )
+        source = getattr(self.settings, "search_engine", "bing") or "bing"
+        results_num = max(3, min(int(self.settings.results_num or 8), 10))
+
+        notice = ""
+        try:
+            results = await searcher.search(query, source, results_num)
+        except Exception as exc:
+            from ..browser.search import BaiduCaptcha
+
+            if isinstance(exc, BaiduCaptcha) and source == "baidu":
+                notice = "（百度要求安全验证，已自动改用 Bing 搜索）"
+                try:
+                    results = await searcher.search(query, "bing", results_num)
+                except Exception as exc2:
+                    return ToolResult(
+                        ok=False,
+                        output=f"[工具错误] 浏览器搜索失败: {type(exc2).__name__}: {exc2}",
+                    )
+            else:
+                return ToolResult(
+                    ok=False,
+                    output=f"[工具错误] 浏览器搜索失败: {type(exc).__name__}: {exc}",
+                )
+
+        output = _format_results(query, results)
+        if notice:
+            # 插到首行（搜索标题行）之后
+            first, rest = output.split("\n", 1)
+            output = first + "\n" + notice + "\n" + rest
+        logger.info("web_search(chromium) 完成: source=%s results=%d", source, len(results))
+        return ToolResult(ok=True, output=output)
+
+    async def _run_http(self, query: str) -> ToolResult:
         proxy = (self.settings.proxy or "").strip() or None
         # 国内直连用 cn.bing.com；有代理（海外/本机代理出口）用 www.bing.com
         host = "www.bing.com" if proxy else "cn.bing.com"
@@ -420,15 +477,22 @@ def _unwrap_bing_url(url: str) -> str:
 async def _fetch_with_redirect_checks(
     client: httpx.AsyncClient, url: str
 ) -> Tuple[httpx.Response, str]:
-    """手动跟随重定向，每一跳都检查目标主机，返回最终响应与最终 URL。"""
+    """手动跟随重定向，每一跳都做 DNS 校验并钉住连接 IP，返回最终响应与最终 URL。"""
     for _ in range(_MAX_REDIRECTS + 1):
         parsed = urlsplit(url)
-        if not parsed.hostname or _is_blocked_host(parsed.hostname):
-            raise RuntimeError("重定向目标为内网或本机地址，已拒绝")
-        resp = await client.get(
-            url,
+        if not parsed.hostname:
+            raise RuntimeError("重定向目标缺少主机名，已拒绝")
+        try:
+            ips = await resolve_and_check(parsed.hostname)
+        except BlockedHost as exc:
+            raise RuntimeError(str(exc))
+        # 连接钉到已校验 IP，保留原 Host 头与 TLS SNI（防解析后 rebinding）
+        req = client.build_request(
+            "GET", url,
             headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
         )
+        pin_request(req, ips[0])
+        resp = await client.send(req)
         location = resp.headers.get("location") if resp.status_code in _REDIRECT_CODES else ""
         if not location:
             return resp, url

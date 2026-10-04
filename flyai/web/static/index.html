@@ -15,10 +15,12 @@
     <aside id="sidebar">
       <div class="sidebar-header">
         <span class="logo"><span class="dot"></span>FlyAI</span>
+        <button id="btn-import-session" class="icon-btn" title="导入对话">⇪</button>
         <button id="btn-new-session" class="icon-btn" title="新建会话">＋</button>
+        <input type="file" id="session-import-file" accept=".json,application/json" class="hidden" />
       </div>
       <div class="search-wrap">
-        <input type="search" id="session-search" placeholder="搜索会话…" autocomplete="off" />
+        <input type="search" id="session-search" placeholder="搜索会话…" autocomplete="search" />
       </div>
       <div id="session-list" class="session-list"></div>
       <div class="sidebar-footer">
@@ -44,18 +46,20 @@
         <span id="topbar-title" class="topbar-title"></span>
         <div id="session-meta" class="meta"></div>
         <span id="provider-bar" class="chip provider"></span>
-        <button id="btn-topbar-toggle" type="button" class="icon-btn topbar-toggle" title="折叠顶栏">⌃</button>
+        <button id="btn-more" type="button" class="icon-btn more-btn" title="更多操作（扮演 / 随机顺序 / 导出 / 压缩 / 记录记忆）">⋯</button>
+        <div id="more-menu" class="more-menu hidden"></div>
       </div>
       <div id="threads" class="threads hidden"></div>
       <div id="messages" class="messages"></div>
       <div class="input-wrap">
         <button id="btn-jump-bottom" class="btn-jump-bottom hidden" title="跳到底部">⬇</button>
+        <div id="mention-box" class="mention-box hidden"></div>
         <div id="attach-preview" class="attach-preview hidden"></div>
         <div class="input-area">
           <button id="btn-sd" type="button" class="icon-btn engine-btn hidden" title="使用本地 Stable Diffusion 生图（Anything V5）">SD</button>
           <button id="btn-attach" class="icon-btn attach-btn hidden" title="发送图片">📎</button>
           <input type="file" id="image-file" accept="image/*" multiple class="hidden" />
-          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
           <button id="btn-send">发送</button>
           <button id="btn-stop" class="hidden">停止</button>
         </div>
@@ -131,7 +135,7 @@
           <input type="text" id="set-emb-base" placeholder="https://api.openai.com/v1" />
         </label>
         <label class="f-label">API Key
-          <input type="password" id="set-emb-key" />
+          <input type="password" id="set-emb-key" autocomplete="new-password" />
         </label>
         <label class="f-label">模型
           <input type="text" id="set-emb-model" placeholder="text-embedding-3-small" />
@@ -207,6 +211,19 @@
         <label class="f-label">代理（海外服务器填写，留空国内直连）
           <input type="text" id="set-ws-proxy" placeholder="http://127.0.0.1:7897" />
         </label>
+        <label class="f-label">搜索方式
+          <select id="set-ws-engine">
+            <option value="chromium">Chromium 浏览器（默认，反爬更稳，慢 2~5 秒）</option>
+            <option value="http">httpx 直连（快，不依赖 Playwright）</option>
+          </select>
+          <span class="sub">默认 Chromium 需已安装 Playwright Chromium（见下方「AI 浏览器」安装说明）；未安装时可临时改用 httpx 直连</span>
+        </label>
+        <label class="f-label">搜索引擎
+          <select id="set-ws-source">
+            <option value="bing">Bing（默认）</option>
+            <option value="baidu">百度（仅 Chromium 方式，遇验证码自动回退 Bing）</option>
+          </select>
+        </label>
         <label class="f-label">结果条数
           <input type="number" id="set-ws-num" value="8" min="3" max="10" />
         </label>
@@ -221,7 +238,7 @@
         <h4>AI 浏览器（Playwright）</h4>
         <p class="sub">AI 可像人一样逐级浏览网页：打开 → 查看编号元素 → 点链接/按钮进入内部页面。需先安装：<code>pip install -r requirements-browser.txt</code> 然后 <code>playwright install chromium</code>（Ubuntu 另需 <code>sudo playwright install-deps chromium</code>）。未装时勾选也无法使用。</p>
         <label class="f-label toggle"><input type="checkbox" id="set-browser-enabled" /> 启用 AI 浏览器</label>
-        <label class="f-label toggle"><input type="checkbox" id="set-browser-headless" /> 无头模式（不勾选会弹出浏览器窗口）</label>
+        <label class="f-label toggle"><input type="checkbox" id="set-browser-headless" /> 无头模式（不勾选会弹出浏览器窗口）<span class="sub">修改此项需重启服务并重新打开浏览器才生效</span></label>
         <label class="f-label">代理
           <input type="text" id="set-browser-proxy" placeholder="http://127.0.0.1:7897" />
         </label>
@@ -230,6 +247,54 @@
         </label>
         <label class="f-label">空闲回收秒数
           <input type="number" id="set-browser-idle" value="180" min="30" max="3600" step="30" />
+        </label>
+
+        <h4>语音合成（豆包语音大模型 · 朗读）</h4>
+        <p class="sub">用户说「朗读 / 用语音说 / 念出来」时，AI 自动调用工具生成语音，消息内以独立语音条播放。需在火山控制台开通对应服务并填写 API Key（音色授权以控制台为准）。可在此维护音色清单供角色卡绑定，并设置使用语音合成的最低权限等级。保存后立即生效。</p>
+        <label class="f-label toggle"><input type="checkbox" id="set-tts-enabled" /> 启用语音合成工具</label>
+        <label class="f-label">API Key
+          <input type="password" id="set-tts-key" autocomplete="new-password" placeholder="火山控制台的 X-Api-Key" />
+        </label>
+        <label class="f-label">资源版本
+          <select id="set-tts-resource">
+            <option value="seed-tts-2.0">seed-tts-2.0（默认，2.0 音色）</option>
+            <option value="seed-tts-1.0">seed-tts-1.0（1.0 音色，字符版）</option>
+            <option value="seed-tts-1.0-concurr">seed-tts-1.0-concurr（1.0 音色，并发版）</option>
+            <option value="seed-icl-2.0">seed-icl-2.0（声音复刻 2.0）</option>
+          </select>
+        </label>
+        <label class="f-label">音色清单（显示名 + 音色 ID；供角色卡下拉绑定）
+          <span id="set-tts-voice-list" class="simple-list"></span>
+        </label>
+        <button type="button" id="set-tts-add-voice" class="btn small">＋ 添加音色</button>
+        <label class="f-label">默认音色 ID（角色卡未绑定时使用；可填清单外 ID）
+          <input type="text" id="set-tts-speaker" placeholder="S_BcqE5org2" />
+        </label>
+        <label class="f-label">语音合成最低权限等级（0=不限制，0–255；管理员恒可用）
+          <input type="number" id="set-tts-minlevel" value="0" min="0" max="255" />
+        </label>
+        <label class="f-label">音频格式
+          <select id="set-tts-format">
+            <option value="mp3">mp3（默认，兼容性最好）</option>
+            <option value="ogg_opus">ogg_opus</option>
+            <option value="pcm">pcm（自动封装为 wav）</option>
+          </select>
+        </label>
+        <label class="f-label">采样率
+          <select id="set-tts-samplerate">
+            <option>8000</option><option>16000</option><option>22050</option>
+            <option selected>24000</option><option>32000</option>
+            <option>44100</option><option>48000</option>
+          </select>
+        </label>
+        <label class="f-label">语速（-50~100，100=2.0 倍速，-50=0.5 倍速）
+          <input type="number" id="set-tts-speechrate" value="0" min="-50" max="100" />
+        </label>
+        <label class="f-label">音量（-50~100，100=2.0 倍音量，-50=0.5 倍音量）
+          <input type="number" id="set-tts-loudness" value="0" min="-50" max="100" />
+        </label>
+        <label class="f-label">HTTP 代理（留空直连；仅支持 http://，不支持 socks5）
+          <input type="text" id="set-tts-proxy" placeholder="http://127.0.0.1:7897" />
         </label>
 
         <div class="dialog-actions">
@@ -297,7 +362,7 @@
       <p class="sub">创建 / 删除用户、设置权限等级（0-255，越大越高）、重置密码（重置后其现有登录全部失效）。普通用户需在此由管理员创建。</p>
       <div id="user-list" class="user-list"></div>
       <label class="f-label">新用户名<input type="text" id="user-new-name" placeholder="请输入新用户名" /></label>
-      <label class="f-label">密码<input type="password" id="user-new-password" placeholder="密码（可留空）" /></label>
+      <label class="f-label">密码<input type="password" id="user-new-password" placeholder="密码（可留空）" autocomplete="new-password" /></label>
       <label class="f-label">权限等级（0-255）
         <input type="number" id="user-new-level" value="0" min="0" max="255" />
       </label>
@@ -360,6 +425,20 @@
     </div>
   </dialog>
 
+  <!-- 窗口重命名 -->
+  <dialog id="thread-rename-dialog">
+    <div class="dialog-body">
+      <h3>重命名窗口</h3>
+      <label class="f-label">名称
+        <input type="text" id="thread-rename-input" maxlength="30" />
+      </label>
+      <div class="dialog-actions">
+        <button id="btn-thread-rename-cancel" class="btn ghost">取消</button>
+        <button id="btn-thread-rename-ok" class="btn primary">保 存</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 参与者记忆与属性 -->
   <dialog id="mem-dialog">
     <div class="dialog-body">
@@ -385,6 +464,19 @@
     <div class="iv-panel" id="iv-panel"></div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <!-- 原生经典脚本（js/ 目录），按「核心 → 界面 → 数据 → 功能」顺序加载；函数共享全局作用域，勿加 defer -->
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/sessions.js"></script>
+  <script src="/static/js/rooms.js"></script>
+  <script src="/static/js/compress.js"></script>
+  <script src="/static/js/lore.js"></script>
+  <script src="/static/js/editor.js"></script>
+  <script src="/static/js/chat-history.js"></script>
+  <script src="/static/js/chat-stream.js"></script>
+  <script src="/static/js/images.js"></script>
+  <script src="/static/js/audio.js"></script>
+  <script src="/static/js/settings.js"></script>
 </body>
 </html>

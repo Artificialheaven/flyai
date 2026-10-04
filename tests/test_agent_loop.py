@@ -4,6 +4,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from flyai.agent.loop import run_agent_loop
@@ -174,6 +176,74 @@ def test_other_round_still_allowed_after_web_capped():
     assert _done(events)["reason"] == "stop"
     assert registry.executed.count("web_fetch") == 3
     assert registry.executed.count("read_file") == 1
+
+
+class _SlowProvider:
+    """先吐一帧，然后阻塞在 Event 上等取消。"""
+
+    def __init__(self):
+        self.gate = asyncio.Event()
+
+    async def stream_chat(self, messages, tool_specs, **kwargs):
+        yield StreamEvent(StreamEventType.CONTENT_DELTA, "半截")
+        await self.gate.wait()
+
+
+def test_cancel_midstream_persists_partial_reply():
+    async def body():
+        provider = _SlowProvider()
+        history = [Message(role="user", content="hi")]
+
+        async def consume():
+            async for _ev, _d in run_agent_loop(
+                history, provider, _FakeRegistry(),
+                ToolSettings(enabled=True, max_iterations=3),
+                system_prompt="",
+            ):
+                pass
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return history
+
+    history = _run(body())
+    assert history[-1].role == "assistant"
+    assert history[-1].content == "半截"
+
+
+def test_cancel_before_any_content_adds_nothing():
+    class _BlockedProvider:
+        def __init__(self):
+            self.gate = asyncio.Event()
+
+        async def stream_chat(self, messages, tool_specs, **kwargs):
+            await self.gate.wait()  # 永远到不了 yield
+            yield  # pragma: no cover
+
+    async def body():
+        provider = _BlockedProvider()
+        history = [Message(role="user", content="hi")]
+
+        async def consume():
+            async for _ev, _d in run_agent_loop(
+                history, provider, _FakeRegistry(),
+                ToolSettings(enabled=True, max_iterations=3),
+                system_prompt="",
+            ):
+                pass
+
+        # 立即取消（可能在 provider 产出第一帧之前）
+        task = asyncio.ensure_future(consume())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return history
+
+    history = _run(body())
+    assert all(m.role != "assistant" for m in history)
 
 
 def test_web_search_and_web_fetch_share_web_budget():

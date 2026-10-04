@@ -11,10 +11,25 @@ from fastapi import APIRouter, Request, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ..ids import InvalidName, check_safe_name
 from ..lore.models import Character, World
 from ..user import ADMIN_UID
 
 router = APIRouter(prefix="/api", tags=["lore"])
+
+
+def _safe_cid(cid: str) -> str:
+    try:
+        return check_safe_name(cid, "角色卡 ID")
+    except InvalidName:
+        raise HTTPException(400, "角色卡 ID 非法")
+
+
+def _safe_wid(wid: str) -> str:
+    try:
+        return check_safe_name(wid, "世界观 ID")
+    except InvalidName:
+        raise HTTPException(400, "世界观 ID 非法")
 
 
 class LoreEntryPayload(BaseModel):
@@ -37,6 +52,7 @@ class CharacterPayload(BaseModel):
     system_prompt: str = ""
     parent_id: str = ""
     alias: str = ""
+    voice: str = ""
 
 
 class WorldPayload(BaseModel):
@@ -69,6 +85,7 @@ def _build_character(payload) -> Character:
         system_prompt=payload.system_prompt or "",
         parent_id=payload.parent_id or "",
         alias=payload.alias or "",
+        voice=(payload.voice or "").strip(),
     )
 
 
@@ -122,6 +139,7 @@ def create_character(payload: CharacterPayload, request: Request):
 @router.put("/characters/{cid}")
 def update_character(cid: str, payload: CharacterPayload, request: Request):
     sc = _state(request)
+    _safe_cid(cid)
     source = sc.lore.character_source(cid)
     if source is None:
         raise HTTPException(404, "角色不存在")
@@ -142,6 +160,7 @@ def update_character(cid: str, payload: CharacterPayload, request: Request):
 @router.delete("/characters/{cid}")
 def delete_character(cid: str, request: Request):
     sc = _state(request)
+    _safe_cid(cid)
     source = sc.lore.character_source(cid)
     if source is None:
         raise HTTPException(404, "角色不存在")
@@ -165,6 +184,7 @@ def delete_character(cid: str, request: Request):
 def fork_character_to_own(cid: str, request: Request):
     """把可见（含共享）卡复制为自己的独立根角色卡：新 id、自己作者、脱离父卡。"""
     sc = _state(request)
+    _safe_cid(cid)
     src = sc.lore.get_character(cid)
     if src is None:
         raise HTTPException(404, "角色不存在")
@@ -183,6 +203,7 @@ def publish_character_route(cid: str, request: Request):
     """admin 发布角色卡为全体用户共享。发布根卡级联发布其全部副本；
     发布副本时自动带上根卡。"""
     sc = _state(request)
+    _safe_cid(cid)
     if sc.uid != ADMIN_UID:
         raise HTTPException(403, "仅管理员可发布共享角色卡")
     target = sc.lore.get_character(cid)
@@ -209,6 +230,7 @@ def publish_character_route(cid: str, request: Request):
 def unpublish_character_route(cid: str, request: Request):
     """admin 取消发布。取消根卡级联取消其全部副本；取消副本只影响该副本。"""
     sc = _state(request)
+    _safe_cid(cid)
     if sc.uid != ADMIN_UID:
         raise HTTPException(403, "仅管理员可取消共享")
     if sc.lore.character_source(cid) is None:
@@ -230,6 +252,7 @@ class LoreImportPayload(BaseModel):
 @router.get("/characters/{cid}/export")
 def export_character(cid: str, request: Request):
     sc = _state(request)
+    _safe_cid(cid)
     c = sc.lore.get_character(cid)
     if c is None:
         raise HTTPException(404, "角色不存在")
@@ -268,6 +291,7 @@ def create_world(payload: WorldPayload, request: Request):
 
 @router.put("/worlds/{wid}")
 def update_world(wid: str, payload: WorldPayload, request: Request):
+    _safe_wid(wid)
     if _state(request).lore.get_world(wid) is None:
         raise HTTPException(404, "世界观不存在")
     w = _build_world(payload)
@@ -278,12 +302,14 @@ def update_world(wid: str, payload: WorldPayload, request: Request):
 
 @router.delete("/worlds/{wid}")
 def delete_world(wid: str, request: Request):
+    _safe_wid(wid)
     _state(request).lore.delete_world(wid)
     return {"ok": True}
 
 
 @router.get("/worlds/{wid}/export")
 def export_world(wid: str, request: Request):
+    _safe_wid(wid)
     sc = _state(request)
     w = sc.lore.get_world(wid)
     if w is None:

@@ -7,6 +7,9 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import httpx
+import pytest
+
 from flyai.config import ImageGenSettings, ImageModelConfig
 from flyai.tools.base import ToolContext
 from flyai.tools.image_tool import GenerateImageTool, select_image_model
@@ -153,3 +156,79 @@ def test_generate_error_from_api(tmp_path):
     result = asyncio.run(tool.run({"prompt": "猫"}, ctx))
     assert not result.ok
     assert "429" in result.output
+
+
+# ---- 结果图下载 SSRF 收口（_guarded_image_get）----
+
+import ipaddress
+
+from flyai.tools import image_tool as imod
+from flyai.tools.image_tool import _guarded_image_get
+
+
+def _patch_resolver(monkeypatch, blocked=()):
+    async def fake_resolve_and_check(host):
+        h = (host or "").strip().lower().rstrip(".")
+        if h in blocked:
+            raise imod.BlockedHost("域名 %s 解析到内网或本机地址" % h)
+        return [ipaddress.ip_address("203.0.113.%d" % (1 + abs(hash(h)) % 250))]
+
+    monkeypatch.setattr(imod, "resolve_and_check", fake_resolve_and_check)
+
+
+def _run_guarded(transport, url):
+    async def main():
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await _guarded_image_get(client, url)
+    return asyncio.run(main())
+
+
+def test_guarded_get_success(monkeypatch):
+    _patch_resolver(monkeypatch)
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(200, headers={"content-type": "image/png"},
+                                 content=b"PNGDATA")
+    )
+    data, resp = _run_guarded(transport, "https://img.example/a.png")
+    assert data == b"PNGDATA"
+    assert "image/png" in resp.headers.get("content-type", "")
+
+
+def test_guarded_get_rejects_bad_scheme(monkeypatch):
+    _patch_resolver(monkeypatch)
+    transport = httpx.MockTransport(lambda r: httpx.Response(200))
+    with pytest.raises(RuntimeError, match="图片地址非法"):
+        _run_guarded(transport, "file:///etc/passwd")
+
+
+def test_guarded_get_redirect_to_internal_blocked(monkeypatch):
+    _patch_resolver(monkeypatch, blocked=("127.0.0.1",))
+
+    def handler(request):
+        if request.headers.get("host") == "img.example":
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/x"})
+        return httpx.Response(200, text="内网响应")
+
+    transport = httpx.MockTransport(handler)
+    with pytest.raises(RuntimeError, match="内网或本机"):
+        _run_guarded(transport, "https://img.example/a.png")
+
+
+def test_guarded_get_too_many_redirects(monkeypatch):
+    _patch_resolver(monkeypatch)
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(302, headers={"location": "/next"})
+    )
+    with pytest.raises(RuntimeError, match="重定向次数过多"):
+        _run_guarded(transport, "https://loop.example/start")
+
+
+def test_guarded_get_oversize_blocked(monkeypatch):
+    _patch_resolver(monkeypatch)
+    big = b"x" * (20 * 1024 * 1024 + 1)
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(200, headers={"content-type": "image/jpeg"},
+                                 content=big)
+    )
+    with pytest.raises(RuntimeError, match="图片过大"):
+        _run_guarded(transport, "https://img.example/big.jpg")

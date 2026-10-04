@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,8 +31,10 @@ from .tools.image_tool import GenerateImageTool
 from .tools.web_search_tool import PageTextCache
 from .tools.loader import PluginLoader
 from .tools.lore_tool import QueryLoreTool
+from .tools.memory_cache import MemoryVectorCache
 from .tools.memory_tool import QueryChatMemoryTool, UpdateChatMemoryTool
 from .tools.registry import ToolRegistry
+from .agent.runs import ChatRunManager
 from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 
 logger = logging.getLogger("flyai")
@@ -51,6 +54,8 @@ class AppState:
     user_store: UserStore = None
     # AI 浏览器会话管理（Playwright 可选依赖；未启用时为 None）
     browser: Optional["BrowserSessionManager"] = None
+    # 浏览器搜索引擎（ChromiumSearcher，浏览器进程懒启动；不用时为 None）
+    search_browser: Optional["ChromiumSearcher"] = None
     _providers: Dict[str, BaseProvider] = field(default_factory=dict)
     _scopes: Dict[str, UserScope] = field(default_factory=dict)
     _embedder: "EmbeddingClient" = None
@@ -61,6 +66,12 @@ class AppState:
     _compress_proposals: Dict[str, dict] = field(default_factory=dict)
     # web_fetch 完整正文缓存（分页翻页不重复下载，短 TTL）
     page_cache: PageTextCache = field(default_factory=PageTextCache)
+    # 断线可续的聊天运行（后台任务 + 事件缓存，刷新后凭 run_id 重连）
+    run_manager: "ChatRunManager" = field(default_factory=ChatRunManager)
+    # 记忆消息向量的增量缓存（按 会话+角色，只 embed 新增消息）
+    memory_vec_cache: "MemoryVectorCache" = field(default_factory=MemoryVectorCache)
+    # 保存配置时热重建工具表的串行锁（配置接口在线程池中执行）
+    _tools_lock: threading.Lock = field(default_factory=threading.Lock)
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -112,11 +123,39 @@ class AppState:
             self._scopes[uid] = scope
         return scope
 
+    def get_search_browser(self) -> "ChromiumSearcher":
+        """浏览器搜索引擎；首次使用时按当前配置创建（Chromium 本身再懒启动）。"""
+        if self.search_browser is None:
+            from .browser.search import ChromiumSearcher
+
+            self.search_browser = ChromiumSearcher(
+                self.config.web_search, self.config.browser
+            )
+        return self.search_browser
+
+    async def reset_search_browser(self) -> None:
+        """配置变更后关掉旧搜索引擎（代理等设置可能已变），下次使用重建。"""
+        if self.search_browser is not None:
+            old = self.search_browser
+            self.search_browser = None
+            try:
+                await old.aclose()
+            except Exception:
+                pass
+
     def reload_tools(self) -> None:
+        """按当前配置重建工具表。保存配置后调用，立即生效无需重启。
+
+        进行中的聊天运行持有旧注册表引用，不受影响；新请求拿到新表。
+        """
+        with self._tools_lock:
+            self._reload_tools()
+
+    def _reload_tools(self) -> None:
         self.registry = ToolRegistry()
         # 内置工具：角色/世界观内容表查询
         self.registry.register(QueryLoreTool())
-        # 记忆工具：跨会话检索 + 更新本会话记忆（房间模式）
+        # 记忆工具：会话内跨窗口检索 + 更新本会话记忆（房间模式）
         self.registry.register(QueryChatMemoryTool())
         self.registry.register(UpdateChatMemoryTool())
         # 属性跟踪工具恒注册：角色卡自带属性时即生效；
@@ -151,6 +190,11 @@ class AppState:
             self.registry.register(WebFetchTool(self.config.web_search))
         # AI 浏览器（Playwright）：逐级 open/snapshot/click/type 浏览
         if self.config.browser.enabled:
+            # 保存配置即启用时懒创建管理器（Chromium 本身仍在首次使用时启动）
+            if self.browser is None:
+                from .browser.manager import BrowserSessionManager
+
+                self.browser = BrowserSessionManager(self)
             from .tools.browser_tool import (
                 BrowserBackTool,
                 BrowserClickTool,
@@ -171,6 +215,16 @@ class AppState:
                 BrowserCloseTool,
             ):
                 self.registry.register(tool_cls())
+        # 语音合成（websockets 是必装依赖，但以 ImportError 守卫保持启动韧性）
+        if self.config.tts.enabled:
+            try:
+                from .tools.tts_tool import TextToSpeechTool
+
+                self.registry.register(TextToSpeechTool(self.config.tts))
+            except ImportError:
+                logger.warning(
+                    "语音合成已启用但未安装 websockets，请 pip install websockets"
+                )
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -233,11 +287,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
-        # AI 浏览器管理器（enabled=false 时工具不注册，管理器也不创建）
-        if state.config.browser.enabled:
-            from .browser.manager import BrowserSessionManager
-
-            state.browser = BrowserSessionManager(state)
+        # AI 浏览器管理器已在 reload_tools 内按启用状态懒创建
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         app.state.flyai = state
         logger.info(
@@ -248,8 +298,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             len(state.user_store.list()),
         )
         yield
+        await state.run_manager.aclose()
         if state.browser is not None:
             await state.browser.aclose()
+        if state.search_browser is not None:
+            await state.search_browser.aclose()
         await state.aclose_providers()
 
     app = FastAPI(title="FlyAI", lifespan=lifespan)

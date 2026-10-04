@@ -22,10 +22,13 @@ class BrowserEngine:
     def __init__(self, settings: Any):
         self.settings = settings
         self._browser: Optional[Any] = None
-        self._lock = asyncio.Lock()
+        # 懒创建：Python 3.9 在无运行中的事件循环时构造 Lock 会报错
+        self._lock: Optional[asyncio.Lock] = None
 
     async def browser(self) -> Any:
         if self._browser is None:
+            if self._lock is None:
+                self._lock = asyncio.Lock()
             async with self._lock:
                 # 双检：等锁期间可能已被其他协程启动
                 if self._browser is None:

@@ -83,6 +83,7 @@ def _mkstate(tmp_path):
         auth_sessions=AuthSessionStore(),
         login_limiter=LoginRateLimiter(),
         reload_providers=lambda: None,
+        reload_tools=lambda: None,
     )
 
 
@@ -292,6 +293,29 @@ def test_user_provider_crud(tmp_path):
     assert all(p.id != item.id for p in state.config.providers)
 
 
+@pytest.mark.parametrize("bad_id", [
+    '" autofocus="alert', "a/b", "a b", "<x>", ".x",
+])
+def test_create_provider_bad_id_rejected(tmp_path, bad_id):
+    state = _mkstate(tmp_path)
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        create_provider_model(ProviderPayload(
+            id=bad_id, base_url="https://x", api_key="k", model="m",
+        ), _req(state, "u10"))
+    assert ei.value.status_code == 400
+
+
+def test_create_image_model_bad_id_rejected(tmp_path):
+    state = _mkstate(tmp_path)
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        create_image_model(ImageModelPayload(
+            id="a/b", name="x", base_url="https://x", api_key="k", model="m",
+        ), _req(state, "u10"))
+    assert ei.value.status_code == 400
+
+
 def test_user_cannot_touch_other_users_model(tmp_path):
     state = _mkstate(tmp_path)
     state.user_store.add("u10", level=10)
@@ -374,3 +398,121 @@ def test_activate_visibility_check(tmp_path):
     with pytest.raises(HTTPException) as ei:
         activate_provider("gated", _req(state, "u10"))
     assert ei.value.status_code == 404
+
+
+# ---- 保存配置后工具热重建（无需重启）----
+
+def _real_state(tmp_path):
+    from flyai.app import AppState
+
+    cfg = AppConfig()
+    # 测试不扫描真实插件目录
+    cfg.tools.plugin_dirs = []
+    return AppState(config=cfg, config_path=tmp_path / "config.json")
+
+
+def test_tts_key_hot_reload(tmp_path):
+    state = _real_state(tmp_path)
+    state.reload_tools()
+    tool = state.registry.get("text_to_speech")
+    assert tool is not None
+    assert tool.settings.api_key == ""
+
+    put_config(ConfigPayload(tts={
+        "enabled": True,
+        "api_key": "speech-real-key",
+        "resource_id": "seed-tts-2.0",
+        "default_speaker": "S_BcqE5org2",
+        "format": "mp3",
+        "sample_rate": 24000,
+    }), _req(state))
+
+    new_tool = state.registry.get("text_to_speech")
+    assert new_tool is not None
+    assert new_tool is not tool
+    assert new_tool.settings.api_key == "speech-real-key"
+
+
+def test_tts_disable_hot_unregisters(tmp_path):
+    state = _real_state(tmp_path)
+    state.reload_tools()
+    assert state.registry.get("text_to_speech") is not None
+
+    put_config(ConfigPayload(tts={
+        "enabled": False,
+        "api_key": "speech-real-key",
+        "resource_id": "seed-tts-2.0",
+        "default_speaker": "S_BcqE5org2",
+        "format": "mp3",
+        "sample_rate": 24000,
+    }), _req(state))
+
+    assert state.registry.get("text_to_speech") is None
+
+
+def test_browser_enable_hot_creates_manager(tmp_path):
+    state = _real_state(tmp_path)
+    state.reload_tools()
+    assert state.browser is None
+
+    put_config(ConfigPayload(browser={
+        "enabled": True,
+        "proxy": "http://127.0.0.1:7897",
+    }), _req(state))
+
+    assert state.browser is not None
+    assert state.registry.get("browser_open") is not None
+
+
+def test_tts_voices_and_min_level_roundtrip(tmp_path):
+    state = _real_state(tmp_path)
+    state.reload_tools()
+
+    put_config(ConfigPayload(tts={
+        "enabled": True,
+        "api_key": "speech-real-key",
+        "resource_id": "seed-tts-2.0",
+        "voices": [
+            {"name": "鲸鱼娘", "id": "S_NkpD5org2"},
+            {"name": "  ", "id": " S_OTHER "},
+            {"name": "空ID原样保留（仅前端收集时过滤）", "id": ""},
+        ],
+        "default_speaker": "S_BcqE5org2",
+        "min_level": 30,
+        "format": "mp3",
+        "sample_rate": 24000,
+    }), _req(state))
+
+    tts = state.config.tts
+    assert len(tts.voices) == 3
+    assert tts.voices[0].name == "鲸鱼娘"
+    assert tts.voices[0].id == "S_NkpD5org2"
+    # strip 生效
+    assert tts.voices[1].name == ""
+    assert tts.voices[1].id == "S_OTHER"
+    assert tts.voices[2].id == ""
+    assert tts.min_level == 30
+
+    # 热重建后的工具拿到新设置
+    tool = state.registry.get("text_to_speech")
+    assert tool.settings.min_level == 30
+    assert tool.settings.voices[0].id == "S_NkpD5org2"
+
+
+def test_tts_min_level_clamped(tmp_path):
+    state = _real_state(tmp_path)
+    state.reload_tools()
+
+    put_config(ConfigPayload(tts={
+        "enabled": True,
+        "api_key": "k",
+        "min_level": 999,
+    }), _req(state))
+    assert state.config.tts.min_level == 255
+
+    put_config(ConfigPayload(tts={
+        "enabled": True,
+        "api_key": "k",
+        "min_level": -5,
+    }), _req(state))
+    assert state.config.tts.min_level == 0

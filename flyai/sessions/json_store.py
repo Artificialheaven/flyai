@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Dict, List
 
 from ..config import PROJECT_ROOT
+from ..ids import safe_child
 from ..schemas import Message
-from .models import RoomMember, Session, Thread
+from .models import RoomMember, Session, Thread, bootstrap_room
 from .store import SessionStore
 from .versions import heal_thread
 
@@ -21,7 +22,8 @@ class JsonSessionStore(SessionStore):
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, sid: str) -> Path:
-        return self._dir / f"{sid}.json"
+        # 外部 id 直接拼文件名：穿越/分隔符/.. 在这里收口（路由层另有 400 预检）
+        return safe_child(self._dir, f"{sid}.json")
 
     def create(self, title: str = "", provider_id: str = "", character_id: str = "", world_id: str = "") -> Session:
         s = Session(
@@ -62,12 +64,7 @@ class JsonSessionStore(SessionStore):
         migrated = False
         if not s.members and not s.threads:
             if s.character_id or s.messages:
-                s.members = [RoomMember(name="你", is_user=True)]
-                ai = RoomMember(name="AI", character_id=s.character_id, override=s.character_override)
-                s.members.append(ai)
-                t = Thread(kind="dm", title="私聊", member_ids=[ai.id], messages=s.messages)
-                s.threads = [t]
-                s.messages = []
+                bootstrap_room(s)
                 migrated = True
         # 自愈：流式中途被硬 kill 留下的孤儿/半成品回复
         for t in s.threads:

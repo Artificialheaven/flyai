@@ -15,15 +15,25 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import httpx
 
 from ..config import ImageGenSettings, ImageModelConfig, StableDiffusionSettings
+from ..netguard import BlockedHost, pin_request, resolve_and_check
 from .base import Tool, ToolContext, ToolResult
+
+logger = logging.getLogger("flyai.image")
+
+# 结果图下载：20MB 封顶（防 SSRF 拖取超大文件），手动跟随最多 5 跳重定向
+_IMAGE_DOWNLOAD_MAX = 20 * 1024 * 1024
+_IMAGE_MAX_REDIRECTS = 5
+_IMAGE_REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 _ALLOWED_SIZES = ("1K", "2K", "4K")
 
@@ -87,6 +97,7 @@ class GenerateImageTool(Tool):
             try:
                 content, ext, media_type, params = await self._run_sd(prompt, services)
             except Exception as exc:
+                logger.exception("生图失败（SD 路径）")
                 return ToolResult(
                     ok=False,
                     output=f"[工具错误] SD 生图失败: {type(exc).__name__}: {exc}",
@@ -131,6 +142,8 @@ class GenerateImageTool(Tool):
         try:
             content, ext, media_type = await self._generate(model_cfg, prompt, size)
         except Exception as exc:
+            # 完整堆栈进日志：只拼异常消息无法定位是哪一层（本项目/httpx/httpcore）抛的
+            logger.exception("生图失败（云端路径）")
             return ToolResult(
                 ok=False, output=f"[工具错误] 生图失败: {type(exc).__name__}: {exc}"
             )
@@ -255,9 +268,9 @@ async def ark_generate(
         if not images or not images[0].get("url"):
             raise RuntimeError(f"返回中没有图片地址: {data}")
 
-        img_resp = await client.get(images[0]["url"])
-        if img_resp.status_code >= 400:
-            raise RuntimeError(f"图片下载失败 HTTP {img_resp.status_code}")
+        # 图片地址由生图服务返回（外部可控输入）：SSRF 收口后再下载，
+        # 不能裸 client.get——否则可被用来读取内网/本机任意地址
+        img_content, img_resp = await _guarded_image_get(client, images[0]["url"])
 
     content_type = img_resp.headers.get("content-type", "").split(";")[0].strip()
     ext = {
@@ -265,7 +278,44 @@ async def ark_generate(
         "image/png": ".png",
         "image/webp": ".webp",
     }.get(content_type, ".jpg")
-    return img_resp.content, ext, content_type or "image/jpeg"
+    return img_content, ext, content_type or "image/jpeg"
+
+
+async def _guarded_image_get(
+    client: httpx.AsyncClient, url: str
+) -> Tuple[bytes, httpx.Response]:
+    """下载生图服务给的图片地址：逐跳 DNS 校验 + 钉 IP，流式限 20MB。"""
+    for _ in range(_IMAGE_MAX_REDIRECTS + 1):
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise RuntimeError("图片地址非法（仅允许 http:// 或 https://）")
+        try:
+            ips = await resolve_and_check(parsed.hostname)
+        except BlockedHost as exc:
+            raise RuntimeError(str(exc))
+        req = client.build_request("GET", url)
+        pin_request(req, ips[0])
+        resp = await client.send(req)
+        if resp.status_code in _IMAGE_REDIRECT_CODES:
+            location = resp.headers.get("location") or ""
+            await resp.aclose()
+            if not location:
+                raise RuntimeError("图片下载：重定向缺少 Location")
+            url = str(httpx.URL(url).join(location))
+            continue
+        if resp.status_code >= 400:
+            await resp.aclose()
+            raise RuntimeError(f"图片下载失败 HTTP {resp.status_code}")
+        chunks: List[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > _IMAGE_DOWNLOAD_MAX:
+                await resp.aclose()
+                raise RuntimeError("图片过大（超过 20MB），已拒绝下载")
+            chunks.append(chunk)
+        return b"".join(chunks), resp
+    raise RuntimeError("图片下载：重定向次数过多（超过 5 次）")
 
 
 def _error_mentions_image(text: str) -> bool:

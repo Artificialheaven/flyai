@@ -12,10 +12,33 @@ import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
-from ..netguard import is_blocked_host
+from ..netguard import BlockedHost, is_blocked_host, resolve_and_check
 
 # snapshot 最多列出的可交互元素数（控 token；其余折叠提示）
 _MAX_ELEMENTS = 30
+
+
+# WebSocketRoute / ServerWebSocketRoute 的收发方法都是同步 fire-and-forget，
+# 且对端关闭后再发会抛错：事件回调里统一吞掉，避免 pyee 打出未处理异常
+def _ws_send(route: Any, data: Any) -> None:
+    try:
+        route.send(data)
+    except Exception:
+        pass
+
+
+def _ws_close_server(server: Any) -> None:
+    try:
+        server.close()
+    except Exception:
+        pass
+
+
+def _ws_close_client(ws_route: Any) -> None:
+    try:
+        asyncio.create_task(ws_route.close())
+    except Exception:
+        pass
 
 
 class BrowserError(Exception):
@@ -205,6 +228,8 @@ class BrowserSession:
         )
         # 拦截必须在任何导航之前装好
         await context.route("**/*", self._guard_route)
+        # HTTP 路由拦不住 WebSocket：单独挂 WS 守卫（握手前可阻断）
+        await context.route_web_socket("**/*", self._guard_ws)
         self._context = context
         self._page = await context.new_page()
         timeout = int(self.settings.nav_timeout_ms)
@@ -239,9 +264,34 @@ class BrowserSession:
         except ValueError:
             return await route.abort()
         # 图片/媒体/字体对文本理解无用且拖慢渲染
-        if is_blocked_host(host) or request.resource_type in ("image", "media", "font"):
+        if request.resource_type in ("image", "media", "font") or is_blocked_host(host):
+            return await route.abort()
+        # 域名 DNS 解析后逐 IP 校验（nip.io / 非标准字面量归一化均在此收口）
+        try:
+            await resolve_and_check(host)
+        except BlockedHost:
             return await route.abort()
         await route.continue_()
+
+    # ---- WebSocket SSRF 守卫 ----
+
+    async def _guard_ws(self, ws_route: Any) -> None:
+        """WS 握手前校验主机；合法连接双向透传消息，非法直接关闭。"""
+        try:
+            host = urlsplit(ws_route.url).hostname or ""
+        except ValueError:
+            await ws_route.close()
+            return
+        try:
+            await resolve_and_check(host)
+        except BlockedHost:
+            await ws_route.close()
+            return
+        server = ws_route.connect_to_server()
+        ws_route.on_message(lambda data: _ws_send(server, data))
+        server.on_message(lambda data: _ws_send(ws_route, data))
+        ws_route.on_close(lambda code, reason: _ws_close_server(server))
+        server.on_close(lambda code, reason: _ws_close_client(ws_route))
 
     # ---- 动作 ----
 
@@ -260,8 +310,10 @@ class BrowserSession:
             raise BrowserError("URL 无法解析: %s" % exc)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise BrowserError("url 必须是 http:// 或 https:// 开头的完整网址")
-        if is_blocked_host(parsed.hostname):
-            raise BrowserError("不允许访问内网或本机地址")
+        try:
+            await resolve_and_check(parsed.hostname)
+        except BlockedHost as exc:
+            raise BrowserError(str(exc))
         self._require_step_budget()
         try:
             await self._page.goto(

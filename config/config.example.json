@@ -101,6 +101,8 @@
   "web_search": {
     "enabled": true,
     "proxy": "",
+    "engine": "chromium",
+    "search_engine": "bing",
     "results_num": 8,
     "max_page_chars": 6000,
     "max_iterations": 15
@@ -114,5 +116,21 @@
     "idle_seconds": 180,
     "max_steps": 15,
     "max_snapshot_chars": 6000
+  },
+  "tts": {
+    "enabled": true,
+    "api_key": "",
+    "resource_id": "seed-tts-2.0",
+    "voices": [
+      {"name": "默认音色", "id": "S_BcqE5org2"}
+    ],
+    "default_speaker": "S_BcqE5org2",
+    "min_level": 0,
+    "format": "mp3",
+    "sample_rate": 24000,
+    "speech_rate": 0,
+    "loudness_rate": 0,
+    "proxy": "",
+    "timeout_seconds": 30
   }
 }

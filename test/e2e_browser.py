@@ -158,6 +158,12 @@ async def main():
 if __name__ == "__main__":
     # 本地 fixture：临时放行 loopback（仅本脚本进程）
     bsess_mod.is_blocked_host = lambda host: False
+
+    async def _allow_local(host):
+        import ipaddress as _ip
+        return [_ip.ip_address("127.0.0.1")]
+
+    bsess_mod.resolve_and_check = _allow_local
     httpd = start_server()
     try:
         asyncio.run(main())

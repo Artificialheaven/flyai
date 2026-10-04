@@ -219,9 +219,24 @@ class WebSearchSettings(BaseModel):
     proxy: str = ""           # 留空直连；如 http://127.0.0.1:7897
     results_num: int = 8      # 搜索结果条数（全部抓正文）
     max_page_chars: int = 6000   # 单页正文截取上限，控 token
+    # 搜索执行方式：chromium=Playwright 真实浏览器（默认，反爬更稳，
+    # 但每次搜索慢 2~5 秒、占更多内存，需安装 Playwright Chromium）；
+    # http=httpx 直连（快，不依赖 Playwright，个别环境易被限流）
+    engine: str = "chromium"
+    # 搜索引擎：bing（默认）/ baidu。百度仅在 chromium 方式下可用，
+    # 遇到验证码会自动回退 Bing
+    search_engine: str = "bing"
     # web_search/web_fetch 专属工具轮数，与 tools.max_iterations 不共享
     # （搜索→抓 1~3 页→分页翻读很容易超过通用的 8 轮，故联网单独放宽）
     max_iterations: int = 15
+
+    @validator("engine")
+    def _check_engine(cls, v: str) -> str:
+        return v if v in ("http", "chromium") else "chromium"
+
+    @validator("search_engine")
+    def _check_search_engine(cls, v: str) -> str:
+        return v if v in ("bing", "baidu") else "bing"
 
     @validator("max_iterations")
     def _clamp_web_max_iterations(cls, v: int) -> int:
@@ -328,6 +343,93 @@ class StableDiffusionSettings(BaseModel):
         return max(1.0, min(float(v), 30.0))
 
 
+class VoiceConfig(BaseModel):
+    """音色清单条目：显示名 + speaker ID（供角色卡下拉选择）。"""
+
+    name: str = ""
+    id: str = ""
+
+    @validator("name", "id")
+    def _strip(cls, v):  # noqa: N805
+        return (v or "").strip()
+
+
+class TtsSettings(BaseModel):
+    """语音合成（豆包语音大模型 V3，WebSocket 单向流式）。
+
+    AI 在用户要求朗读/语音时调用 text_to_speech 工具，音频存入用户上传目录
+    并在消息内以独立语音条展示。需在火山控制台开通对应服务并填写 API Key。
+    voices 为管理员维护的音色清单（角色卡绑定用）；min_level 为使用语音合成
+    的最低权限等级。保存配置后立即生效（工具热重建）。
+    """
+
+    enabled: bool = True
+    api_key: str = ""
+    # 资源版本（决定模型效果与计费）
+    resource_id: str = "seed-tts-2.0"
+    # 音色清单：显示名 + speaker ID（下拉数据源，不强制校验绑定值）
+    voices: List[VoiceConfig] = []
+    # 默认音色 ID；角色卡未绑定时使用（允许是清单外 ID）
+    default_speaker: str = "S_BcqE5org2"
+    # 使用语音合成的最低权限等级（0=不限制，0-255；admin=256 恒过）
+    min_level: int = 0
+    format: str = "mp3"               # mp3 / ogg_opus / pcm
+    sample_rate: int = 24000
+    speech_rate: int = 0              # -50(0.5倍速) ~ 100(2.0倍速)
+    loudness_rate: int = 0            # -50(0.5倍音量) ~ 100(2.0倍音量)
+    proxy: str = ""                   # HTTP 代理；留空直连（不读环境变量）
+    timeout_seconds: int = 30
+
+    @validator("resource_id")
+    def _check_resource_id(cls, v):  # noqa: N805
+        return v if v in (
+            "seed-tts-2.0",
+            "seed-tts-1.0",
+            "seed-tts-1.0-concurr",
+            "seed-icl-2.0",
+        ) else "seed-tts-2.0"
+
+    @validator("default_speaker", "proxy")
+    def _strip(cls, v):  # noqa: N805
+        return (v or "").strip()
+
+    @validator("format")
+    def _check_format(cls, v):  # noqa: N805
+        return v if v in ("mp3", "ogg_opus", "pcm") else "mp3"
+
+    @validator("sample_rate")
+    def _check_sample_rate(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 24000
+        return v if v in (8000, 16000, 22050, 24000, 32000, 44100, 48000) else 24000
+
+    @validator("speech_rate", "loudness_rate")
+    def _clamp_rate(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return v if -50 <= v <= 100 else 0
+
+    @validator("timeout_seconds")
+    def _clamp_timeout(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 30
+        return v if 5 <= v <= 120 else 30
+
+    @validator("min_level")
+    def _clamp_min_level(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(v, 255))
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -343,6 +445,7 @@ class AppConfig(BaseModel):
     pixiv: PixivSettings = PixivSettings()
     web_search: WebSearchSettings = WebSearchSettings()
     browser: BrowserSettings = BrowserSettings()
+    tts: TtsSettings = TtsSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:
