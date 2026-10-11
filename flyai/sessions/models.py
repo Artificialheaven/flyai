@@ -122,6 +122,12 @@ class Session:
     pinned: bool = False              # 置顶（侧栏排序优先）
     # 整个会话自创建以来的累计 token（跨刷新持久），各轮 done.usage 累加
     token_usage: Dict[str, int] = field(default_factory=dict)
+    # normal=普通聊天；galgame=Galgame 模式（全屏视觉小说，单角色）
+    mode: str = "normal"
+    # Galgame 持久场景态：{"background":{"id","url"},"sprite":{"id","url"}}
+    galgame: Dict[str, Any] = field(default_factory=dict)
+    # Galgame 已合成 TTS 清单：对白文本 -> 音频 url（刷新后直接复用，不再重新合成）
+    galgame_tts: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.id:

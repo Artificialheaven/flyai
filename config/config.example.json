@@ -19,7 +19,8 @@
       "vision": false,
       "owner": "admin",
       "shared": true,
-      "min_level": 0
+      "min_level": 0,
+      "rate": 1.0
     }
   ],
   "tools": {
@@ -132,5 +133,9 @@
     "loudness_rate": 0,
     "proxy": "",
     "timeout_seconds": 30
+  },
+  "galgame": {
+    "enabled": true,
+    "max_loops": 40
   }
 }

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -31,10 +32,13 @@ from .tools.image_tool import GenerateImageTool
 from .tools.web_search_tool import PageTextCache
 from .tools.loader import PluginLoader
 from .tools.lore_tool import QueryLoreTool
+from .memory.logs import RecallLogBuffer
 from .tools.memory_cache import MemoryVectorCache
 from .tools.memory_tool import QueryChatMemoryTool, UpdateChatMemoryTool
 from .tools.registry import ToolRegistry
 from .agent.runs import ChatRunManager
+from .galgame.choices import GalgameChoiceManager
+from .market.store import MarketStore
 from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 
 logger = logging.getLogger("flyai")
@@ -70,8 +74,14 @@ class AppState:
     run_manager: "ChatRunManager" = field(default_factory=ChatRunManager)
     # 记忆消息向量的增量缓存（按 会话+角色，只 embed 新增消息）
     memory_vec_cache: "MemoryVectorCache" = field(default_factory=MemoryVectorCache)
+    # 召回日志滚动缓冲（自动/主动召回记录，记忆管理页查看）
+    recall_logs: RecallLogBuffer = field(default_factory=RecallLogBuffer)
     # 保存配置时热重建工具表的串行锁（配置接口在线程池中执行）
     _tools_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Galgame 阻塞选项撮合（按 run_id，内存态）
+    galgame_choices: GalgameChoiceManager = field(default_factory=GalgameChoiceManager)
+    # sid -> {对白文本: 音频 url}：TTS 端点产出但 drive 尚未合并落盘的映射
+    galgame_tts_overlay: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -123,6 +133,18 @@ class AppState:
             self._scopes[uid] = scope
         return scope
 
+    def get_browser(self) -> "BrowserSessionManager":
+        """AI 浏览器管理器；功能对某用户生效（全局开启或用户覆盖开启）时按需创建。
+
+        工具表始终注册 browser_* 工具，是否暴露给模型由每请求的工具过滤决定；
+        Chromium 进程本身仍在首次 open 时才启动。
+        """
+        if self.browser is None:
+            from .browser.manager import BrowserSessionManager
+
+            self.browser = BrowserSessionManager(self)
+        return self.browser
+
     def get_search_browser(self) -> "ChromiumSearcher":
         """浏览器搜索引擎；首次使用时按当前配置创建（Chromium 本身再懒启动）。"""
         if self.search_browser is None:
@@ -165,56 +187,69 @@ class AppState:
         from .tools.read_image_tool import ReadImageTool
 
         self.registry.register(ReadImageTool())
-        # AI 生图工具（可开关）：具体模型在运行时由 services.image_models 提供
-        if self.config.image_generation.enabled:
-            self.registry.register(
-                GenerateImageTool(
-                    self.config.image_generation, self.config.stable_diffusion
-                )
+        # AI 生图 / Galgame / P 站 / 联网 / 浏览器工具一律注册：是否暴露给模型
+        # 由每请求的用户功能偏好过滤决定（flyai.feature_prefs.allowed_tool_names），
+        # 不再按全局开关决定注册，普通用户才能覆盖全局默认。
+        self.registry.register(
+            GenerateImageTool(
+                self.config.image_generation, self.config.stable_diffusion
             )
-            # 图生图：以对话已有图片为参考生成新图
-            from .tools.edit_image_tool import EditImageTool
+        )
+        # 图生图：以对话已有图片为参考生成新图
+        from .tools.edit_image_tool import EditImageTool
 
-            self.registry.register(EditImageTool(self.config.image_generation))
+        self.registry.register(EditImageTool(self.config.image_generation))
+        # Galgame 模式：背景/立绘绘制、AI 作曲、资产清单、场景切换、阻塞选项
+        from .tools.galgame_tools import (
+            GalgameChoiceTool,
+            GalgameComposeMusicTool,
+            GalgameDrawBackgroundTool,
+            GalgameDrawSpriteTool,
+            GalgameListAssetsTool,
+            GalgameSetSceneTool,
+        )
+
+        for gal_tool in (
+            GalgameDrawBackgroundTool(),
+            GalgameDrawSpriteTool(),
+            GalgameComposeMusicTool(),
+            GalgameListAssetsTool(),
+            GalgameSetSceneTool(),
+            GalgameChoiceTool(),
+        ):
+            self.registry.register(gal_tool)
         # P 站搜图：搜索候选 → 视觉筛选 → 下载精选原图
-        if self.config.pixiv.enabled:
-            from .tools.pixiv_tool import PickPixivTool, SearchPixivTool
+        from .tools.pixiv_tool import PickPixivTool, SearchPixivTool
 
-            self.registry.register(SearchPixivTool(self.config.pixiv))
-            self.registry.register(PickPixivTool(self.config.pixiv))
+        self.registry.register(SearchPixivTool(self.config.pixiv))
+        self.registry.register(PickPixivTool(self.config.pixiv))
         # 联网工具：web_search 返回结果列表，web_fetch 抓单页，由当前 AI 自主编排
-        if self.config.web_search.enabled:
-            from .tools.web_search_tool import WebFetchTool, WebSearchTool
+        from .tools.web_search_tool import WebFetchTool, WebSearchTool
 
-            self.registry.register(WebSearchTool(self.config.web_search))
-            self.registry.register(WebFetchTool(self.config.web_search))
-        # AI 浏览器（Playwright）：逐级 open/snapshot/click/type 浏览
-        if self.config.browser.enabled:
-            # 保存配置即启用时懒创建管理器（Chromium 本身仍在首次使用时启动）
-            if self.browser is None:
-                from .browser.manager import BrowserSessionManager
+        self.registry.register(WebSearchTool(self.config.web_search))
+        self.registry.register(WebFetchTool(self.config.web_search))
+        # AI 浏览器（Playwright）：逐级 open/snapshot/click/type 浏览；
+        # 管理器在首个可用用户请求时经 state.get_browser() 懒创建
+        from .tools.browser_tool import (
+            BrowserBackTool,
+            BrowserClickTool,
+            BrowserCloseTool,
+            BrowserOpenTool,
+            BrowserSnapshotTool,
+            BrowserTextTool,
+            BrowserTypeTool,
+        )
 
-                self.browser = BrowserSessionManager(self)
-            from .tools.browser_tool import (
-                BrowserBackTool,
-                BrowserClickTool,
-                BrowserCloseTool,
-                BrowserOpenTool,
-                BrowserSnapshotTool,
-                BrowserTextTool,
-                BrowserTypeTool,
-            )
-
-            for tool_cls in (
-                BrowserOpenTool,
-                BrowserSnapshotTool,
-                BrowserClickTool,
-                BrowserTypeTool,
-                BrowserBackTool,
-                BrowserTextTool,
-                BrowserCloseTool,
-            ):
-                self.registry.register(tool_cls())
+        for tool_cls in (
+            BrowserOpenTool,
+            BrowserSnapshotTool,
+            BrowserClickTool,
+            BrowserTypeTool,
+            BrowserBackTool,
+            BrowserTextTool,
+            BrowserCloseTool,
+        ):
+            self.registry.register(tool_cls())
         # 语音合成（websockets 是必装依赖，但以 ImportError 守卫保持启动韧性）
         if self.config.tts.enabled:
             try:
@@ -287,6 +322,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
+        # 公共市场（跨用户）：条目元数据 + 快照载荷，目录由 store 自建
+        state.market = MarketStore(data_dir / "market")
         # AI 浏览器管理器已在 reload_tools 内按启用状态懒创建
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         app.state.flyai = state
@@ -307,6 +344,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     app = FastAPI(title="FlyAI", lifespan=lifespan)
 
+    # APK（Capacitor WebView）源：页面内置在安装包、接口跨域到本站，需放行
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://localhost",       # Capacitor Android 默认源
+            "http://localhost",        # androidScheme=http 时
+            "capacitor://localhost",   # Capacitor iOS 源
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
     @app.middleware("http")
     async def no_cache_app_shell(request, call_next):
         """应用外壳（index 与 /static 下的脚本/样式）每次带 ETag 重新校验。
@@ -317,7 +367,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         """
         resp = await call_next(request)
         path = request.url.path
-        if path == "/" or path.startswith("/static/"):
+        # 32MB 的 GS 音色库：内容按文件名固化，给一年 immutable 缓存，
+        # 只下载一次；其余 /static 资源维持使用前校验
+        if path.startswith("/static/") and path.endswith(".sf2"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif path == "/" or path.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"
         return resp
 
@@ -325,8 +379,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_auth import router as auth_router
     from .api.routes_chat import router as chat_router
     from .api.routes_config import router as config_router
+    from .api.routes_galgame import router as galgame_router
     from .api.routes_gen import router as gen_router
     from .api.routes_lore import router as lore_router
+    from .api.routes_market import router as market_router
+    from .api.routes_memory import router as memory_router
     from .api.routes_plugins import router as plugins_router
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
@@ -334,8 +391,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(config_router)
+    app.include_router(galgame_router)
     app.include_router(gen_router)
     app.include_router(lore_router)
+    app.include_router(market_router)
+    app.include_router(memory_router)
     app.include_router(plugins_router)
     app.include_router(room_router)
     app.include_router(session_router)

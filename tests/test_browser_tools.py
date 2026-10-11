@@ -301,8 +301,25 @@ def test_reload_tools_registers_browser_when_enabled():
             "browser_close"} <= names
 
 
-def test_reload_tools_no_browser_when_disabled():
-    state = AppState(config=AppConfig())
+def test_browser_tools_registered_but_filtered_when_disabled():
+    """新设计：browser_* 工具无条件注册（用户可覆盖全局默认），
+    是否暴露给模型由每请求的功能偏好过滤决定；管理器仍懒创建。"""
+    from flyai.feature_prefs import allowed_tool_names
+    from flyai.user import UserSettings
+
+    state = AppState(config=AppConfig())  # browser.enabled 默认 False
     state.reload_tools()
+    assert state.browser is None
     names = {t.name for t in state.registry.all()}
-    assert "browser_open" not in names
+    assert "browser_open" in names  # 工具始终注册
+
+    # 默认关闭、用户无覆盖 → 不暴露浏览器工具
+    allowed = allowed_tool_names(state.registry, state.config, UserSettings())
+    assert "browser_open" not in allowed
+    assert "query_lore" in allowed
+
+    # 用户覆盖开启 → 暴露
+    us = UserSettings(browser_enabled=True)
+    assert "browser_open" in allowed_tool_names(
+        state.registry, state.config, us
+    )

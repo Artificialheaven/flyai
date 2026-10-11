@@ -26,16 +26,29 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     model: str
     params: Dict[str, Any] = {}
+    # 「深度思考」开关开启时才合并进请求体的参数（各厂商协议不同，
+    # 如 {"reasoning_effort":"high"} / {"enable_thinking":true} /
+    # {"thinking":{"type":"enabled"}}）；空则不额外下发
+    thinking_params: Dict[str, Any] = {}
+    # 开关关闭时合并进请求体的参数：部分模型（如火山/DeepSeek 新版）默认思考，
+    # 需显式 {"thinking":{"type":"disabled"}} 才关得掉；空则不额外下发
+    thinking_off_params: Dict[str, Any] = {}
     # 该模型支持图片输入（视觉/多模态）：开启后前端显示图片上传入口
     vision: bool = False
     # 归属与共享：owner 为归属用户 uid；shared 开启后 min_level 等级以上用户可见可用
     owner: str = "admin"
     shared: bool = False
     min_level: int = 0
+    # 计费倍率：普通用户每发起一轮扣 1×rate；允许小数，默认 1.0（管理员不计费）
+    rate: float = 1.0
 
     @validator("min_level")
     def _clamp_min_level(cls, v):  # noqa: N805
         return max(0, min(int(v), 255))
+
+    @validator("rate")
+    def _clamp_rate(cls, v):  # noqa: N805
+        return max(0.0, float(v))
 
 
 class ImageModelConfig(BaseModel):
@@ -430,6 +443,25 @@ class TtsSettings(BaseModel):
         return max(0, min(v, 255))
 
 
+class GalgameSettings(BaseModel):
+    """Galgame 模式（全屏视觉小说，单角色）。
+
+    max_loops 为一轮用户交互内 agent 循环的最大工具迭代数：每轮可能包含
+    绘图、场景切换、选项等多次工具调用，通用 8 轮预算不够用。
+    """
+
+    enabled: bool = True
+    max_loops: int = 40
+
+    @validator("max_loops")
+    def _clamp_max_loops(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 40
+        return max(1, min(v, 200))
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -446,6 +478,7 @@ class AppConfig(BaseModel):
     web_search: WebSearchSettings = WebSearchSettings()
     browser: BrowserSettings = BrowserSettings()
     tts: TtsSettings = TtsSettings()
+    galgame: GalgameSettings = GalgameSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

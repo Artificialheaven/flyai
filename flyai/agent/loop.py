@@ -26,6 +26,16 @@ DEFAULT_SYSTEM_PROMPT = (
     "根据工具返回的结果再决定下一步或给出最终回答。"
 )
 
+# 工具回合之后追加的提示（不入库）：模型常把 assistant(tool_calls)→tool 形态
+# 当成「自己说完话、用户没再开口」的新一轮，演出「你怎么不说话」。
+# 明确工具结果不是用户发言，要求续写同一轮
+_POST_TOOL_NUDGE = (
+    "（系统提示：上面是工具返回的执行结果，并非用户的新发言，"
+    "对话仍停留在你上一条动作的同一轮。请直接以你的角色身份继续或完成上一条回复，"
+    "把需要用到的结果自然融入；不要表现成用户沉默、没有说话或没有输入，"
+    "不要询问用户为什么不开口，也不要等待用户的下一条指令。）"
+)
+
 # 工具调用状态文案渲染
 _STATUS_RENDERERS = {
     "read_file": lambda a: f"正在读取文件: {a.get('path', '')}",
@@ -122,6 +132,42 @@ def _actor_view(history: List[Message], actor: str) -> List[Message]:
     return view
 
 
+def _keep_recent_turns(messages: List[Message],
+                       keep_turns: int) -> List[Message]:
+    """只保留最近 keep_turns 个对话轮，返回新列表（不修改入参）。
+
+    一轮 = 一条 user 消息及其后到下一条 user 消息之前的全部消息。
+    keep_turns <= 0、或 user 消息数不超过 keep_turns 时原样返回副本。
+
+    防御性修正：切片开头若是失去发起 assistant 的孤儿 tool 消息，按
+    tool_call_id 向前找回该 assistant（起点回退）；找不到发起者则跳过
+    开头连续的 tool 块。按 user 边界切分时正常不会触发。
+    """
+    if not keep_turns or keep_turns <= 0:
+        return list(messages)
+    user_positions = [i for i, m in enumerate(messages) if m.role == "user"]
+    if len(user_positions) <= keep_turns:
+        return list(messages)
+    start = user_positions[-keep_turns]
+    while start < len(messages) and messages[start].role == "tool":
+        call_id = messages[start].tool_call_id
+        owner = -1
+        for j in range(start - 1, -1, -1):
+            mj = messages[j]
+            if (mj.role == "assistant"
+                    and any(c.id == call_id for c in (mj.tool_calls or []))):
+                owner = j
+                break
+        if owner >= 0:
+            start = owner
+        else:
+            end = start + 1
+            while end < len(messages) and messages[end].role == "tool":
+                end += 1
+            start = end
+    return messages[start:]
+
+
 async def run_agent_loop(
     history: List[Message],
     provider: Any,
@@ -129,9 +175,13 @@ async def run_agent_loop(
     settings: ToolSettings,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     session_id: str = "",
+    run_id: str = "",
     services: Optional[Dict[str, Any]] = None,
     web_max_iterations: Optional[int] = None,
     actor: str = "",
+    keep_turns: int = 0,
+    allowed_tools: Optional[set] = None,
+    deep_thinking: bool = False,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -142,6 +192,11 @@ async def run_agent_loop(
     其他发言者的工具调用/工具结果/思考对其不可见，只能看到对方说出口的内容
     （见 _actor_view），避免后发言者看到别人已调 update_chat_memory 就不写
     自己的记忆，也避免他人记忆内容串场。actor 为空时不过滤。
+    keep_turns：发给模型的最近对话轮数（1 轮 = 一条 user 消息及其回复链），
+    只截断请求、不动 history；0（默认）表示全量发送。
+    allowed_tools：按用户功能偏好过滤后允许暴露的工具名集合；None=全量。
+    deep_thinking：本轮开启深度思考（Anthropic 原生 extended thinking；
+    OpenAI 兼容厂商合并模型配置的 thinking_params 请求片段）。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -149,6 +204,7 @@ async def run_agent_loop(
         allowed_read_dirs=[Path(p).resolve() for p in settings.allowed_read_dirs if p],
         tool_settings=settings,
         session_id=session_id,
+        run_id=run_id,
         services=services or {},
     )
 
@@ -161,24 +217,39 @@ async def run_agent_loop(
     general_used = 0
     web_used = 0
     iteration = 0
+    pending_nudge = False  # 上一轮执行了工具：下轮请求尾部追加续写提示
     while True:
         iteration += 1
-        tool_specs = registry.specs() if settings.enabled else []
+        tool_specs = registry.specs(allowed_tools) if settings.enabled else []
         request_messages = _actor_view(history, actor)
+        request_messages = _keep_recent_turns(request_messages, keep_turns)
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
+        if pending_nudge:
+            request_messages.append(
+                Message(role="system", content=_POST_TOOL_NUDGE)
+            )
 
         thinking_parts: List[str] = []
+        thinking_blocks: Optional[List[Dict[str, Any]]] = None
         content_parts: List[str] = []
         calls: Optional[List[ToolCall]] = None
         try:
-            async for ev in provider.stream_chat(request_messages, tool_specs):
+            async for ev in provider.stream_chat(
+                request_messages, tool_specs, deep_thinking=deep_thinking
+            ):
                 if ev.type == StreamEventType.THINKING_DELTA:
                     thinking_parts.append(ev.text)
                     yield ("thinking_delta", {"text": ev.text})
+                elif ev.type == StreamEventType.THINKING_BLOCKS and ev.blocks:
+                    thinking_blocks = ev.blocks
                 elif ev.type == StreamEventType.CONTENT_DELTA:
                     content_parts.append(ev.text)
                     yield ("content_delta", {"text": ev.text})
+                elif ev.type == StreamEventType.CONTENT_REPLACE:
+                    # 厂商把工具调用回声进正文：替换已累积/已推送的正文
+                    content_parts[:] = [ev.text]
+                    yield ("content_replace", {"text": ev.text})
                 elif ev.type == StreamEventType.TOOL_CALLS:
                     calls = ev.tool_calls
                 elif ev.type == StreamEventType.USAGE and ev.usage:
@@ -196,6 +267,7 @@ async def run_agent_loop(
                             role="assistant",
                             content=partial_text or None,
                             thinking=partial_think or None,
+                            thinking_blocks=thinking_blocks,
                             tool_calls=calls,
                         ),
                         actor,
@@ -209,6 +281,8 @@ async def run_agent_loop(
             # 纯空白思考（如模型只吐一个换行）落库为 None，
             # 避免历史里出现展开为空的「思考过程」
             thinking="".join(thinking_parts).strip() or None,
+            # Anthropic signature 块：仅在确实开了思考时存在；后续工具轮原样回放
+            thinking_blocks=thinking_blocks,
             tool_calls=calls,
         )
         history.append(_tag_actor(assistant, actor))
@@ -302,6 +376,7 @@ async def run_agent_loop(
             general_used += 1
         if web_round:
             web_used += 1
+        pending_nudge = True  # 下轮（拿工具结果续写）追加提示，不写进 history
 
 
 def _usage_payload(usage_in: int, usage_out: int) -> Dict[str, int]:

@@ -88,11 +88,36 @@ function filteredSessions() {
     return (s.title || "新会话").toLowerCase().indexOf(q) >= 0;
   });
 }
-/* 导入 FlyAI 导出包：读文件 → POST /api/sessions/import → 进入新会话 */
+/* 导入成功后：刷新列表 → 进入新会话 → 提示卡 / 素材统计 */
+function afterSessionImport(s) {
+  return refreshSessions().then(function () {
+    return selectSession(s.id);
+  }).then(function () {
+    var sum = s.import_summary || {};
+    var msg = "已导入「" + (s.title || "对话") + "」（复用卡 "
+      + intOr(sum.reused_cards, 0) + " · 副本卡 " + intOr(sum.scoped_cards, 0);
+    if (intOr(sum.assets, 0)) msg += " · 素材 " + sum.assets + " 个";
+    msg += "）";
+    showToast(msg, "ok", 4000);
+  });
+}
+/* 导入 FlyAI 导出包：.zip 自包含包走 multipart，.json 文本包走原接口 */
 function importSessionFromFile(ev) {
   var input = ev.target;
   var f = input.files && input.files[0];
   if (!f) return;
+
+  var isZip = /\.zip$/i.test(f.name) ||
+    (f.type || "").indexOf("zip") >= 0;
+  if (isZip) {
+    var fd = new FormData();
+    fd.append("file", f);
+    fetchJSON("/api/sessions/import-zip", { method: "POST", body: fd })
+      .then(afterSessionImport)
+      .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
+    return;
+  }
+
   var reader = new FileReader();
   reader.onload = function () {
     var obj;
@@ -102,16 +127,8 @@ function importSessionFromFile(ev) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(obj),
-    }).then(function (s) {
-      return refreshSessions().then(function () {
-        return selectSession(s.id);
-      }).then(function () {
-        var sum = s.import_summary || {};
-        showToast("已导入「" + (s.title || "对话") + "」"
-          + "（复用卡 " + intOr(sum.reused_cards, 0)
-          + " · 副本卡 " + intOr(sum.scoped_cards, 0) + "）", "ok", 4000);
-      });
-    }).catch(function (e) { showToast("导入失败: " + e.message, "err"); });
+    }).then(afterSessionImport)
+      .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
   };
   reader.readAsText(f);
 }
@@ -142,14 +159,69 @@ function renderSessions() {
     el.sessionList.appendChild(empty);
     return;
   }
+  if (state.sessionQuery.trim()) {
+    // 搜索结果不分组
+    shown.forEach(function (s) { el.sessionList.appendChild(buildSessionItem(s)); });
+    return;
+  }
+  // 按 updated_at/created_at 分组：今天 / 昨天 / 更早
+  var groups = [
+    { key: "today", label: "今天", list: [] },
+    { key: "yesterday", label: "昨天", list: [] },
+    { key: "earlier", label: "更早", list: [] },
+  ];
   shown.forEach(function (s) {
+    var g = sessionDateGroup(s.updated_at || s.created_at);
+    groups[g].list.push(s);
+  });
+  var groupFirst = true;
+  groups.forEach(function (grp) {
+    if (!grp.list.length) return;
+    var label = document.createElement("div");
+    label.className = "session-group-label";
+    var labelName = document.createElement("span");
+    labelName.className = "s-group-name";
+    labelName.textContent = grp.label;
+    label.appendChild(labelName);
+    // 第一个分组（今天/昨天/更早 中最靠前的）右侧放「多选」，进入批量删除
+    if (groupFirst) {
+      var multi = document.createElement("button");
+      multi.type = "button";
+      multi.className = "s-group-multi";
+      multi.textContent = "多选";
+      multi.title = "多选删除";
+      multi.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        openBatchMode();
+      });
+      label.appendChild(multi);
+    }
+    groupFirst = false;
+    el.sessionList.appendChild(label);
+    grp.list.forEach(function (s) { el.sessionList.appendChild(buildSessionItem(s)); });
+  });
+}
+
+function sessionDateGroup(iso) {
+  if (!iso) return 2;
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return 2;
+  var now = new Date();
+  var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var dDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var diffDays = Math.round((startToday - dDay) / 86400000);
+  if (diffDays <= 0) return 0;
+  if (diffDays === 1) return 1;
+  return 2;
+}
+
+function buildSessionItem(s) {
     var item = document.createElement("div");
     item.className = "session-item" + (s.id === state.currentSessionId ? " active" : "");
     var titleSpan = document.createElement("span");
     titleSpan.className = "session-title";
     titleSpan.textContent = (s.title || "新会话") + (s.threads && s.threads.length ? " 👥" : "");
-    titleSpan.addEventListener("dblclick", function (ev) { ev.stopPropagation(); startRename(item, s); });
-    // 触屏没有双击：长按标题 500ms 重命名
+    // 触屏长按标题 500ms 也可重命名（桌面端点 ✏️ 按钮）
     var pressTimer = null;
     var longPressed = false;
     titleSpan.addEventListener("pointerdown", function (ev) {
@@ -179,6 +251,16 @@ function renderSessions() {
       item.appendChild(resumeFlag);
     }
 
+    var ren = document.createElement("span");
+    ren.className = "ren";
+    ren.textContent = "✏️";
+    ren.title = "重命名";
+    ren.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      startRename(item, s);
+    });
+    item.appendChild(ren);
+
     var pin = document.createElement("span");
     pin.className = "pin" + (s.pinned ? " on" : "");
     pin.textContent = "📌";
@@ -191,8 +273,23 @@ function renderSessions() {
     del.textContent = "🗑";
     del.addEventListener("click", function (ev) { ev.stopPropagation(); onDeleteSession(s.id); });
     item.appendChild(del);
-    el.sessionList.appendChild(item);
-  });
+
+    // 手机端：⋯ 打开底部操作清单（置顶/重命名/删除）
+    var more = document.createElement("span");
+    more.className = "s-more";
+    more.textContent = "⋯";
+    more.title = "更多操作";
+    more.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      openSheet([
+        { label: s.pinned ? "取消置顶" : "置顶", fn: function () { togglePin(s.id); } },
+        { label: "重命名", fn: function () { startRename(item, s); } },
+        { label: "删除", danger: true, fn: function () { onDeleteSession(s.id); } },
+      ]);
+    });
+    item.appendChild(more);
+
+    return item;
 }
 
 /* 内联重命名 */

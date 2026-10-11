@@ -180,6 +180,107 @@ function mmSep() {
   d.className = "mm-sep";
   return d;
 }
+
+/* ==== 「🧰 提供给 AI 的工具」快捷开关（仅本会话生效，localStorage 持久化） ==== */
+var TOOL_GROUPS = [
+  ["base", "基础"],
+  ["web", "联网"],
+  ["browser", "AI 浏览器"],
+  ["pixiv", "P 站搜图"],
+  ["image", "AI 生图"],
+  ["galgame", "Galgame"],
+  ["tts", "语音"],
+];
+var TOOL_LABELS = {
+  query_lore: "内容表查询",
+  query_chat_memory: "回忆旧对话",
+  update_chat_memory: "更新记忆",
+  update_attributes: "更新属性",
+  read_image: "查看图片",
+  web_search: "联网搜索",
+  web_fetch: "读取网页",
+  browser_open: "浏览器·打开",
+  browser_snapshot: "浏览器·查看元素",
+  browser_click: "浏览器·点击",
+  browser_type: "浏览器·输入",
+  browser_back: "浏览器·后退",
+  browser_get_text: "浏览器·读取文本",
+  browser_close: "浏览器·关闭",
+  search_pixiv: "P 站·搜索",
+  pick_pixiv: "P 站·取原图",
+  generate_image: "AI 生图",
+  edit_image: "以图生图",
+  galgame_draw_background: "Galgame·背景绘制",
+  galgame_draw_sprite: "Galgame·立绘绘制",
+  galgame_compose_music: "Galgame·作曲",
+  galgame_list_assets: "Galgame·资产清单",
+  galgame_set_scene: "Galgame·切换场景",
+  galgame_choice: "Galgame·选项",
+  text_to_speech: "语音朗读",
+};
+function disabledToolsStorageKey() {
+  return "flyai-disabled-tools-" + (state.currentSessionId || "none");
+}
+/* 当前会话被手动关闭的工具名（过滤掉服务端已不可用的名字，防脏数据） */
+function getDisabledTools() {
+  var names = [];
+  try {
+    names = JSON.parse(localStorage.getItem(disabledToolsStorageKey()) || "[]") || [];
+  } catch (e) { names = []; }
+  if (!Array.isArray(names)) return [];
+  var valid = {};
+  (state.toolsMeta || []).forEach(function (t) {
+    if (t.allowed) valid[t.name] = true;
+  });
+  return names.filter(function (n) { return typeof n === "string" && valid[n]; });
+}
+/* 发送 payload 用 */
+function disabledToolNames() { return getDisabledTools(); }
+function setToolEnabled(name, on) {
+  var names = getDisabledTools();
+  var i = names.indexOf(name);
+  if (on && i >= 0) names.splice(i, 1);
+  if (!on && i < 0) names.push(name);
+  localStorage.setItem(disabledToolsStorageKey(), JSON.stringify(names));
+}
+function mmToolRow(t, disabled) {
+  var lbl = document.createElement("label");
+  lbl.className = "mm-tool";
+  lbl.title = t.description || "";
+  var chk = document.createElement("input");
+  chk.type = "checkbox";
+  chk.checked = disabled.indexOf(t.name) < 0;
+  chk.addEventListener("click", function (e) { e.stopPropagation(); });
+  chk.addEventListener("change", function () { setToolEnabled(t.name, chk.checked); });
+  var name = document.createElement("span");
+  name.className = "mm-tool-name";
+  var html = escapeHtml(TOOL_LABELS[t.name] || t.name);
+  if (t.description) html += '<span class="mm-tool-desc">' + escapeHtml(t.description) + "</span>";
+  name.innerHTML = html;
+  lbl.appendChild(chk);
+  lbl.appendChild(name);
+  return lbl;
+}
+function buildToolsMenuSection() {
+  var allowed = (state.toolsMeta || []).filter(function (t) { return t.allowed; });
+  if (!allowed.length) return null;
+  var disabled = getDisabledTools();
+  var frag = document.createDocumentFragment();
+  var head = document.createElement("div");
+  head.className = "mm-tool-group";
+  head.textContent = "🧰 提供给 AI 的工具（仅本对话）";
+  frag.appendChild(head);
+  TOOL_GROUPS.forEach(function (g) {
+    var items = allowed.filter(function (t) { return (t.category || "base") === g[0]; });
+    if (!items.length) return;
+    var sub = document.createElement("div");
+    sub.className = "mm-tool-group";
+    sub.textContent = g[1];
+    frag.appendChild(sub);
+    items.forEach(function (t) { frag.appendChild(mmToolRow(t, disabled)); });
+  });
+  return frag;
+}
 function buildMoreMenu() {
   var menu = el.moreMenu;
   menu.innerHTML = "";
@@ -196,6 +297,42 @@ function buildMoreMenu() {
   menu.appendChild(info);
 
   var isRoom = roomMode();
+
+  // 角色 / 世界观挂载：手机端（≤860px）顶栏 chip 被 CSS 隐藏，只能在这里挂载；
+  // 桌面端顶栏仍有 chip，这里多一个等价入口
+  menu.appendChild(mmSep());
+  if (!isRoom) {
+    var cr = document.createElement("div");
+    cr.className = "mm-row-item";
+    var ck = document.createElement("span");
+    ck.className = "mm-k";
+    ck.textContent = "👤 角色";
+    var csel = document.createElement("select");
+    csel.innerHTML = charOptionTags(effectiveChar() ? effectiveChar().id : "", "无角色");
+    csel.addEventListener("change", function () { updateSessionBinding("character_id", csel.value); });
+    cr.appendChild(ck);
+    cr.appendChild(csel);
+    menu.appendChild(cr);
+  }
+  (function () {
+    var wr = document.createElement("div");
+    wr.className = "mm-row-item";
+    var wk = document.createElement("span");
+    wk.className = "mm-k";
+    wk.textContent = "🌍 世界观";
+    var wsel = document.createElement("select");
+    var world = effectiveWorld();
+    var wopts = ['<option value="">无世界观</option>'];
+    state.worlds.forEach(function (w) {
+      wopts.push('<option value="' + escapeAttr(w.id) + '"' + (world && w.id === world.id ? " selected" : "") + ">" + escapeHtml(w.name || "未命名") + "</option>");
+    });
+    wsel.innerHTML = wopts.join("");
+    wsel.addEventListener("change", function () { updateSessionBinding("world_id", wsel.value); });
+    wr.appendChild(wk);
+    wr.appendChild(wsel);
+    menu.appendChild(wr);
+  })();
+
   if (isRoom) {
     menu.appendChild(mmSep());
     // 🎭 扮演（persona）：行内下拉
@@ -229,10 +366,20 @@ function buildMoreMenu() {
   }
 
   menu.appendChild(mmSep());
+  var toolSection = buildToolsMenuSection();
+  if (toolSection) {
+    menu.appendChild(toolSection);
+    menu.appendChild(mmSep());
+  }
   if (isRoom) {
     menu.appendChild(mmItem("🧠 记忆与属性（座位 / 挂载 / 移除成员）", openMemDialog));
   }
   menu.appendChild(mmItem("⬇ 导出对话", downloadConversation));
+  if (state.currentSessionId) {
+    menu.appendChild(mmItem("🛒 发布到市场", function () {
+      publishToMarket("session", state.currentSessionId);
+    }));
+  }
   menu.appendChild(mmItem("☁ 压缩对话", openCompressDialog));
   if (isRoom) {
     menu.appendChild(mmItem("📝 记录记忆", snapshotRoomMemory));
@@ -425,15 +572,40 @@ function openNewChatDialog() {
   if (state.busy) return;
   state.newChat = { selected: {}, rootId: "" };
   el.newchatTitle.value = "";
+  el.newchatMode.checked = false;
+  applyNewChatMode();
   el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
   safeCloseDialogs();
   el.newchatDialog.showModal();
   renderPickRoots();
 }
+function newChatModeOn() {
+  return !!(el.newchatMode && el.newchatMode.checked);
+}
+function applyNewChatMode() {
+  var on = newChatModeOn();
+  el.btnNewchatPlain.disabled = on;
+  el.newchatSub.textContent = on
+    ? "Galgame 模式：只能选择一个角色。开始后先写初始剧情，AI 会绘制背景与立绘并以视觉小说形式演出。"
+    : "选择一个根角色卡，再选择主卡或其副本；可跨根卡多选，多个角色即多 AI 群聊房间。";
+}
+function onNewChatModeChange() {
+  if (newChatModeOn()) {
+    // 切到 Galgame：只保留一个已选角色
+    var sel = state.newChat.selected;
+    var keys = Object.keys(sel);
+    if (keys.length > 1) {
+      keys.slice(1).forEach(function (k) { delete sel[k]; });
+    }
+  }
+  applyNewChatMode();
+  if (state.newChat.rootId) renderPickVariants(state.newChat.rootId);
+  else renderPickRoots();
+}
 function renderPickRoots() {
   state.newChat.rootId = "";
   el.newchatBack.classList.add("hidden");
-  el.newchatSub.textContent = "选择一个根角色卡，再选择主卡或其副本；可跨根卡多选，多个角色即多 AI 群聊房间。";
+  applyNewChatMode();
   el.newchatPick.innerHTML = "";
   var roots = rootCards();
   if (!roots.length) {
@@ -459,7 +631,9 @@ function renderPickVariants(rootId) {
   state.newChat.rootId = rootId;
   el.newchatBack.classList.remove("hidden");
   var root = characterOf(rootId);
-  el.newchatSub.textContent = "选择「" + cardDisplayName(root) + "」的主卡或副本，可在详情中查看卡片数据。";
+  el.newchatSub.textContent = newChatModeOn()
+    ? "Galgame 模式：选择「" + cardDisplayName(root) + "」（只能选择一个角色）。"
+    : "选择「" + cardDisplayName(root) + "」的主卡或副本，可在详情中查看卡片数据。";
   el.newchatPick.innerHTML = "";
   var list = document.createElement("div");
   list.className = "variant-list";
@@ -514,8 +688,17 @@ function pickActions(c) {
 }
 function togglePick(id) {
   var sel = state.newChat.selected;
-  if (sel[id]) delete sel[id];
-  else { var c = characterOf(id); if (c) sel[id] = c; }
+  if (sel[id]) {
+    delete sel[id];
+  } else {
+    var c = characterOf(id);
+    if (!c) return;
+    if (newChatModeOn()) {
+      // Galgame：单角色，新选择替换已有选择
+      Object.keys(sel).forEach(function (k) { delete sel[k]; });
+    }
+    sel[id] = c;
+  }
   if (state.newChat.rootId) renderPickVariants(state.newChat.rootId);
   else renderPickRoots();
 }
@@ -565,10 +748,19 @@ function confirmNewChat() {
   var title = el.newchatTitle.value.trim();
   var ids = Object.keys(state.newChat.selected);
   if (!ids.length) return;
+  var galgame = newChatModeOn();
+  if (galgame && ids.length !== 1) {
+    el.newchatMsg.textContent = "Galgame 模式只能选择一个角色";
+    el.newchatMsg.className = "msg-bar err";
+    return;
+  }
   el.newchatMsg.textContent = ""; el.newchatMsg.className = "msg-bar";
   fetchJSON("/api/rooms", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: title, character_ids: ids }),
+    body: JSON.stringify({
+      title: title, character_ids: ids,
+      mode: galgame ? "galgame" : "normal",
+    }),
   }).then(function (s) {
     state.currentSessionId = s.id;
     state.currentAttrs = null;
@@ -576,7 +768,7 @@ function confirmNewChat() {
     return refreshSessions();
   }).then(function () {
     selectSession(state.currentSessionId);
-    el.input.focus();
+    if (!galgame) el.input.focus();
   }).catch(function (e) {
     el.newchatMsg.textContent = "创建房间失败: " + e.message;
     el.newchatMsg.className = "msg-bar err";
@@ -602,6 +794,15 @@ function plainNewChat() {
 
 function selectSession(id) {
   if (state.busy) return;
+  // Galgame 运行（含等待选项）期间不进入其它 Galgame；普通会话不受影响。
+  // 先从 ⚙ 返回主界面
+  if (state.galgame && state.galgame.active && state.galgame.sid !== id) {
+    var target = state.sessions.find(function (x) { return x.id === id; });
+    if (target && target.mode === "galgame") {
+      showToast("当前 Galgame 故事正在演出，请先从 ⚙ 返回主界面", "err", 4000);
+      return;
+    }
+  }
   state.batchMode = false;
   state.batchPicked = {};
   state.currentSessionId = id;
@@ -617,16 +818,34 @@ function selectSession(id) {
     state.tokenTotals[id] = intOr(tu.total_tokens, 0);
     state.tokenDetails[id] = { p: intOr(tu.prompt_tokens, 0), c: intOr(tu.completion_tokens, 0) };
     state.scopeCache[id] = { char: s.character || null, world: s.world || null, scoped: !!s.scoped };
+    // Galgame：全屏视觉小说视图，不渲染普通聊天界面
+    if (s.mode === "galgame") {
+      state.roomMembers = s.members || [];
+      state.roomThreads = s.threads || [];
+      state.currentSpeaker = null;
+      state.currentThreadId = null;
+      state.roomView = true;
+      renderSessionList();
+      enterGalgame(s);
+      return;
+    }
+    // 从 Galgame 直接切到普通会话：隐藏全屏视图（运行仍在后台）
+    var gvView0 = document.getElementById("galgame-view");
+    if (gvView0) gvView0.classList.add("hidden");
+    var appEl0 = document.getElementById("app");
+    if (appEl0) appEl0.classList.remove("gv-app-hidden");
+    if (state.galgame && state.galgame.play) pausePlayback();
     // beta：多 AI 房间；有窗口时左侧栏切换为该房间的窗口导航
     state.roomMembers = s.members || [];
     state.roomThreads = s.threads || [];
     state.currentSpeaker = null;
     state.currentThreadId = null;
-    state.roomView = state.roomThreads.length > 0;
+    // 单 AI 房间抽屉不进二级列表（仍加载唯一窗口的内容）；多 AI 才进
+    state.roomView = roomNavActive();
     renderSessionList();
     renderSessionMeta();
     var viewReady;
-    if (state.roomView) {
+    if (roomMode()) {
       viewReady = loadThread(state.roomThreads[0].id);
     } else {
       renderHistory(s.messages || []);
@@ -645,6 +864,13 @@ function memberOf(idOrName) {
 }
 function roomMode() {
   return !!(state.roomThreads && state.roomThreads.length);
+}
+/* 抽屉是否进入房间窗口二级列表：≥2 个 AI 才需要；
+ * 单 AI 房间停在第一层会话列表，点击后直接打开唯一窗口 */
+function roomNavActive() {
+  if (!state.roomThreads || !state.roomThreads.length) return false;
+  var aiN = (state.roomMembers || []).filter(function (m) { return !m.is_user; }).length;
+  return aiN >= 2;
 }
 /* R8：用户扮演自设（persona）—— 存在用户座位的 character_id 上，复用库角色卡 */
 function roomUserSeat() {
@@ -693,6 +919,8 @@ function loadThread(tid) {
     if (idx >= 0) state.roomThreads[idx] = t; else state.roomThreads.push(t);
     renderHistory(t.messages || [], t.edits || {});
     restoreDraft();
+    // 从磁盘重画后，把本轮思考用时按消息 id 回填（否则被裸「已思考」覆盖）
+    applyPendingThinkingDurations();
   }).catch(function (e) { addErrorBar("加载窗口失败: " + e.message); });
 }
 

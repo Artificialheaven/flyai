@@ -111,7 +111,7 @@ function isImageMarkerText(text) {
 function makeGeneratedImage(url, meta) {
   var img = document.createElement("img");
   img.className = "gen-img";
-  img.src = url;
+  img.src = assetUrl(url);
   img.alt = "AI 生成图片";
   img._imgMeta = meta || null;
   return img;
@@ -196,7 +196,7 @@ function makePixivGrid(cands, revealed, live) {
 function makePxImg(src, blur, pid) {
   var img = document.createElement("img");
   img.className = "px-img " + (blur ? "px-blur" : "px-revealed");
-  img.src = src;
+  img.src = assetUrl(src);
   img.alt = "Pixiv 插画 " + pid;
   img.addEventListener("click", function () {
     if (!img.classList.contains("px-blur")) window.open(img.src, "_blank");
@@ -228,6 +228,7 @@ function revealPixivPicks(picks) {
 }
 /* ==== 全屏图片查看器：放大 / 下载 / 按生图方式查看提示词 ==== */
 function openImageViewer(src, meta) {
+  src = assetUrl(src);
   el.ivImg.src = src;
   el.ivPanel.innerHTML = "";
   el.ivPanel.classList.remove("open");
@@ -343,14 +344,14 @@ function makeInfoRefs(refs) {
     fig.className = "iv-ref";
     var img = document.createElement("img");
     img.loading = "lazy";
-    img.src = url;
+    img.src = assetUrl(url);
     img.alt = "图" + (i + 1);
     var cap = document.createElement("span");
     cap.className = "iv-ref-cap";
     cap.textContent = "图" + (i + 1);
     fig.appendChild(img);
     fig.appendChild(cap);
-    fig.addEventListener("click", function () { openImageViewer(url); });
+    fig.addEventListener("click", function () { openImageViewer(assetUrl(url)); });
     body.appendChild(fig);
   });
   wrap.appendChild(bar);

@@ -7,11 +7,16 @@ function openSettings() {
   if (!state.config) return;
   clearDirty();
   var isAdmin = state.role === "admin";
-  el.settingsAdmin.hidden = !isAdmin;
-  el.settingsUser.hidden = isAdmin;
+  el.dialog.classList.toggle("is-admin", isAdmin);
   el.settingsSub.textContent = isAdmin
     ? "提供商与工具配置（管理员）"
     : "管理你自建的模型，或选用管理员共享的模型（你的等级 Lv" + state.userLevel + "）";
+  // 账户页：用户名 / 等级
+  el.accInfoName.textContent = state.userName || "—";
+  el.accInfoLevel.textContent = isAdmin ? "管理员 · Lv256" : "Lv" + state.userLevel;
+  // 通用前端偏好（本地保存）
+  if (el.setEnterSend) el.setEnterSend.checked = enterToSendEnabled();
+  loadMySettings();
   if (isAdmin) {
     el.configMsg.textContent = ""; el.configMsg.className = "msg-bar";
     fillAdminForm();
@@ -21,8 +26,335 @@ function openSettings() {
   } else {
     el.userConfigMsg.textContent = ""; el.userConfigMsg.className = "msg-bar";
     renderUserModelCards();
+    renderUserVoiceView();
+    renderUserFeatures();  // 个人覆盖随后由 loadMySettings() 拉取后二次渲染
   }
+  resetSettingsPages();
+  syncOptionRows();
   el.dialog.showModal();
+}
+
+/* 用户个人设置（服务端 data/{uid}/settings.json，跨设备跟随账号） */
+function _intInput(node, fallback) {
+  var n = parseInt(node && node.value, 10);
+  if (isNaN(n)) n = fallback;
+  return n;
+}
+
+function loadMySettings() {
+  if (!el.setKeepTurns) return;
+  state.mySettings = null;
+  el.setKeepTurns.value = 0;
+  if (el.setAutoRecall) el.setAutoRecall.checked = false;
+  if (el.setAutoRecallMax) el.setAutoRecallMax.value = 5;
+  if (el.setExtractEvery) el.setExtractEvery.value = 10;
+  return fetchJSON("/api/my/settings").then(function (s) {
+    if (!s) return;
+    state.mySettings = s;
+    el.setKeepTurns.value = s.keep_turns || 0;
+    if (el.setAutoRecall) el.setAutoRecall.checked = !!s.auto_recall;
+    if (el.setAutoRecallMax) el.setAutoRecallMax.value = s.auto_recall_max || 5;
+    if (el.setExtractEvery) el.setExtractEvery.value = s.extract_every_turns != null ? s.extract_every_turns : 10;
+    if (state.role !== "admin") renderUserFeatures();
+  }).catch(function () {});
+}
+
+function saveMySettings() {
+  if (!el.setKeepTurns) return;
+  var keep = Math.max(0, _intInput(el.setKeepTurns, 0));
+  el.setKeepTurns.value = keep;
+  var payload = {
+    keep_turns: keep,
+    auto_recall: el.setAutoRecall ? !!el.setAutoRecall.checked : false,
+    auto_recall_max: el.setAutoRecallMax
+      ? Math.max(1, Math.min(20, _intInput(el.setAutoRecallMax, 5)))
+      : 5,
+    extract_every_turns: el.setExtractEvery
+      ? Math.max(0, _intInput(el.setExtractEvery, 10))
+      : 10,
+  };
+  if (el.setAutoRecallMax) el.setAutoRecallMax.value = payload.auto_recall_max;
+  if (el.setExtractEvery) el.setExtractEvery.value = payload.extract_every_turns;
+  fetchJSON("/api/my/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then(function () {
+    // 已落盘：不再是「未保存修改」（input 事件漏拦时也兜底）
+    if (typeof clearDirty === "function") clearDirty();
+    showToast("对话上下文设置已保存", "ok");
+  }).catch(function (e) {
+    showToast("保存失败: " + e.message, "err");
+  });
+}
+
+/* 普通用户：朗读音色只读清单（按最低可见等级过滤） */
+function renderUserVoiceView() {
+  if (!el.userVoiceView) return;
+  var tts = state.config && state.config.tts;
+  var voices = (tts && tts.voices) || [];
+  var level = state.userLevel || 0;
+  var minLevel = tts && tts.min_level != null ? tts.min_level : 0;
+  var usable = voices.filter(function (v) {
+    return (v.min_level || 0) <= level && minLevel <= level;
+  });
+  if (!tts || !tts.enabled || minLevel > level) {
+    el.userVoiceView.innerHTML = '<div class="uv-empty">语音朗读未开放。</div>';
+    return;
+  }
+  if (!usable.length) {
+    el.userVoiceView.innerHTML = '<div class="uv-empty">暂无可用音色。</div>';
+    return;
+  }
+  el.userVoiceView.innerHTML = usable.map(function (v) {
+    return '<div class="uv-row"><span class="uv-name">' + escapeHtml(v.name || v.id || "音色") +
+      '</span><span class="uv-id">' + escapeHtml(v.id || "") + "</span></div>";
+  }).join("");
+}
+
+/* ==== 普通用户：功能开关（全局默认 + 仅对自己生效的覆盖）==== */
+
+/* 覆盖字段 key → 全局配置在 state.config 下的路径 */
+var UF_GLOBAL_PATHS = {
+  tools_enabled: ["tools", "enabled"],
+  tool_max_iterations: ["tools", "max_iterations"],
+  tool_timeout_seconds: ["tools", "timeout_seconds"],
+  roleplay_format_enabled: ["roleplay", "format_enabled"],
+  roleplay_attributes_enabled: ["roleplay", "attributes", "enabled"],
+  intro_chars: ["roleplay", "intro_chars"],
+  background_chars: ["roleplay", "background_chars"],
+  world_chars: ["roleplay", "world_chars"],
+  mes_example_chars: ["roleplay", "mes_example_chars"],
+  pinned_chars: ["roleplay", "pinned_chars"],
+  web_enabled: ["web_search", "enabled"],
+  browser_enabled: ["browser", "enabled"],
+  pixiv_enabled: ["pixiv", "enabled"],
+  image_enabled: ["image_generation", "enabled"],
+  galgame_enabled: ["galgame", "enabled"],
+  galgame_max_loops: ["galgame", "max_loops"],
+};
+/* 旧版/精简配置缺段时的兜底默认（与后端各 Settings 默认一致） */
+var UF_GLOBAL_FALLBACK = {
+  tools_enabled: true, tool_max_iterations: 8, tool_timeout_seconds: 120,
+  roleplay_format_enabled: true, roleplay_attributes_enabled: true,
+  intro_chars: 0, background_chars: 0, world_chars: 0,
+  mes_example_chars: 0, pinned_chars: 0,
+  web_enabled: true, browser_enabled: false, pixiv_enabled: true,
+  image_enabled: true, galgame_enabled: true, galgame_max_loops: 40,
+};
+var USER_FEATURE_BLOCKS = [
+  {
+    key: "tools", title: "工具与迭代",
+    desc: "AI 可调用工具的总开关，以及一轮对话内的工具循环预算。",
+    fields: [
+      { key: "tools_enabled", label: "启用工具调用（内容表/记忆/联网/绘图等工具的总开关）", kind: "bool" },
+      { key: "tool_max_iterations", label: "最大工具迭代轮数（0–40）", kind: "int", min: 0, max: 40 },
+      { key: "tool_timeout_seconds", label: "单个工具超时秒数（5–600）", kind: "int", min: 5, max: 600 },
+    ],
+  },
+  {
+    key: "roleplay", title: "角色扮演",
+    desc: "对话格式规范、属性跟踪与各段提示词的注入字数预算（0=不限）。",
+    fields: [
+      { key: "roleplay_format_enabled", label: "启用对话格式规范（动作/内心/对白 / 分段样式）", kind: "bool" },
+      { key: "roleplay_attributes_enabled", label: "启用属性跟踪（好感度、金钱等，AI 每回合可修改）", kind: "bool" },
+      { key: "intro_chars", label: "角色简介字数预算", kind: "int", min: 0, max: 50000 },
+      { key: "background_chars", label: "角色经历字数预算", kind: "int", min: 0, max: 50000 },
+      { key: "world_chars", label: "世界观字数预算", kind: "int", min: 0, max: 50000 },
+      { key: "mes_example_chars", label: "对话范例字数预算", kind: "int", min: 0, max: 50000 },
+      { key: "pinned_chars", label: "常驻条目字数预算", kind: "int", min: 0, max: 50000 },
+    ],
+  },
+  {
+    key: "web", title: "联网搜索",
+    fields: [{ key: "web_enabled", label: "启用联网搜索（web_search / web_fetch 工具）", kind: "bool" }],
+  },
+  {
+    key: "browser", title: "AI 浏览器",
+    desc: "AI 像人一样逐级浏览网页；需服务器已安装 Playwright Chromium，未安装时开启也无法使用。",
+    fields: [{ key: "browser_enabled", label: "启用 AI 浏览器（browser_* 工具组）", kind: "bool" }],
+  },
+  {
+    key: "pixiv", title: "P 站搜图",
+    fields: [{ key: "pixiv_enabled", label: "启用 P 站搜图（搜索候选 → 视觉筛选 → 原图）", kind: "bool" }],
+  },
+  {
+    key: "galgame", title: "Galgame 模式",
+    fields: [
+      { key: "galgame_enabled", label: "允许我创建 Galgame 模式房间", kind: "bool" },
+      { key: "galgame_max_loops", label: "Galgame 单轮最大工具循环数（1–100）", kind: "int", min: 1, max: 100 },
+    ],
+  },
+  {
+    key: "image", title: "AI 生图",
+    fields: [{ key: "image_enabled", label: "启用 AI 生图（文生图 / 图生图工具）", kind: "bool" }],
+  },
+];
+
+function ufGlobalValue(key) {
+  var path = UF_GLOBAL_PATHS[key] || [];
+  var node = state.config;
+  for (var i = 0; i < path.length; i++) {
+    if (node == null) return UF_GLOBAL_FALLBACK[key];
+    node = node[path[i]];
+  }
+  return node == null ? UF_GLOBAL_FALLBACK[key] : node;
+}
+
+function ufBoolText(v) { return v ? "开" : "关"; }
+
+function ufFieldEl(f, val, disabled) {
+  var label = document.createElement("label");
+  label.className = "uf-field" + (f.kind === "bool" ? " uf-toggle" : "");
+  var span = document.createElement("span");
+  span.className = "uf-field-label";
+  span.textContent = f.label;
+  var input = document.createElement("input");
+  if (f.kind === "bool") {
+    input.type = "checkbox";
+    input.checked = !!val;
+  } else {
+    input.type = "number";
+    if (f.min != null) input.min = f.min;
+    if (f.max != null) input.max = f.max;
+    input.value = val;
+  }
+  input.dataset.uf = f.key;
+  input.disabled = !!disabled;
+  var hint = document.createElement("small");
+  hint.className = "uf-hint";
+  var gv = ufGlobalValue(f.key);
+  hint.textContent = "全局默认：" + (f.kind === "bool" ? ufBoolText(gv) : gv);
+  if (f.kind === "bool") {
+    label.appendChild(input);
+    label.appendChild(span);
+    label.appendChild(hint);
+  } else {
+    label.appendChild(span);
+    label.appendChild(input);
+    label.appendChild(hint);
+  }
+  return label;
+}
+
+function renderUserFeatures() {
+  if (!el.userFeaturesList || !state.config) return;
+  var mine = state.mySettings || {};
+  el.userFeaturesList.innerHTML = "";
+  USER_FEATURE_BLOCKS.forEach(function (block) {
+    var followed = block.fields.every(function (f) {
+      return mine[f.key] === null || mine[f.key] === undefined;
+    });
+    var card = document.createElement("div");
+    card.className = "uf-block" + (followed ? " is-follow" : "");
+    card.dataset.block = block.key;
+
+    var head = document.createElement("div");
+    head.className = "uf-head";
+    var title = document.createElement("strong");
+    title.textContent = block.title;
+    var follow = document.createElement("label");
+    follow.className = "uf-follow";
+    var chk = document.createElement("input");
+    chk.type = "checkbox";
+    chk.checked = followed;
+    follow.appendChild(chk);
+    follow.appendChild(document.createTextNode(" 跟随全局默认"));
+    head.appendChild(title);
+    head.appendChild(follow);
+    card.appendChild(head);
+
+    if (block.desc) {
+      var d = document.createElement("p");
+      d.className = "uf-desc";
+      d.textContent = block.desc;
+      card.appendChild(d);
+    }
+
+    var body = document.createElement("div");
+    body.className = "uf-body";
+    block.fields.forEach(function (f) {
+      var ov = mine[f.key];
+      var val = (ov === null || ov === undefined) ? ufGlobalValue(f.key) : ov;
+      body.appendChild(ufFieldEl(f, val, followed));
+    });
+    card.appendChild(body);
+
+    chk.addEventListener("change", function () {
+      var followGlobal = chk.checked;
+      card.classList.toggle("is-follow", followGlobal);
+      block.fields.forEach(function (f) {
+        var input = body.querySelector('[data-uf="' + f.key + '"]');
+        if (!input) return;
+        input.disabled = followGlobal;
+        // 勾选跟随：控件回填全局当前值（只读展示）
+        var gv = ufGlobalValue(f.key);
+        if (f.kind === "bool") input.checked = !!gv;
+        else input.value = gv;
+      });
+    });
+
+    el.userFeaturesList.appendChild(card);
+  });
+  if (el.userFeatMsg) { el.userFeatMsg.textContent = ""; el.userFeatMsg.className = "msg-bar"; }
+}
+
+function saveFeaturePrefs() {
+  if (!el.userFeaturesList) return;
+  // 服务端 PUT 会整体重写个人设置，顺带带上对话上下文偏好以免被重置
+  var keep = Math.max(0, _intInput(el.setKeepTurns, 0));
+  var payload = {
+    keep_turns: keep,
+    auto_recall: el.setAutoRecall ? !!el.setAutoRecall.checked : false,
+    auto_recall_max: el.setAutoRecallMax
+      ? Math.max(1, Math.min(20, _intInput(el.setAutoRecallMax, 5))) : 5,
+    extract_every_turns: el.setExtractEvery
+      ? Math.max(0, _intInput(el.setExtractEvery, 10)) : 10,
+  };
+  // 默认全部跟随（null），取消跟随的区块逐字段收集
+  USER_FEATURE_BLOCKS.forEach(function (block) {
+    block.fields.forEach(function (f) { payload[f.key] = null; });
+  });
+  el.userFeaturesList.querySelectorAll(".uf-block").forEach(function (card) {
+    if (card.querySelector(".uf-follow-chk").checked) return;
+    var block = USER_FEATURE_BLOCKS.filter(function (b) {
+      return b.key === card.getAttribute("data-block");
+    })[0];
+    if (!block) return;
+    block.fields.forEach(function (f) {
+      var input = card.querySelector('[data-uf="' + f.key + '"]');
+      if (!input) return;
+      if (f.kind === "bool") {
+        payload[f.key] = !!input.checked;
+      } else {
+        var n = parseInt(input.value, 10);
+        if (isNaN(n)) n = ufGlobalValue(f.key);  // 空/非法值回落全局默认
+        n = Math.max(f.min, Math.min(f.max, n));
+        input.value = n;
+        payload[f.key] = n;
+      }
+    });
+  });
+  var btn = el.btnSaveFeatures;
+  if (btn) { btn.disabled = true; }
+  fetchJSON("/api/my/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then(function (saved) {
+    state.mySettings = saved || payload;
+    renderUserFeatures();
+    if (el.setKeepTurns) el.setKeepTurns.value = keep;
+    showToast("功能开关已保存（仅对你自己生效）", "ok");
+  }).catch(function (e) {
+    if (el.userFeatMsg) {
+      el.userFeatMsg.textContent = "保存失败: " + e.message;
+      el.userFeatMsg.className = "msg-bar err";
+    }
+    showToast("保存失败: " + e.message, "err");
+  }).then(function () {
+    if (btn) btn.disabled = false;
+  });
 }
 
 function _fillNum(id, val) {
@@ -101,6 +433,9 @@ function fillAdminForm() {
   el.setTtsSpeechrate.value = tts.speech_rate || 0;
   el.setTtsLoudness.value = tts.loudness_rate || 0;
   el.setTtsProxy.value = tts.proxy || "";
+  var galgame = state.config.galgame || {};
+  if (el.setGalgameEnabled) el.setGalgameEnabled.checked = galgame.enabled !== false;
+  el.setGalgameLoops.value = galgame.max_loops != null ? galgame.max_loops : 40;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -161,14 +496,43 @@ function providerRow(p) {
   row.appendChild(fieldRow("api_key", "API Key", p.api_key, "password"));
   row.appendChild(fieldRow("model", "模型", p.model));
   row.appendChild(fieldRow("vision", "视觉（支持图片输入）", p.vision, "checkbox"));
+  row.appendChild(fieldRow("thinking_params", "思考参数 JSON（开启深度思考时合并，可空）", p.thinking_params, "json"));
+  row.appendChild(fieldRow("thinking_off_params", "关闭思考参数 JSON（模型默认思考时填，可空）", p.thinking_off_params, "json"));
   row.appendChild(fieldRow("owner", "归属（uid）", p.owner));
   row.appendChild(fieldRow("shared", "共享", p.shared, "checkbox"));
   row.appendChild(fieldRow("min_level", "共享最低等级", p.min_level, "number"));
+  row.appendChild(fieldRow("rate", "计费倍率（每轮扣 1×倍率）", p.rate == null ? 1 : p.rate, "number"));
   var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
   del.style.gridColumn = "span 2";
   del.addEventListener("click", function () { row.remove(); });
   row.appendChild(del);
+
+  // 手机端：点「激活」立即切换并保存（该页手机端没有保存键）；桌面端仍走保存按钮
+  var radio = row.querySelector('input[name="active-provider"]');
+  if (radio) {
+    radio.addEventListener("change", function () {
+      if (!isMobileView()) return;
+      var pid = p.id;
+      fetchJSON("/api/config/activate/" + encodeURIComponent(pid), { method: "POST" })
+        .then(function () {
+          state.config.active_provider = pid;
+          renderProviderBar();
+          showToast("已切换激活模型：" + (p.model || pid));
+        })
+        .catch(function (e) {
+          showToast("切换失败: " + e.message, "err");
+          renderProviderRows();  // 恢复 radio 选中态
+        });
+    });
+  }
   return row;
+}
+/* 手机端逐字输入：关闭首字母大写/自动纠错/拼写检查；密码框标记 new-password 阻止凭据回填覆盖 Key */
+function makeVerbatimInput(input, isPassword) {
+  input.setAttribute("autocapitalize", "off");
+  input.setAttribute("autocorrect", "off");
+  input.spellcheck = false;
+  input.autocomplete = isPassword ? "new-password" : "off";
 }
 function fieldRow(key, label, value, kind) {
   var wrap = document.createElement("label");
@@ -185,13 +549,20 @@ function fieldRow(key, label, value, kind) {
     input = document.createElement("input");
     input.type = "checkbox";
     input.checked = !!value;
+  } else if (kind === "json") {
+    input = document.createElement("textarea");
+    input.rows = 2;
+    input.placeholder = '可空，如 {"reasoning_effort":"high"}';
+    input.value = value ? (typeof value === "string" ? value : JSON.stringify(value)) : "";
+    makeVerbatimInput(input, false);
   } else {
     input = document.createElement("input");
     input.type = kind || "text"; input.value = value || "";
-    // 密码类字段多为 API Key/新密码，标记 new-password 避免浏览器回填登录凭据
-    if (kind === "password") input.autocomplete = "new-password";
+    // 手机端：URL/ID/Key 必须逐字输入（密码框另标记 new-password 避免回填登录凭据）
+    if (kind !== "number") makeVerbatimInput(input, kind === "password");
   }
   input.dataset.key = key;
+  if (kind === "json") wrap.style.gridColumn = "span 2";
   if (kind === "checkbox") {
     // 复选框与说明横排：框在左、文字在右
     wrap.style.flexDirection = "row";
@@ -216,9 +587,12 @@ function addProviderRow() {
   row.appendChild(fieldRow("api_key", "API Key", "", "password"));
   row.appendChild(fieldRow("model", "模型", ""));
   row.appendChild(fieldRow("vision", "视觉（支持图片输入）", false, "checkbox"));
+  row.appendChild(fieldRow("thinking_params", "思考参数 JSON（开启深度思考时合并，可空）", "", "json"));
+  row.appendChild(fieldRow("thinking_off_params", "关闭思考参数 JSON（模型默认思考时填，可空）", "", "json"));
   row.appendChild(fieldRow("owner", "归属（uid）", "admin"));
   row.appendChild(fieldRow("shared", "共享", false, "checkbox"));
   row.appendChild(fieldRow("min_level", "共享最低等级", 0, "number"));
+  row.appendChild(fieldRow("rate", "计费倍率（每轮扣 1×倍率）", 1, "number"));
   var del = document.createElement("button"); del.className = "btn small danger"; del.textContent = "删除";
   del.style.gridColumn = "span 2";
   del.addEventListener("click", function () { row.remove(); });
@@ -286,6 +660,38 @@ function saveConfig() {
     var ownerInput = row.querySelector('input[data-key="owner"]');
     var sharedInput = row.querySelector('input[data-key="shared"]');
     var levelInput = row.querySelector('input[data-key="min_level"]');
+    var rateInput = row.querySelector('input[data-key="rate"]');
+    var rateVal = rateInput ? parseFloat(rateInput.value) : 1.0;
+    if (isNaN(rateVal)) rateVal = 1.0;
+    rateVal = Math.max(0, rateVal);
+    var thinkParams = {};
+    var thinkOffParams = {};
+    var jsonErr = (function () {
+      var pairs = [
+        ["thinking_params", "思考参数 JSON"],
+        ["thinking_off_params", "关闭思考参数 JSON"],
+      ];
+      for (var pi = 0; pi < pairs.length; pi++) {
+        var inp = row.querySelector('[data-key="' + pairs[pi][0] + '"]');
+        if (inp && inp.value.trim()) {
+          try {
+            var parsed = JSON.parse(inp.value);
+            if (pairs[pi][0] === "thinking_params") thinkParams = parsed;
+            else thinkOffParams = parsed;
+          } catch (e) {
+            return pairs[pi][1] + " 解析失败（模型 " +
+              (idInput && idInput.value || "?") + "）: " + e.message;
+          }
+        }
+      }
+      return null;
+    })();
+    if (jsonErr) {
+      el.configMsg.textContent = jsonErr;
+      el.configMsg.className = "msg-bar err";
+      if (isMobileView()) showToast("思考参数 JSON 格式错误", "err");
+      return;
+    }
     var pval = {
       id: idInput ? idInput.value.trim() : "",
       type: typeSel ? typeSel.value : "openai",
@@ -296,6 +702,9 @@ function saveConfig() {
       owner: ownerInput && ownerInput.value.trim() ? ownerInput.value.trim() : "admin",
       shared: sharedInput ? !!sharedInput.checked : false,
       min_level: levelInput ? (parseInt(levelInput.value, 10) || 0) : 0,
+      rate: rateVal,
+      thinking_params: thinkParams,
+      thinking_off_params: thinkOffParams,
     };
     if (pval.id) providers.push(pval);
   });
@@ -398,6 +807,12 @@ function saveConfig() {
     loudness_rate: parseInt(el.setTtsLoudness.value, 10) || 0,
     proxy: el.setTtsProxy.value.trim(),
   });
+  var galLoops = parseInt(el.setGalgameLoops.value, 10) || 40;
+  galLoops = Math.max(1, Math.min(galLoops, 200));
+  var galgame = Object.assign({}, state.config.galgame || {}, {
+    enabled: el.setGalgameEnabled ? !!el.setGalgameEnabled.checked : true,
+    max_loops: galLoops,
+  });
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -406,6 +821,7 @@ function saveConfig() {
       embeddings: embeddings, image_generation: imageGeneration,
       image_models: imageModels, stable_diffusion: stableDiffusion,
       pixiv: pixiv, web_search: webSearch, browser: browser, tts: tts,
+      galgame: galgame,
     }),
   }).then(function (cfg) {
     state.config = cfg;
@@ -414,7 +830,11 @@ function saveConfig() {
     renderProviderBar();
     return fetchJSON("/api/plugins");
   }).then(function (r) { state.plugins = r.plugins || []; })
-    .catch(function (e) { el.configMsg.textContent = "保存失败: " + e.message; el.configMsg.className = "msg-bar err"; });
+    .catch(function (e) {
+      el.configMsg.textContent = "保存失败: " + e.message; el.configMsg.className = "msg-bar err";
+      // 手机端 configMsg 在隐藏的 #admin-save-main 里，用 toast 兜底提示
+      if (isMobileView()) showToast("保存失败: " + e.message, "err");
+    });
 }
 
 /* ==== 普通用户：我的模型 / 共享模型卡片 ==== */
@@ -424,6 +844,8 @@ var PROVIDER_FIELDS = [
   { key: "api_key", label: "API Key", kind: "password" },
   { key: "model", label: "模型" },
   { key: "vision", label: "视觉（图片输入）", kind: "checkbox" },
+  { key: "thinking_params", label: "深度思考参数（JSON，可空；开启深度思考时合并）", kind: "json" },
+  { key: "thinking_off_params", label: "关闭思考参数（JSON，可空；模型默认思考时用它关闭）", kind: "json" },
 ];
 var IMAGE_FIELDS = [
   { key: "name", label: "名称" },
@@ -472,6 +894,7 @@ function buildModelCard(kind, data, opts) {
   radio.addEventListener("change", function () {
     if (kind === "provider") {
       localStorage.setItem("flyai-provider", data.id);
+      renderProviderBar();  // 顶栏立即同步，无需等保存/重开
     } else {
       state.imageModelId = data.id;
       localStorage.setItem("flyai-image-model", data.id);
@@ -493,12 +916,24 @@ function buildModelCard(kind, data, opts) {
   }
   card.appendChild(head);
 
-  // 字段
+  // 字段：共享卡片对服务端未下发的敏感字段显示静态占位（== 暂不显示 ==），
+  // 不渲染空输入框；本人卡片字段齐全，照常可编辑
   var grid = document.createElement("div");
   grid.className = "model-card-fields";
   fields.forEach(function (f) {
-    grid.appendChild(cardField(f, data[f.key], !opts.mine));
+    // 他人共享模型：思考参数不下发也不展示，直接跳过（不留「暂不显示」占位）
+    if (!opts.mine && (f.key === "thinking_params" || f.key === "thinking_off_params")) return;
+    if (!opts.mine && !(f.key in data)) {
+      grid.appendChild(maskedField(f));
+    } else {
+      grid.appendChild(cardField(f, data[f.key], !opts.mine));
+    }
   });
+  // 共享 LLM：只读计费倍率（精简视图里仍下发 rate）
+  if (!opts.mine && kind === "provider") {
+    var rate = data.rate == null ? 1 : data.rate;
+    grid.appendChild(staticField("计费倍率（每轮扣 1×倍率）", rate));
+  }
   card.appendChild(grid);
 
   // 操作按钮（仅归属自己）
@@ -537,15 +972,53 @@ function cardField(f, value, disabled) {
       if (o === value) opt.selected = true;
       input.appendChild(opt);
     });
+  } else if (f.kind === "json") {
+    input = document.createElement("textarea");
+    input.rows = 2;
+    input.placeholder = '可空，如 {"reasoning_effort":"high"}';
+    input.value = value
+      ? (typeof value === "string" ? value : JSON.stringify(value))
+      : "";
+    makeVerbatimInput(input, false);
   } else {
     input = document.createElement("input");
     input.type = f.kind || "text";
     input.value = value == null ? "" : value;
+    makeVerbatimInput(input, f.kind === "password");
   }
   input.dataset.k = f.key;
   if (disabled) input.disabled = true;
+  if (f.kind === "json") label.style.gridColumn = "1 / -1";
   label.appendChild(span);
   label.appendChild(input);
+  return label;
+}
+
+/* 共享模型：敏感字段服务端根本不下发，显示静态占位而非空输入框 */
+function maskedField(f) {
+  var label = document.createElement("label");
+  label.className = "model-field is-masked";
+  var span = document.createElement("span");
+  span.textContent = f.label;
+  var box = document.createElement("span");
+  box.className = "masked-box";
+  box.textContent = "== 暂不显示 ==";
+  label.appendChild(span);
+  label.appendChild(box);
+  return label;
+}
+
+/* 共享模型：只读信息行（如计费倍率） */
+function staticField(labelText, value) {
+  var label = document.createElement("label");
+  label.className = "model-field is-static";
+  var span = document.createElement("span");
+  span.textContent = labelText;
+  var box = document.createElement("span");
+  box.className = "static-box";
+  box.textContent = value;
+  label.appendChild(span);
+  label.appendChild(box);
   return label;
 }
 
@@ -568,10 +1041,24 @@ function addMyImage() {
 function saveMyCard(kind, card) {
   var fields = kind === "provider" ? PROVIDER_FIELDS : IMAGE_FIELDS;
   var values = {};
+  var parseError = null;
   fields.forEach(function (f) {
     var input = card.querySelector('[data-k="' + f.key + '"]');
-    values[f.key] = f.kind === "checkbox" ? input.checked : input.value;
+    if (f.kind === "checkbox") {
+      values[f.key] = input.checked;
+    } else if (f.kind === "json") {
+      var raw = (input.value || "").trim();
+      if (raw) {
+        try { values[f.key] = JSON.parse(raw); }
+        catch (e) { parseError = f.label + " 不是合法 JSON"; }
+      } else {
+        values[f.key] = {};
+      }
+    } else {
+      values[f.key] = input.value;
+    }
   });
+  if (parseError) { userCardMsg(parseError, "err"); return; }
   var isNew = card.dataset.new === "1";
   var base = kind === "provider" ? "/api/models/providers" : "/api/models/images";
   var url = isNew ? base : base + "/" + encodeURIComponent(card.dataset.id);

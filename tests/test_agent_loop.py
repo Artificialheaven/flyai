@@ -35,8 +35,10 @@ class _ScriptedProvider:
     def __init__(self, turns):
         self._turns = list(turns)
         self._idx = 0
+        self.received = []  # 记录每次调用收到的消息（截断测试用）
 
     async def stream_chat(self, messages, tool_specs, **kwargs):
+        self.received.append(list(messages))
         kind, payload = self._turns[self._idx]
         self._idx += 1
         if kind == "final":
@@ -58,7 +60,7 @@ class _FakeRegistry:
     def set_timeout(self, seconds):
         pass
 
-    def specs(self):
+    def specs(self, allowed=None):
         return []
 
     async def execute(self, call, ctx):
@@ -259,3 +261,90 @@ def test_web_search_and_web_fetch_share_web_budget():
     assert _done(events)["reason"] == "max_web_iterations"
     assert registry.executed.count("web_search") == 2
     assert registry.executed.count("web_fetch") == 2
+
+
+# ---- keep_turns：只把最近 N 轮发给模型 ----
+
+def _plain_history(n_turns):
+    msgs = []
+    for i in range(1, n_turns + 1):
+        msgs.append(Message(role="user", content="问题%d" % i))
+        msgs.append(Message(role="assistant", content="回答%d" % i))
+    return msgs
+
+
+async def _run_with_history(history, keep_turns, actor=""):
+    provider = _ScriptedProvider([("final", "好的")])
+    settings = ToolSettings(enabled=True, max_iterations=3)
+    events = []
+    async for ev, data in run_agent_loop(
+        history, provider, _FakeRegistry(), settings,
+        system_prompt="sys", keep_turns=keep_turns, actor=actor,
+    ):
+        events.append((ev, data))
+    return provider, events
+
+
+def test_keep_turns_trims_old_messages():
+    history = _plain_history(5)
+    snapshot = [(m.role, m.content) for m in history]
+    provider, _ = _run(_run_with_history(history, keep_turns=2))
+    body = provider.received[0][1:]  # 去掉 system
+    assert [m.content for m in body] == [
+        "问题4", "回答4", "问题5", "回答5"
+    ]
+    # 原始 5 轮历史完整未动（末尾另追加了本轮的最终回复）
+    assert len(history) == 11
+    assert [(m.role, m.content) for m in history[:10]] == snapshot
+
+
+def test_keep_turns_preserves_tool_pairs():
+    # 第 1 轮含工具链，keep=2 把它整个切掉；保留的两轮配对完整
+    history = [
+        Message(role="user", content="问题1"),
+        Message(role="assistant", content=None, tool_calls=[
+            ToolCall(id="c1", name="read_file", arguments={"path": "/x"})]),
+        Message(role="tool", tool_call_id="c1", name="read_file", content="结果"),
+        Message(role="assistant", content="回答1"),
+        Message(role="user", content="问题2"),
+        Message(role="assistant", content="回答2"),
+        Message(role="user", content="问题3"),
+        Message(role="assistant", content="回答3"),
+    ]
+    provider, _ = _run(_run_with_history(history, keep_turns=2))
+    body = provider.received[0][1:]
+    assert [m.content for m in body] == [
+        "问题2", "回答2", "问题3", "回答3"
+    ]
+    answered = {m.tool_call_id for m in body if m.role == "tool"}
+    for m in body:
+        for c in (m.tool_calls or []):
+            assert c.id in answered
+
+
+def test_keep_zero_and_oversize_send_all():
+    h1 = _plain_history(3)
+    p1, _ = _run(_run_with_history(h1, keep_turns=0))
+    assert len(p1.received[0]) == 7  # system + 6
+    h2 = _plain_history(2)
+    p2, _ = _run(_run_with_history(h2, keep_turns=10))
+    assert len(p2.received[0]) == 5  # system + 4
+
+
+def test_keep_turns_with_actor_view():
+    # 群聊式 3 轮：每轮 user + 座位A + 座位B；以 A 的视图保留最近 2 轮
+    history = []
+    for i in range(1, 4):
+        history.append(Message(role="user", content="问题%d" % i))
+        ma = Message(role="assistant", content="回答A%d" % i)
+        ma.actor_id = "A"
+        history.append(ma)
+        mb = Message(role="assistant", content="回答B%d" % i)
+        mb.actor_id = "B"
+        history.append(mb)
+    provider, _ = _run(_run_with_history(history, keep_turns=2, actor="A"))
+    body = provider.received[0][1:]
+    assert len(body) == 6  # 2 轮 × (user + A正文 + B正文副本)
+    assert body[0].content == "问题2"
+    # 别人的消息是不带 tool_calls 的干净副本，自己的消息原样
+    assert all(not m.tool_calls for m in body)

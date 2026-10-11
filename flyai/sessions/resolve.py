@@ -119,6 +119,11 @@ def plan_room_compression(session: Session, data: dict, lore=None) -> dict:
         cur_w = effective_world(session, lore) if lore is not None else None
         base = cur_w.to_dict() if cur_w is not None else (session.world_override or {})
         world_out = merge_world_patch(base, wpatch)
+        # 从 {} 新建的世界没有 id：补一个，避免后续经 World 往返时每次重生 uuid
+        if not world_out.get("id"):
+            import uuid
+
+            world_out["id"] = uuid.uuid4().hex
 
     return {"members": members_out, "world": world_out}
 
@@ -140,15 +145,27 @@ def apply_room_compression(session: Session, data: dict, lore=None) -> dict:
 
 
 def room_base_signatures(session: Session, lore) -> Dict[str, Any]:
-    """各 AI 座位当前有效角色与当前世界的签名，供压缩 apply 时做 409 校验。"""
+    """各 AI 座位当前有效角色与当前世界的签名，供压缩 apply 时做 409 校验。
+
+    已有会话副本时直接签原始 override dict；经 Character/World 对象往返会因
+    id 为空时重新生成 uuid 而让签名每次都变。
+    """
     members: Dict[str, str] = {}
     for m in session.members:
         if m.is_user:
             continue
-        cur = member_character(m, lore)
-        members[m.id] = content_signature(cur.to_dict() if cur is not None else (m.override or {}))
-    cur_w = effective_world(session, lore)
-    world = content_signature(cur_w.to_dict() if cur_w is not None else (session.world_override or {}))
+        if m.override:
+            members[m.id] = content_signature(m.override)
+        else:
+            cur = member_character(m, lore)
+            members[m.id] = content_signature(
+                cur.to_dict() if cur is not None else None
+            )
+    if session.world_override:
+        world = content_signature(session.world_override)
+    else:
+        cur_w = effective_world(session, lore)
+        world = content_signature(cur_w.to_dict() if cur_w is not None else None)
     return {"world": world, "members": members}
 
 

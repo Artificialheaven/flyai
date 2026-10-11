@@ -36,6 +36,12 @@ function renderLoreSections() {
   document.querySelectorAll("[data-world-export]").forEach(function (b) {
     b.addEventListener("click", function () { exportLore("worlds", b.getAttribute("data-world-export")); });
   });
+  document.querySelectorAll("[data-world-pub]").forEach(function (b) {
+    b.addEventListener("click", function () { publishToMarket("world", b.getAttribute("data-world-pub")); });
+  });
+  document.querySelectorAll("[data-char-pub]").forEach(function (b) {
+    b.addEventListener("click", function () { publishToMarket("character", b.getAttribute("data-char-pub")); });
+  });
   document.querySelectorAll("[data-world-del]").forEach(function (b) {
     b.addEventListener("click", function () { deleteLore("worlds", b.getAttribute("data-world-del"), "删除该世界观？"); });
   });
@@ -157,6 +163,12 @@ function loreVariantRow(c, isRoot) {
       label: "导出 JSON",
       onClick: function () { exportLore("characters", c.id); },
     });
+    if (isOwnCard(c)) {
+      acts.push({
+        label: "发布到市场",
+        onClick: function () { publishToMarket("character", c.id); },
+      });
+    }
     openCardDetail(c, acts);
   });
   actions.appendChild(more);
@@ -203,7 +215,7 @@ function editSharedCard(c) {
 
 function exportLore(endpoint, id) {
   var type = endpoint === "characters" ? "角色卡" : "世界观";
-  fetch("/api/" + endpoint + "/" + id + "/export", { headers: authHeaders() })
+  fetch(apiUrl("/api/" + endpoint + "/" + id + "/export"), { headers: authHeaders() })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (obj) {
       var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
@@ -238,13 +250,14 @@ function importLore(endpoint) {
 }
 
 function loreRow(endpoint, id, name, avatar, tables) {
-  var img = avatar ? '<img class="thumb" src="' + avatar + '" alt="" />' : '<div class="default-img">' + escapeHtml((name||"?").slice(0,1).toUpperCase()) + "</div>";
+  var img = avatar ? '<img class="thumb" src="' + assetUrl(avatar) + '" alt="" />' : '<div class="default-img">' + escapeHtml((name||"?").slice(0,1).toUpperCase()) + "</div>";
   var kind = endpoint === "characters" ? "char" : "world";
   return (
     '<div class="lore-item">' + img +
     '<div class="l-info"><div class="l-name">' + escapeHtml(name) + "</div><div class='l-tables'>" + tables + "</div></div>" +
     '<div class="l-actions">' +
     '<button class="btn small" data-' + kind + '-edit="' + id + '" title="编辑">编辑</button>' +
+    '<button class="btn small" data-' + kind + '-pub="' + id + '" title="发布到市场">发布</button>' +
     '<button class="btn small" data-' + kind + '-export="' + id + '" title="导出为 JSON">导出</button>' +
     '<button class="btn small danger" data-' + kind + '-del="' + id + '">删除</button>' +
     "</div></div>"
@@ -252,7 +265,7 @@ function loreRow(endpoint, id, name, avatar, tables) {
 }
 
 function makeAvatarHtml(item, small) {
-  if (item && item.avatar) return '<img class="avatar" src="' + item.avatar + '" alt="" />';
+  if (item && item.avatar) return '<img class="avatar" src="' + assetUrl(item.avatar) + '" alt="" />';
   return '<img class="avatar" src="/static/default-avatar.svg" alt="" />';
 }
 

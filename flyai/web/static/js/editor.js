@@ -126,7 +126,7 @@ function characterEditorHtml(c, scoped, parentForNew) {
     (parentId ? '<p class="sub">此卡是根角色卡的副本，根卡 id：' + escapeHtml(parentId) + "</p>" : "") +
     '<div style="display:flex;gap:16px;align-items:flex-start;margin:12px 0">' +
     '<div id="ed-avatar" class="avatar-placeholder" title="点击上传头像">' +
-    (v.avatar ? '<img id="ed-avatar-img" src="' + v.avatar + '" alt="" />' : "<span>点击上传<br/>头像</span>") + "</div>" +
+    (v.avatar ? '<img id="ed-avatar-img" src="' + assetUrl(v.avatar) + '" alt="" />' : "<span>点击上传<br/>头像</span>") + "</div>" +
     '<div style="flex:1">' +
     '<label class="f-label">角色名称<input type="text" id="ed-name" value="' + escapeAttr(v.name) + '" /></label>' +
     (scoped ? "" : '<label class="f-label">别名（副本列表中显示，留空则用角色名称）<input type="text" id="ed-alias" value="' + escapeAttr(v.alias || "") + '" /></label>') +
@@ -248,12 +248,15 @@ function bindEditorCommon(kind, id, saveFn, opts) {
     fileEl.addEventListener("change", function () {
       var f = fileEl.files[0];
       if (!f) return;
-      var fd = new FormData();
-      fd.append("file", f);
-      fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd }).then(function (r) { return r.json(); }).then(function (res) {
-        avatarEl.innerHTML = '<img src="' + res.url + '" alt="" />';
-        avatarEl.dataset.avatar = res.url;
-      }).catch(function (e) { showToast("上传失败: " + e.message, "err"); });
+      fileEl.value = "";  // 同一文件可再次选择
+      openAvatarCropper(f, function (blob, ext) {
+        var fd = new FormData();
+        fd.append("file", new File([blob], "avatar" + ext, { type: blob.type }));
+        fetch(apiUrl("/api/upload"), { method: "POST", headers: authHeaders(), body: fd }).then(function (r) { return r.json(); }).then(function (res) {
+          avatarEl.innerHTML = '<img id="ed-avatar-img" src="' + assetUrl(res.url) + '" alt="" />';
+          avatarEl.dataset.avatar = res.url;
+        }).catch(function (e) { showToast("上传失败: " + e.message, "err"); });
+      });
     });
   }
 

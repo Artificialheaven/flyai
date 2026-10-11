@@ -37,6 +37,9 @@ class User:
     created_at: str = ""
     # 权限等级 0-255，决定可使用的共享模型；越大越高
     level: int = 0
+    # 计费：对话次数总额（-1=无限）；累计已扣。每轮扣 1×当前模型倍率
+    quota_total: float = 0
+    quota_used: float = 0
 
     def __post_init__(self):
         if not self.id:
@@ -59,16 +62,26 @@ class User:
             "password_hash": self.password_hash,
             "created_at": self.created_at,
             "level": int(self.level or 0),
+            "quota_total": float(self.quota_total or 0),
+            "quota_used": float(self.quota_used or 0),
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "User":
+        def _num(key: str) -> float:
+            try:
+                return float(d.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
         return cls(
             id=d.get("id", ""),
             name=d.get("name", ""),
             password_hash=d.get("password_hash", ""),
             created_at=d.get("created_at", ""),
             level=int(d.get("level", 0) or 0),
+            quota_total=_num("quota_total"),
+            quota_used=max(0.0, _num("quota_used")),
         )
 
 
@@ -139,6 +152,160 @@ class UserStore:
     def valid(self, uid: str) -> bool:
         return uid in self._users
 
+    # ---- 计费额度 ----
+
+    def set_quota_total(self, uid: str, total: float) -> float:
+        """管理员调整对话次数总额（-1=无限）。返回归一后的总额。"""
+        u = self._users.get(uid)
+        if u is None:
+            raise ValueError("用户不存在")
+        total = float(total)
+        if total != -1 and total < 0:
+            raise ValueError("额度不能为负数（-1 表示无限）")
+        u.quota_total = total
+        # 缩额后已扣可能超过新总额：不回改 used，剩余按 0 处理
+        self._save()
+        return total
+
+    def consume(self, uid: str, cost: float) -> bool:
+        """检查并扣减一次对话费用；无限额度直接通过，余额不足返回 False（不扣）。"""
+        u = self._users.get(uid)
+        if u is None:
+            return False
+        cost = max(0.0, float(cost))
+        if u.quota_total == -1:
+            u.quota_used += cost
+            self._save()
+            return True
+        remaining = u.quota_total - u.quota_used
+        if remaining + 1e-9 < cost:
+            return False
+        u.quota_used += cost
+        self._save()
+        return True
+
+    def refund(self, uid: str, cost: float) -> None:
+        """退回未实际发生的费用。"""
+        u = self._users.get(uid)
+        if u is None:
+            return
+        u.quota_used = max(0.0, u.quota_used - max(0.0, float(cost)))
+        self._save()
+
+
+@dataclass
+class UserSettings:
+    """单个用户的个人设置（data/{uid}/settings.json，跨设备跟随用户）。"""
+
+    # 发给模型的最近对话轮数；0 = 全部发送。历史仍完整保存在会话文件中
+    keep_turns: int = 0
+    # 发消息前自动从角色记忆簿/历史中召回相关事实（keep_turns 的配套）
+    auto_recall: bool = False
+    # 自动召回注入的事实条数上限
+    auto_recall_max: int = 5
+    # 每 N 轮做一次结构化批量抽取；0 = 关闭
+    extract_every_turns: int = 10
+
+    # ---- 功能开关覆盖（None=跟随管理员全局默认；见 flyai/feature_prefs.py）----
+    # 工具与迭代
+    tools_enabled: Optional[bool] = None
+    tool_max_iterations: Optional[int] = None
+    tool_timeout_seconds: Optional[int] = None
+    # 角色扮演（格式/属性开关 + 五个字符预算）
+    roleplay_format_enabled: Optional[bool] = None
+    roleplay_attributes_enabled: Optional[bool] = None
+    intro_chars: Optional[int] = None
+    background_chars: Optional[int] = None
+    world_chars: Optional[int] = None
+    mes_example_chars: Optional[int] = None
+    pinned_chars: Optional[int] = None
+    # 各功能总开关
+    web_enabled: Optional[bool] = None
+    browser_enabled: Optional[bool] = None
+    pixiv_enabled: Optional[bool] = None
+    image_enabled: Optional[bool] = None
+    galgame_enabled: Optional[bool] = None
+    # Galgame 单轮工具循环上限
+    galgame_max_loops: Optional[int] = None
+
+    # 可空覆盖字段名 → 类型（b=布尔/i=整数）；to/from_dict 与 API 共用
+    OVERRIDE_FIELDS = {
+        "tools_enabled": "b",
+        "tool_max_iterations": "i",
+        "tool_timeout_seconds": "i",
+        "roleplay_format_enabled": "b",
+        "roleplay_attributes_enabled": "b",
+        "intro_chars": "i",
+        "background_chars": "i",
+        "world_chars": "i",
+        "mes_example_chars": "i",
+        "pinned_chars": "i",
+        "web_enabled": "b",
+        "browser_enabled": "b",
+        "pixiv_enabled": "b",
+        "image_enabled": "b",
+        "galgame_enabled": "b",
+        "galgame_max_loops": "i",
+    }
+
+    def to_dict(self) -> Dict[str, Any]:
+        out = {
+            "keep_turns": int(self.keep_turns or 0),
+            "auto_recall": bool(self.auto_recall),
+            "auto_recall_max": int(self.auto_recall_max or 5),
+            "extract_every_turns": int(self.extract_every_turns or 0),
+        }
+        for key in self.OVERRIDE_FIELDS:
+            out[key] = getattr(self, key)  # None 原样落盘 = 跟随默认
+        return out
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "UserSettings":
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(d.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        keep = max(0, _int("keep_turns", 0))
+        recall_max = max(1, min(20, _int("auto_recall_max", 5)))
+        every = max(0, _int("extract_every_turns", 10))
+        kwargs = dict(
+            keep_turns=keep,
+            auto_recall=bool(d.get("auto_recall", False)),
+            auto_recall_max=recall_max,
+            extract_every_turns=every,
+        )
+        # 可空覆盖：仅接受 bool/int；None 与缺键都表示跟随默认（0/False 是合法覆盖值）
+        for key, kind in cls.OVERRIDE_FIELDS.items():
+            if key not in d or d[key] is None:
+                continue
+            try:
+                kwargs[key] = bool(d[key]) if kind == "b" else int(d[key])
+            except (TypeError, ValueError):
+                continue
+        return cls(**kwargs)
+
+
+def load_user_settings(path: Path) -> UserSettings:
+    """读用户设置；文件不存在或内容损坏时回退默认实例。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return UserSettings.from_dict(data)
+    except Exception:
+        pass
+    return UserSettings()
+
+
+def save_user_settings(path: Path, settings: UserSettings) -> None:
+    """原子写入用户设置（.tmp + os.replace）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings.to_dict(), f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
 
 def migrate_legacy(data_dir: Path) -> None:
     """旧数据并入管理员目录：单用户时代的 data/characters|worlds|sessions，
@@ -179,6 +346,8 @@ class UserScope:
     upload_dir: Path
     char_memory: Any = None      # CharacterMemoryStore：角色级跨会话记忆簿
     level: int = 0
+    user_settings: Any = None    # UserSettings：该用户的个人设置（keep_turns 等）
+    settings_path: Any = None    # Path：data/{uid}/settings.json
     # LoreQuerier 复用缓存：key=角色/世界内容签名，容量 32 FIFO
     _querier_cache: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -200,6 +369,10 @@ class UserScope:
                 self._querier_cache.pop(next(iter(self._querier_cache)))
         return q
 
+    def save_user_settings(self) -> None:
+        """把当前 user_settings 原子写回 settings.json。"""
+        save_user_settings(self.settings_path, self.user_settings)
+
     @classmethod
     def build(cls, uid: str, config: AppConfig, data_dir: Path,
               user_store: Optional["UserStore"] = None) -> "UserScope":
@@ -214,6 +387,8 @@ class UserScope:
         from .lore.character_memory import CharacterMemoryStore
 
         char_memory = CharacterMemoryStore(user_dir)
+        settings_path = user_dir / "settings.json"
+        user_settings = load_user_settings(settings_path)
         if uid == ADMIN_UID:
             level = ADMIN_LEVEL
         elif user_store is not None:
@@ -222,4 +397,5 @@ class UserScope:
         else:
             level = 0
         return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir,
-                   char_memory=char_memory, level=level)
+                   char_memory=char_memory, level=level,
+                   user_settings=user_settings, settings_path=settings_path)

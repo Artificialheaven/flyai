@@ -46,10 +46,16 @@ class ProviderPayload(BaseModel):
     api_key: str = ""
     model: str = ""
     params: dict = {}
+    # 深度思考开关开启时合并的请求参数；None=不传（保留原值）
+    thinking_params: Optional[dict] = None
+    # 开关关闭时合并的请求参数（关掉默认思考的模型）；None=不传
+    thinking_off_params: Optional[dict] = None
     vision: bool = False
     owner: Optional[str] = None
     shared: Optional[bool] = None
     min_level: Optional[int] = None
+    # 计费倍率（普通用户每轮扣 1×rate）；None=不改
+    rate: Optional[float] = None
 
 
 class ImageModelPayload(BaseModel):
@@ -81,6 +87,7 @@ class ConfigPayload(BaseModel):
     web_search: Optional[dict] = None
     browser: Optional[dict] = None
     tts: Optional[dict] = None
+    galgame: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -101,6 +108,26 @@ def _masked_image_model(m: ImageModelConfig) -> dict:
     return d
 
 
+def _public_provider(p: ProviderConfig) -> dict:
+    """他人共享模型对普通用户的精简视图：不含 base_url/归属/api_key/参数。"""
+    return {
+        "id": p.id,
+        "model": p.model,
+        "vision": p.vision,
+        "rate": p.rate,
+        "min_level": p.min_level,
+    }
+
+
+def _public_image_model(m: ImageModelConfig) -> dict:
+    return {
+        "id": m.id,
+        "name": m.name,
+        "model": m.model,
+        "min_level": m.min_level,
+    }
+
+
 def _masked_config(state, uid: Optional[str] = None):
     """返回脱敏后的配置视图。指定 uid 时按权限过滤模型。"""
     cfg = state.config
@@ -119,25 +146,44 @@ def _masked_config(state, uid: Optional[str] = None):
         providers = []
         image_models = []
 
-    emb = cfg.embeddings.dict()
-    emb["api_key"] = mask_api_key(cfg.embeddings.api_key) if cfg.embeddings.api_key else ""
-    return {
+    # 模型视图：管理员全量；普通用户对「本人自建」拿到可编辑视图（含自己的
+    # base_url/掩码 key），对「他人共享」只拿精简视图（无 URL/归属/key/参数）
+    provider_views = []
+    for p in providers:
+        if uid == ADMIN_UID or p.owner == uid:
+            provider_views.append(_masked_provider(p))
+        else:
+            provider_views.append(_public_provider(p))
+    image_views = []
+    for m in image_models:
+        if uid == ADMIN_UID or m.owner == uid:
+            image_views.append(_masked_image_model(m))
+        else:
+            image_views.append(_public_image_model(m))
+
+    out = {
         "active_provider": cfg.active_provider,
-        "providers": [_masked_provider(p) for p in providers],
+        "providers": provider_views,
         "tools": cfg.tools.dict(),
         "history": cfg.history.dict(),
         "server": cfg.server.dict(),
         "roleplay": cfg.roleplay.dict(),
-        "embeddings": emb,
         "image_generation": cfg.image_generation.dict(),
-        "image_models": [_masked_image_model(m) for m in image_models],
+        "image_models": image_views,
         # SD 段不含密钥，对所有登录用户可见（前端据此显示引擎开关）
         "stable_diffusion": cfg.stable_diffusion.dict(),
         "pixiv": cfg.pixiv.dict(),
         "web_search": cfg.web_search.dict(),
         "browser": cfg.browser.dict(),
+        "galgame": cfg.galgame.dict(),
         "tts": _masked_tts(cfg),
     }
+    # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
+    if uid == ADMIN_UID:
+        emb = cfg.embeddings.dict()
+        emb["api_key"] = mask_api_key(cfg.embeddings.api_key) if cfg.embeddings.api_key else ""
+        out["embeddings"] = emb
+    return out
 
 
 def _masked_tts(cfg: AppConfig) -> dict:
@@ -259,6 +305,9 @@ def put_config(payload: ConfigPayload, request: Request):
         td["api_key"] = _credit_key(td.get("api_key", ""), cfg.tts.api_key)
         cfg.tts = TtsSettings.parse_obj(td)
 
+    if payload.galgame is not None:
+        cfg.galgame = type(cfg.galgame).parse_obj(dict(payload.galgame))
+
     _persist(state)
     return _masked_config(state, ADMIN_UID)
 
@@ -291,6 +340,114 @@ async def test_connection(payload: TestPayload, request: Request):
     if provider is None:
         raise HTTPException(400, "提供商不可用")
     return {"ok": True, "message": "连通性检测（v1 简化为状态可用）"}
+
+
+# ---- 用户个人设置（data/{uid}/settings.json，所有登录用户可用）----
+
+class MySettingsPayload(BaseModel):
+    keep_turns: Optional[int] = 0
+    auto_recall: Optional[bool] = False
+    auto_recall_max: Optional[int] = 5
+    extract_every_turns: Optional[int] = 10
+
+    # 功能开关覆盖：None（JSON null）= 跟随全局默认
+    tools_enabled: Optional[bool] = None
+    tool_max_iterations: Optional[int] = None
+    tool_timeout_seconds: Optional[int] = None
+    roleplay_format_enabled: Optional[bool] = None
+    roleplay_attributes_enabled: Optional[bool] = None
+    intro_chars: Optional[int] = None
+    background_chars: Optional[int] = None
+    world_chars: Optional[int] = None
+    mes_example_chars: Optional[int] = None
+    pinned_chars: Optional[int] = None
+    web_enabled: Optional[bool] = None
+    browser_enabled: Optional[bool] = None
+    pixiv_enabled: Optional[bool] = None
+    image_enabled: Optional[bool] = None
+    galgame_enabled: Optional[bool] = None
+    galgame_max_loops: Optional[int] = None
+
+
+@router.get("/my/settings")
+def get_my_settings(request: Request):
+    scope = request.app.state.flyai.user(request)
+    return scope.user_settings.to_dict()
+
+
+@router.put("/my/settings")
+def put_my_settings(payload: MySettingsPayload, request: Request):
+    scope = request.app.state.flyai.user(request)
+
+    def _as_int(value, name, default, minimum, maximum):
+        try:
+            n = int(value if value is not None else default)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{name} 必须是整数")
+        return max(minimum, min(maximum, n))
+
+    scope.user_settings.keep_turns = _as_int(
+        payload.keep_turns, "keep_turns", 0, 0, 500)
+    scope.user_settings.auto_recall = bool(payload.auto_recall)
+    scope.user_settings.auto_recall_max = _as_int(
+        payload.auto_recall_max, "auto_recall_max", 5, 1, 20)
+    scope.user_settings.extract_every_turns = _as_int(
+        payload.extract_every_turns, "extract_every_turns", 10, 0, 500)
+
+    # ---- 功能开关覆盖（None=跟随全局默认）----
+    us = scope.user_settings
+
+    def _opt_int(value, name, minimum, maximum):
+        if value is None:
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{name} 必须是整数或 null")
+        return max(minimum, min(maximum, n))
+
+    us.tools_enabled = (None if payload.tools_enabled is None
+                        else bool(payload.tools_enabled))
+    us.tool_max_iterations = _opt_int(
+        payload.tool_max_iterations, "tool_max_iterations", 0, 40)
+    us.tool_timeout_seconds = _opt_int(
+        payload.tool_timeout_seconds, "tool_timeout_seconds", 5, 600)
+    us.roleplay_format_enabled = (
+        None if payload.roleplay_format_enabled is None
+        else bool(payload.roleplay_format_enabled))
+    us.roleplay_attributes_enabled = (
+        None if payload.roleplay_attributes_enabled is None
+        else bool(payload.roleplay_attributes_enabled))
+    for key, label in (
+        ("intro_chars", "intro_chars"),
+        ("background_chars", "background_chars"),
+        ("world_chars", "world_chars"),
+        ("mes_example_chars", "mes_example_chars"),
+        ("pinned_chars", "pinned_chars"),
+    ):
+        setattr(us, key, _opt_int(getattr(payload, key), label, 0, 50000))
+    for key in ("web_enabled", "browser_enabled", "pixiv_enabled",
+                "image_enabled", "galgame_enabled"):
+        v = getattr(payload, key)
+        setattr(us, key, None if v is None else bool(v))
+    us.galgame_max_loops = _opt_int(
+        payload.galgame_max_loops, "galgame_max_loops", 1, 100)
+
+    scope.save_user_settings()
+    return scope.user_settings.to_dict()
+
+
+@router.get("/my/quota")
+def get_my_quota(request: Request):
+    """当前用户对话次数额度；管理员返回 {"unlimited": true}。"""
+    state = request.app.state.flyai
+    uid = _uid(request)
+    if uid == ADMIN_UID:
+        return {"unlimited": True}
+    from ..billing import quota_view
+
+    q = quota_view(state.user_store, uid)
+    return q if q is not None else {"unlimited": True}
 
 
 # ---- 自建 LLM 提供商 CRUD ----
@@ -326,10 +483,13 @@ def create_provider_model(payload: ProviderPayload, request: Request):
         api_key=payload.api_key,
         model=payload.model,
         params=payload.params or {},
+        thinking_params=payload.thinking_params or {},
+        thinking_off_params=payload.thinking_off_params or {},
         vision=payload.vision,
         owner=uid,
         shared=False,
         min_level=0,
+        rate=(payload.rate if payload.rate is not None else 1.0),
     )
     state.config.providers.append(item)
     _persist(state)
@@ -350,10 +510,13 @@ def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
         "api_key": _credit_key(payload.api_key, item.api_key),
         "model": payload.model if payload.model else item.model,
         "params": payload.params or item.params,
+        "thinking_params": payload.thinking_params or item.thinking_params,
+        "thinking_off_params": payload.thinking_off_params or item.thinking_off_params,
         "vision": payload.vision,
         "owner": item.owner,
         "shared": item.shared,
         "min_level": item.min_level,
+        "rate": (payload.rate if payload.rate is not None else item.rate),
     }
     new_item = ProviderConfig.parse_obj(merged)
     idx = state.config.providers.index(item)

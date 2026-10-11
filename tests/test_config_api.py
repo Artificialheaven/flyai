@@ -227,8 +227,35 @@ def test_user_low_level_get_filtered(tmp_path):
     assert pids == {"deepseek"}  # gated 完全消失
     mids = {m["id"] for m in view["image_models"]}
     assert mids == {"img-open"}  # img-gated 完全消失
-    # 可见条目 key 仍是掩码
-    assert view["providers"][0]["api_key"] == mask_api_key(CHAT_KEY)
+    # 他人共享模型：只露必要字段，不下发 base_url/归属/api_key/参数
+    p = view["providers"][0]
+    assert set(p.keys()) == {"id", "model", "vision", "rate", "min_level"}
+    assert p["model"] == "deepseek-chat"
+    m = view["image_models"][0]
+    assert set(m.keys()) == {"id", "name", "model", "min_level"}
+    # 嵌入配置（含掩码 key）不对普通用户下发
+    assert "embeddings" not in view
+    # 全局功能段仍下发（作为"跟随默认"的默认值）
+    assert view["galgame"]["enabled"] is True
+
+
+def test_user_sees_full_fields_for_own_models(tmp_path):
+    """本人自建模型仍可拿到 base_url/掩码 key（编辑自己的模型不受影响）。"""
+    state = _mkstate(tmp_path)
+    state.user_store.add("u10", level=10)
+    state.config.providers.append(
+        ProviderConfig(id="mine", base_url="https://mine.example/v1",
+                       api_key="my-secret", model="my-model",
+                       owner="u10", shared=False)
+    )
+    view = get_config(_req(state, "u10"))
+    mine = next(p for p in view["providers"] if p["id"] == "mine")
+    assert mine["base_url"] == "https://mine.example/v1"
+    assert mine["owner"] == "u10"
+    assert mine["api_key"] == mask_api_key("my-secret")
+    # 管理员的共享模型在同一视图里仍脱敏
+    shared = next(p for p in view["providers"] if p["id"] == "deepseek")
+    assert "base_url" not in shared and "owner" not in shared
 
 
 def test_user_boundary_level_sees_gated(tmp_path):
@@ -450,7 +477,8 @@ def test_tts_disable_hot_unregisters(tmp_path):
     assert state.registry.get("text_to_speech") is None
 
 
-def test_browser_enable_hot_creates_manager(tmp_path):
+def test_browser_enable_hot_and_lazy_manager(tmp_path):
+    """启用浏览器后工具立即可用；管理器在首个请求 get_browser() 时才创建。"""
     state = _real_state(tmp_path)
     state.reload_tools()
     assert state.browser is None
@@ -460,8 +488,12 @@ def test_browser_enable_hot_creates_manager(tmp_path):
         "proxy": "http://127.0.0.1:7897",
     }), _req(state))
 
-    assert state.browser is not None
+    # 保存配置不再立即创建管理器（懒创建）
+    assert state.browser is None
     assert state.registry.get("browser_open") is not None
+    manager = state.get_browser()
+    assert manager is not None
+    assert state.get_browser() is manager  # 单例
 
 
 def test_tts_voices_and_min_level_roundtrip(tmp_path):

@@ -25,6 +25,8 @@ class RoomCreate(BaseModel):
     title: Optional[str] = None
     character_ids: List[str] = []
     world_id: Optional[str] = None
+    # normal=普通房间（可多角色）；galgame=Galgame 模式（单角色视觉小说）
+    mode: str = "normal"
 
 
 class GroupCreate(BaseModel):
@@ -107,13 +109,27 @@ def _apply_member_seat_settings(state, sc, m, provider_id, memory_mode,
 @router.post("/rooms")
 def create_room(body: RoomCreate, request: Request):
     """建房间：每个 AI 角色自动获得一条私聊窗口。"""
-    sc = request.app.state.flyai.user(request)
+    state = request.app.state.flyai
+    sc = state.user(request)
     from ..sessions.models import RoomMember, Thread
+    from .. import feature_prefs
+
+    is_galgame = (body.mode or "normal") == "galgame"
+    # Galgame 门槛：全局默认或用户覆盖关闭时不允许创建（管理员默认开放）
+    if is_galgame and not feature_prefs.feature_enabled(
+        "galgame", state.config, getattr(sc, "user_settings", None)
+    ):
+        raise HTTPException(403, "Galgame 模式未开放（默认关闭或被管理员禁用）")
+    # Galgame 第一期：单角色（先校验再落盘，避免留下空会话文件）
+    if is_galgame and len(body.character_ids or []) != 1:
+        raise HTTPException(400, "Galgame 模式必须且只能选择一个角色")
+    if body.world_id and not sc.lore.get_world(body.world_id):
+        raise HTTPException(400, "世界观不存在")
 
     s = sc.store.create(title=body.title or "新会话")
+    if is_galgame:
+        s.mode = "galgame"
     if body.world_id:
-        if body.world_id and not sc.lore.get_world(body.world_id):
-            raise HTTPException(400, "世界观不存在")
         s.world_id = body.world_id
     s.members.append(RoomMember(name="你", is_user=True))  # 用户座位
     for cid in (body.character_ids or []):

@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 
@@ -240,11 +240,9 @@ def _export_card(c, fallback_uid) -> dict:
     return d
 
 
-@router.get("/sessions/{sid}/export")
-def session_export(sid: str, request: Request):
-    """导出对话包：全部窗口的完整文本（含工具调用/结果）+ 角色卡（Author+ID）+ 世界观。"""
-    sc = request.app.state.flyai.user(request)
-    s = _must_get_session(sc, sid)
+def _build_export_data(sc, s) -> dict:
+    """导出包 data 部分：完整文本（含工具调用/结果）+ 角色卡 + 世界观。
+    JSON 导出与 zip 导出共用；zip 会再补 mode / 场景 / 语音映射。"""
     char = effective_character(s, sc.lore)
     world = effective_world(s, sc.lore)
 
@@ -262,7 +260,7 @@ def session_export(sid: str, request: Request):
         d = _export_card(char, sc.uid)
         cards.setdefault(d["ref"], d)
 
-    data = {
+    return {
         "session": {"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at, "attributes": s.attributes},
         "character": char.to_dict() if char else None,
         "world": world.to_dict() if world else None,
@@ -271,10 +269,47 @@ def session_export(sid: str, request: Request):
         "threads": [t.to_dict() for t in s.threads],
         "characters": list(cards.values()),
     }
-    body = {"type": "flyai-conversation", "version": 2, "name": s.title, "data": data}
+
+
+@router.get("/sessions/{sid}/export")
+def session_export(sid: str, request: Request):
+    """导出对话 JSON 包（v2，仅文本）。"""
+    sc = request.app.state.flyai.user(request)
+    s = _must_get_session(sc, sid)
+    body = {"type": "flyai-conversation", "version": 2,
+            "name": s.title, "data": _build_export_data(sc, s)}
     return JSONResponse(
         content=body,
         headers={"Content-Disposition": f'attachment; filename="conversation-{s.id[:8]}.json"'},
+    )
+
+
+@router.get("/sessions/{sid}/export-zip")
+def session_export_zip(sid: str, request: Request, include_tts: bool = True):
+    """导出自包含 zip 包（v3）：对话 + 立绘 / 背景 / BGM；include_tts=false
+    时不含已合成语音（同时清空语音映射，导入端按新文本重新合成）。"""
+    from pathlib import Path
+
+    from .. import transfer
+
+    sc = request.app.state.flyai.user(request)
+    s = _must_get_session(sc, sid)
+    data = _build_export_data(sc, s)
+    data["session"]["mode"] = s.mode or "normal"
+    data["galgame"] = s.galgame or {}
+    data["galgame_tts"] = (s.galgame_tts or {}) if include_tts else {}
+
+    body = {"type": "flyai-conversation", "version": 3,
+            "name": s.title, "data": data}
+    try:
+        raw = transfer.build_export_zip(body, sc.uid, Path(sc.upload_dir))
+    except transfer.TransferError as exc:
+        raise HTTPException(400, str(exc))
+    return Response(
+        content=raw,
+        media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="conversation-{s.id[:8]}.zip"'},
     )
 
 
@@ -285,34 +320,43 @@ class SessionImportPayload(BaseModel):
     data: dict = {}
 
 
-@router.post("/sessions/import")
-def import_session(payload: SessionImportPayload, request: Request):
-    """导入 flyai-conversation 导出包：重建为全新会话（新 id，不覆盖已有会话）。
+def _build_imported_session(d: dict, fallback_name: str) -> Session:
+    """由导出包 data 部分重建会话（新 id，不覆盖已有会话）。
 
-    随包角色卡：本库按 id 已存在 → 复用库引用；不存在 → 降为会话专属副本
-    （member.override），不塞进角色卡库。世界观同理。
+    v3 包额外恢复 mode / galgame 场景状态 / 语音映射；v2 包缺这些字段，
+    按普通会话处理。
     """
-    if payload.type != "flyai-conversation":
-        raise HTTPException(400, "不是 FlyAI 对话导出包（type 应为 flyai-conversation）")
-    if payload.version != 2:
-        raise HTTPException(400, "不支持的导出包版本: %s（仅支持 2）" % payload.version)
-    sc = request.app.state.flyai.user(request)
-    d = payload.data or {}
     if not isinstance(d, dict) or not isinstance(d.get("session"), dict):
         raise HTTPException(400, "导出包内容不完整")
     meta = d.get("session") or {}
 
-    s = Session(
+    mode = meta.get("mode") or "normal"
+    galgame = d.get("galgame") if isinstance(d.get("galgame"), dict) else {}
+    galgame_tts = (
+        d.get("galgame_tts") if isinstance(d.get("galgame_tts"), dict) else {}
+    )
+
+    return Session(
         id=uuid.uuid4().hex,  # 新会话 id：store 以 id 为文件名，复用会覆盖原会话
-        title=(meta.get("title") or payload.name or "导入的对话").strip() or "导入的对话",
+        title=(meta.get("title") or fallback_name or "导入的对话").strip() or "导入的对话",
         provider_id=meta.get("provider_id", "") or "",
         created_at=meta.get("created_at", "") or "",  # 保留原始创建时间
         attributes=meta.get("attributes", {}) or {},
         members=[RoomMember.from_dict(m) for m in d.get("members", []) or []],
         threads=[Thread.from_dict(t) for t in d.get("threads", []) or []],
         pinned=False,  # 不导入置顶，避免打乱当前排序
+        mode=mode,
+        galgame=galgame,
+        galgame_tts=galgame_tts,
     )
 
+
+def _resolve_import_cards_world(s: Session, d: dict, sc) -> Dict[str, int]:
+    """解析随包角色卡 / 世界观，并自愈线程成员引用。
+
+    随包角色卡：本库按 id 已存在 → 复用库引用；不存在 → 降为会话专属副本
+    （member.override），不塞进角色卡库。世界观同理。
+    """
     # 随包角色卡按 id 索引；导出时补的 ref 字段不属于卡本身，副本落盘前去掉
     packaged = {}
     for c in d.get("characters", []) or []:
@@ -355,10 +399,73 @@ def import_session(payload: SessionImportPayload, request: Request):
     for t in s.threads:
         t.member_ids = [mid for mid in t.member_ids if mid in known_mids]
 
+    return {"reused_cards": reused, "scoped_cards": converted}
+
+
+@router.post("/sessions/import")
+def import_session(payload: SessionImportPayload, request: Request):
+    """导入 flyai-conversation JSON 导出包（v2，仅文本）：重建为全新会话。"""
+    if payload.type != "flyai-conversation":
+        raise HTTPException(400, "不是 FlyAI 对话导出包（type 应为 flyai-conversation）")
+    if payload.version != 2:
+        raise HTTPException(400, "不支持的导出包版本: %s（仅支持 2）" % payload.version)
+    sc = request.app.state.flyai.user(request)
+    d = payload.data or {}
+    s = _build_imported_session(d, payload.name)
+    summary = _resolve_import_cards_world(s, d, sc)
     sc.store.save(s)
     out = _session_dict(s)
-    out["import_summary"] = {"reused_cards": reused, "scoped_cards": converted}
+    out["import_summary"] = summary
     return out
+
+
+def install_session_zip(sc, raw: bytes, fallback_name: str = ""):
+    """由 v3 zip 原始字节重建会话并释放素材（市场安装与导入路由共用）。
+
+    立绘 / 背景 / BGM / 语音释放到本账号上传目录，文本中的 URL 同步改写。
+    返回 _session_dict（含 import_summary）。
+    """
+    from pathlib import Path
+
+    from .. import transfer
+
+    try:
+        text, entries = transfer.open_export_zip(raw)
+        text = transfer.rewrite_urls(text, entries, sc.uid)
+        envelope = json.loads(text)
+    except transfer.TransferError as exc:
+        raise HTTPException(400, str(exc))
+    except ValueError:
+        raise HTTPException(400, "对话数据解析失败")
+
+    if envelope.get("type") != "flyai-conversation":
+        raise HTTPException(400, "不是 FlyAI 对话导出包（type 应为 flyai-conversation）")
+    if envelope.get("version") != 3:
+        raise HTTPException(400, "不支持的 zip 包版本: %s（仅支持 3）" % envelope.get("version"))
+
+    d = envelope.get("data") or {}
+    s = _build_imported_session(d, str(envelope.get("name") or fallback_name or ""))
+    summary = _resolve_import_cards_world(s, d, sc)
+
+    try:
+        transfer.materialize_files(entries, Path(sc.upload_dir))
+    except transfer.TransferError as exc:
+        raise HTTPException(400, str(exc))
+
+    sc.store.save(s)
+    out = _session_dict(s)
+    summary["assets"] = len(entries)
+    out["import_summary"] = summary
+    return out
+
+
+@router.post("/sessions/import-zip")
+async def import_session_zip(request: Request, file: UploadFile = File(...)):
+    """导入自包含 zip 迁移包（v3）：重建会话并把立绘 / 背景 / BGM / 语音
+    释放到本账号上传目录，对话文本中的 URL 同步改写为本账号地址。"""
+    sc = request.app.state.flyai.user(request)
+    raw = await file.read()
+    return install_session_zip(sc, raw)
 
 
 class CompressApplyBody(BaseModel):
@@ -366,15 +473,24 @@ class CompressApplyBody(BaseModel):
 
 
 def _single_base_signatures(s, lore) -> Dict[str, str]:
-    """单 AI 会话当前有效角色/世界的签名（无则空签名）。"""
+    """单 AI 会话当前有效角色/世界的签名（无则空签名）。
+
+    已有会话副本时直接签原始 override dict；经 Character/World 对象往返会因
+    id 为空时重新生成 uuid 而让签名每次都变。
+    """
     from ..lore.diff import content_signature
 
-    char = effective_character(s, lore)
-    world = effective_world(s, lore)
-    return {
-        "character": content_signature(char.to_dict() if char else None),
-        "world": content_signature(world.to_dict() if world else None),
-    }
+    if s.character_override:
+        char_sig = content_signature(s.character_override)
+    else:
+        char = effective_character(s, lore)
+        char_sig = content_signature(char.to_dict() if char else None)
+    if s.world_override:
+        world_sig = content_signature(s.world_override)
+    else:
+        world = effective_world(s, lore)
+        world_sig = content_signature(world.to_dict() if world else None)
+    return {"character": char_sig, "world": world_sig}
 
 
 @router.post("/sessions/{sid}/compress")
@@ -413,10 +529,14 @@ async def session_compress(sid: str, request: Request):
 
         member_diffs = {mid: character_diff(before_members[mid], planned["members"][mid])
                         for mid in planned["members"]}
+        scoped = bool(
+            s.world_override
+            or any(m.override for m in s.members if not m.is_user)
+        )
         return {
             "room": True,
             "proposal_id": pid,
-            "scoped": True,
+            "scoped": scoped,
             "before": {"members": before_members, "world": before_world},
             "after": {"members": planned["members"], "world": planned["world"]},
             "diff": {"members": member_diffs, "world": world_diff(before_world, planned["world"])},
@@ -442,7 +562,7 @@ async def session_compress(sid: str, request: Request):
     return {
         "room": False,
         "proposal_id": pid,
-        "scoped": True,
+        "scoped": bool(s.character_override or s.world_override),
         "before": {"character": before_char, "world": before_world},
         "after": {
             "character": new_char.to_dict(),
@@ -511,6 +631,60 @@ async def session_compress_apply(sid: str, body: CompressApplyBody, request: Req
     }
 
 
+class CompressSaveAsBody(BaseModel):
+    proposal_id: str = ""
+
+
+@router.post("/sessions/{sid}/compress/save-as")
+def session_compress_save_as(sid: str, body: CompressSaveAsBody, request: Request):
+    """把压缩结果另存为角色库中的新副本，不改动当前会话副本。
+
+    新卡 parent_id 指向会话绑定的根角色卡，在根卡的副本列表里可见。
+    房间会话为每个受影响的 AI 成员各存一张；世界设定不入库（仍随会话）。
+    不消费提案——之后仍可再选择应用到当前副本。
+    """
+    state = request.app.state.flyai
+    sc = state.user(request)
+    s = _must_get_session(sc, sid)
+
+    pid = (body.proposal_id or "").strip()
+    p = state.get_compress_proposal(pid, sc.uid)
+    if p is None:
+        raise HTTPException(404, "压缩提案不存在或已过期，请重新压缩")
+    if p.get("sid") != s.id:
+        raise HTTPException(400, "提案不属于该会话")
+
+    from ..lore.models import Character
+
+    raw = p["raw"]
+    saved = []
+    if p.get("room"):
+        planned = plan_room_compression(s, raw, sc.lore)
+        for mid, d in planned["members"].items():
+            m = s.member(mid)
+            d["id"] = uuid.uuid4().hex
+            d["parent_id"] = (m.character_id or d.get("parent_id") or "")
+            d["public"] = False
+            new_card = Character.from_dict(d)
+            sc.lore.save_character(new_card)
+            saved.append({"id": new_card.id, "name": new_card.name})
+    else:
+        from ..lore.gen import apply_conversation_compression
+
+        char = effective_character(s, sc.lore)
+        world = effective_world(s, sc.lore)
+        if char is None:
+            char = Character(author=sc.uid)
+        new_char, _new_world = apply_conversation_compression(char, world, raw)
+        new_char.id = uuid.uuid4().hex
+        new_char.parent_id = (s.character_id or char.id or "")
+        new_char.public = False
+        sc.lore.save_character(new_char)
+        saved.append({"id": new_char.id, "name": new_char.name})
+
+    return {"characters": saved}
+
+
 def _session_dict(s, with_messages: bool = False, lore=None):
     d = {
         "id": s.id,
@@ -526,6 +700,9 @@ def _session_dict(s, with_messages: bool = False, lore=None):
         "members": [m.to_dict() for m in s.members],
         "threads": [t.to_dict() for t in s.threads],
         "token_usage": s.token_usage or {},
+        "mode": getattr(s, "mode", "normal") or "normal",
+        "galgame": getattr(s, "galgame", None) or {},
+        "galgame_tts": getattr(s, "galgame_tts", None) or {},
     }
     if with_messages:
         d["messages"] = [m.to_dict() for m in s.messages]

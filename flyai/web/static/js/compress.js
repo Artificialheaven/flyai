@@ -11,14 +11,25 @@ function downloadJSON(obj, filename) {
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(a.href);
 }
+function downloadBlob(blob, filename) {
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+}
 function downloadConversation() {
+  // 自包含 zip：对话 + 立绘 / 背景 / BGM / 已合成语音
   var s = currentSession(); if (!s) return;
-  fetch("/api/sessions/" + s.id + "/export", { headers: authHeaders() })
-    .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(function (obj) { downloadJSON(obj, (obj.name || "conversation") + ".json"); })
+  fetch(apiUrl("/api/sessions/" + s.id + "/export-zip"), { headers: authHeaders() })
+    .then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.blob();
+    })
+    .then(function (blob) { downloadBlob(blob, "conversation-" + s.id.slice(0, 8) + ".zip"); })
     .catch(function (e) { showToast("导出对话失败: " + e.message, "err"); });
 }
-var compressReview = null; // {sid, room, pid}
+var compressReview = null; // {sid, room, pid, scoped}
 
 function _hideBtn(b) { if (b) b.classList.add("hidden"); }
 function _showBtn(b) { if (b) b.classList.remove("hidden"); }
@@ -30,14 +41,20 @@ function openCompressDialog() {
   el.exportBody.innerHTML = '<div class="sub">压缩中，请稍候…</div>';
   el.exportMsg.textContent = "";
   el.exportMsg.className = "msg-bar";
-  [el.btnExportApply, el.btnExportDiscard, el.btnExportClose, el.btnExportDownload, el.btnExportPublish].forEach(_hideBtn);
+  [el.btnExportApply, el.btnExportDiscard, el.btnExportClose, el.btnExportDownload, el.btnExportPublish, el.btnExportSaveAs].forEach(_hideBtn);
   safeCloseDialogs();
   if (el.exportDialog.showModal) el.exportDialog.showModal();
   fetchJSON("/api/sessions/" + s.id + "/compress", { method: "POST" }).then(function (res) {
-    compressReview = { sid: s.id, room: !!res.room, pid: res.proposal_id };
-    el.exportSub.textContent = "压缩提案 · 确认后写入当前会话副本（库主卡不受影响，漏列的条目会原样保留）";
+    var scoped = !!res.scoped;
+    compressReview = { sid: s.id, room: !!res.room, pid: res.proposal_id, scoped: scoped };
+    el.exportSub.textContent = scoped
+      ? "压缩提案 · 可写入当前会话副本，或另存为角色库中的新副本（不动当前副本），也可直接下载压缩包。库主卡不受影响，漏列的条目会原样保留。"
+      : "压缩提案 · 当前使用的是库主卡：确认后会先生成会话专属副本再写入，主卡不受影响；也可以另存为新副本到角色库，或直接下载压缩包。";
     el.exportBody.innerHTML = res.room ? renderRoomCompressDiff(res) : renderSingleCompressDiff(res);
+    el.btnExportApply.textContent = scoped ? "✓ 应用到当前副本" : "✓ 应用（生成会话副本）";
     _showBtn(el.btnExportApply);
+    _showBtn(el.btnExportSaveAs);
+    _showBtn(el.btnExportDownload);
     _showBtn(el.btnExportDiscard);
   }).catch(function (e) {
     el.exportSub.textContent = "压缩失败";
@@ -52,6 +69,26 @@ function discardCompressProposal() {
   if (el.exportDialog) el.exportDialog.close();
 }
 
+function saveCompressAsNewCopy() {
+  // 另存为角色库中的新副本：不动当前会话/主卡，提案也不消费，可继续应用或下载
+  if (!compressReview) return;
+  var review = compressReview;
+  el.btnExportSaveAs.disabled = true;
+  fetchJSON("/api/sessions/" + review.sid + "/compress/save-as", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: review.pid }),
+  }).then(function (out) {
+    var names = (out.characters || []).map(function (c) { return c.name; }).filter(Boolean);
+    showToast("已另存为新副本：" + (names.join("、") || "角色卡")
+      + (review.room ? "（世界观不入库，可下载压缩包留存）" : ""), "ok");
+  }).catch(function (e) {
+    showToast(e.message, "err");
+  }).finally(function () {
+    el.btnExportSaveAs.disabled = false;
+  });
+}
+
 function applyCompressProposal() {
   if (!compressReview) return;
   var review = compressReview;
@@ -59,7 +96,7 @@ function applyCompressProposal() {
   el.exportBody.innerHTML = '<div class="sub">写入会话副本中…</div>';
   el.exportMsg.textContent = "";
   el.exportMsg.className = "msg-bar";
-  [el.btnExportApply, el.btnExportDiscard].forEach(_hideBtn);
+  [el.btnExportApply, el.btnExportDiscard, el.btnExportSaveAs, el.btnExportDownload].forEach(_hideBtn);
   fetchJSON("/api/sessions/" + review.sid + "/compress/apply", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -328,7 +365,7 @@ function restoreSessionChar() {
 }
 function exportSessionChar() {
   var s = currentSession(); if (!s) return;
-  fetch("/api/sessions/" + s.id + "/character/export", { headers: authHeaders() })
+  fetch(apiUrl("/api/sessions/" + s.id + "/character/export"), { headers: authHeaders() })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (obj) { downloadJSON(obj, ((obj.data && obj.data.name) || "character") + ".json"); })
     .catch(function (e) { showToast("导出失败: " + e.message, "err"); });

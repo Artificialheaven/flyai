@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import AsyncIterator, Dict, List
 
 import httpx
@@ -13,6 +14,63 @@ import httpx
 from ..errors import ProviderError
 from ..schemas import Message, ToolCall
 from .base import BaseProvider, StreamEvent, StreamEventType
+
+
+def _content_is_tool_echo(content: str, calls: List[ToolCall]) -> bool:
+    """正文是否只是工具调用的回声（参数被厂商重复写进 content 的情况）。
+
+    判定极严：去掉 ```json 围栏与 <tool_call> 标签后，整段文本必须恰好是
+    JSON（对象或数组），且与本轮 tool_calls 的 name+arguments 逐个完全一致，
+    避免误伤正文中恰好包含 JSON 的正常回复。
+    """
+    raw = (content or "").strip()
+    if not raw or not calls:
+        return False
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+    if fenced:
+        raw = fenced.group(1).strip()
+    raw = re.sub(r"</?tool_call[^>]*>", "", raw).strip()
+    if not raw or raw[0] not in "[{":
+        return False
+    open_ch, close_ch = ("[", "]") if raw[0] == "[" else ("{", "}")
+    left, right = raw.find(open_ch), raw.rfind(close_ch)
+    if left < 0 or right <= left:
+        return False
+    # JSON 外侧只允许空白/标签残余，不允许夹带正文
+    if raw[:left].strip() or raw[right + 1:].strip():
+        return False
+    try:
+        obj = json.loads(raw[left:right + 1])
+    except json.JSONDecodeError:
+        return False
+    items = obj if isinstance(obj, list) else [obj]
+    if len(items) != len(calls) or not items:
+        return False
+    used = set()
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        name = item.get("name")
+        args = item.get("arguments", item.get("input")) if name else None
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                pass
+        for ci, c in enumerate(calls):
+            if ci in used:
+                continue
+            if name is None:
+                # 裸参数对象：单调用轮且参数完全一致
+                if len(calls) == 1 and item == c.arguments:
+                    used.add(ci)
+                    break
+            elif c.name == name and args == c.arguments:
+                used.add(ci)
+                break
+        else:
+            return False
+    return len(used) == len(calls)
 
 
 class OpenAICompatProvider(BaseProvider):
@@ -28,6 +86,7 @@ class OpenAICompatProvider(BaseProvider):
         self,
         messages: List[Message],
         tool_specs: List[dict],
+        deep_thinking: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
@@ -40,6 +99,17 @@ class OpenAICompatProvider(BaseProvider):
             body["tools"] = tool_specs
             body["tool_choice"] = "auto"
         body.update(self.cfg.params)
+        # 深度思考开关：在基础参数之后合并，确保开关参数优先于基础 params。
+        # 各厂商协议不统一，具体片段由模型配置给出：
+        # - thinking_params：开关开启时合并（默认不思考的模型靠它开启）
+        # - thinking_off_params：开关关闭时合并（火山/DeepSeek 新版等默认思考
+        #   的模型靠它显式关闭，如 {"thinking":{"type":"disabled"}}）
+        # 两者皆空则请求体不变，保留模型默认行为
+        if deep_thinking:
+            if getattr(self.cfg, "thinking_params", None):
+                body.update(self.cfg.thinking_params)
+        elif getattr(self.cfg, "thinking_off_params", None):
+            body.update(self.cfg.thinking_off_params)
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
 
         # stream_options 拿 token 用量；个别兼容厂商不认该字段（400），去掉重试一次
@@ -66,6 +136,7 @@ class OpenAICompatProvider(BaseProvider):
                 )
             # 工具调用按 index 累积
             call_acc: Dict[int, Dict] = {}
+            content_acc: List[str] = []
             finish_reason = None
             async for raw in resp.aiter_lines():
                 line = raw.strip()
@@ -98,6 +169,7 @@ class OpenAICompatProvider(BaseProvider):
                     finish_reason = choice["finish_reason"]
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
+                    content_acc.append(delta["content"])
                     yield StreamEvent(StreamEventType.CONTENT_DELTA, text=delta["content"])
                 # 思考内容：不同厂商字段名不同（reasoning_content / reasoning）
                 reasoning = delta.get("reasoning_content")
@@ -130,6 +202,12 @@ class OpenAICompatProvider(BaseProvider):
                         except json.JSONDecodeError:
                             args = {"_raw": raw_args}
                     calls.append(ToolCall(id=h["id"] or f"call_{idx}", name=h["name"], arguments=args))
+                # 个别厂商（部分中转/新版模型）会把同一次工具调用同时写进
+                # content（裸 JSON/代码块/工具标签）与 tool_calls：参数因此
+                # 混进回复正文。识别后下发整体替换，把回声正文清空。
+                full_content = "".join(content_acc)
+                if _content_is_tool_echo(full_content, calls):
+                    yield StreamEvent(StreamEventType.CONTENT_REPLACE, text="")
                 yield StreamEvent(StreamEventType.TOOL_CALLS, tool_calls=calls)
             elif finish_reason == "length":
                 raise ProviderError("模型输出达到 token 上限被截断")

@@ -2,9 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>登录 · FlyAI</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="static/style.css" />
   <style>
     body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
     .login-page { width: 100%; max-width: 380px; }
@@ -37,8 +37,18 @@
     <p class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">冀ICP备2025098938号-2</a></p>
   </div>
 
+  <script src="static/js/native.js"></script>
   <script>
     var $ = function (id) { return document.getElementById(id); };
+
+    // APK 内置页：接口指向写死的服务器；浏览器（服务器同源）模式留空
+    var APP_SERVER = "https://fly.eastcloud.top";
+    var isApp = window.Capacitor && typeof window.Capacitor.isNativePlatform === "function"
+      && window.Capacitor.isNativePlatform();
+    function apiUrl(u) { return isApp ? APP_SERVER + u : u; }
+
+    // 状态栏透明叠加（登录页固定深色主题 → 浅色图标）；浏览器下为空操作
+    NativeBar.init();
 
     function login() {
       var name = $("login-name").value.trim();
@@ -46,7 +56,7 @@
       var msg = $("login-msg");
       msg.className = "msg-bar";
       if (!name) { msg.textContent = "请输入用户名"; msg.className = "msg-bar err"; return; }
-      fetch("/api/auth/login", {
+      fetch(apiUrl("/api/auth/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name, password: password }),
@@ -58,7 +68,7 @@
         localStorage.setItem("flyai-uid", res.id);
         localStorage.setItem("flyai-role", res.role || "user");
         localStorage.setItem("flyai-level", String(res.level == null ? 0 : res.level));
-        window.location.href = "/";
+        window.location.href = isApp ? "index.html" : "/";
       }).catch(function (e) {
         msg.textContent = "登录失败: " + e.message;
         msg.className = "msg-bar err";

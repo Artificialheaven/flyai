@@ -1,0 +1,21 @@
+{
+  "name": "flyai-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FlyAI Android APK（Capacitor 外壳，页面内置；服务器写死 https://fly.eastcloud.top）",
+  "scripts": {
+    "copy-web": "node scripts/copy-web.js",
+    "sync": "npm run copy-web && cap sync android",
+    "build:debug": "npm run sync && node scripts/build-debug.js",
+    "build:release": "npm run sync && node scripts/build-debug.js assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.6"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0"
+  }
+}

@@ -31,6 +31,7 @@ function formatAudioTime(sec) {
 }
 
 function makeAudioCard(url, meta) {
+  url = assetUrl(url);
   var card = document.createElement("div");
   card.className = "audio-card";
   if (meta && meta.speaker) {

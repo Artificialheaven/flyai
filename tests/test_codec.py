@@ -87,7 +87,7 @@ def test_anthropic_thinking_blocks_replay():
         params={"thinking": {"enabled": True, "budget_tokens": 2048}},
     )
     prov = AnthropicProvider(cfg)
-    _, body = prov._encode_request(msgs)
+    _, body = prov._encode_request(msgs, thinking_on=True)
     asst = body[0]
     assert asst["content"][0] == {"type": "thinking", "thinking": "x", "signature": "sig"}
 
@@ -114,6 +114,17 @@ def test_message_images_roundtrip():
     back = Message.from_dict(d)
     assert back.images[0].media_type == "image/png"
     assert back.images[0].data == "ZmFrZWltZw=="
+
+
+def test_message_recall_roundtrip():
+    items = [{"source": "auto", "text": "去码头"}, {"source": "记忆簿", "text": "看星星"}]
+    msg = Message(role="assistant", content="好", recall=items)
+    d = msg.to_dict()
+    assert d["recall"] == items
+    back = Message.from_dict(d)
+    assert back.recall == items
+    # 旧数据没有 recall 字段时为 None，不报错
+    assert Message.from_dict({"role": "assistant", "content": "旧消息"}).recall is None
 
 
 def test_message_id_auto_generated_and_preserved():

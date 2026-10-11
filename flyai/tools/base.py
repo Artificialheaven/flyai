@@ -29,6 +29,8 @@ class ToolContext:
     allowed_read_dirs: List[Path] = field(default_factory=list)
     plugin_config: Dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+    # 当前聊天运行 id（交互式工具据此关联用户响应）
+    run_id: str = ""
     tool_settings: Optional[Any] = None
     # 按请求注入的服务，如 {'lore': LoreQuerier}
     services: Dict[str, Any] = field(default_factory=dict)
@@ -41,6 +43,8 @@ class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: Dict[str, Any] = {"type": "object", "properties": {}}
+    # 交互式工具（如等待用户选择）可能阻塞数分钟，注册表不对其施加超时
+    interactive: bool = False
 
     @abstractmethod
     async def run(self, arguments: Dict[str, Any], ctx: ToolContext) -> ToolResult:

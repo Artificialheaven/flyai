@@ -203,6 +203,7 @@ async def ark_generate(
     prompt: str,
     size: str,
     ref_images: Optional[List[Tuple[str, str]]] = None,
+    watermark: bool = True,
 ) -> Tuple[bytes, str, str]:
     """提交生图任务并下载图片。
 
@@ -227,7 +228,7 @@ async def ark_generate(
             "response_format": "url",
             "size": size,
             "stream": False,
-            "watermark": True,
+            "watermark": watermark,
         }
         if image_value is not None:
             body["image"] = image_value

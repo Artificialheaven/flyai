@@ -19,18 +19,17 @@ import re
 from datetime import date
 from typing import Any, Dict, List
 
-from ..providers.embedding import dot, normalize
 from .base import Tool, ToolContext, ToolResult
 
 _MAX_THREADS = 8          # 最多检索多少个包含自己的窗口
-_MAX_PASSAGES = 3         # 每个窗口最多返回的命中片段数
-_CONTEXT_RADIUS = 2       # 命中消息前后各带多少条上下文
+_MAX_PASSAGES = 3         # 每个窗口最多返回多少条命中消息
 _RECENT_TAIL = 8          # 无 topic 时每个窗口/记忆簿返回最近多少条
 _MAX_TEXT = 120           # 单条消息最多保留多少字符
 _TOTAL_BUDGET = 3000      # 整段返回给模型的字符上限
-_RAG_SCORE_WINDOW = 300   # 语义检索只在最新这么多条消息内排序
+_GLOBAL_TOP_K = 6         # 无 embedder 配置时跨窗口返回的总条数
 _BOOK_MAX_LINES = 10      # 角色记忆簿单次最多返回多少行
 _ROOM_MEM_MAX_LINES = 10  # 本房间记忆（member.memory）单次最多返回多少行
+_LEDGER_MAX_LINES = 6     # 剧情台账单次最多返回多少行
 
 
 def _char_id(member) -> str:
@@ -113,7 +112,7 @@ class QueryChatMemoryTool(Tool):
             return ToolResult(ok=False, output="[参数错误] 该参与者是用户而不是 AI")
 
         topic = str(arguments.get("topic") or "").strip().lower()
-        # 语义（RAG）检索仅在配置了 embeddings 且给了关键词时启用
+        # 语义路在配置了 embeddings 且给了关键词时启用；BM25 路始终可用
         embedder = services.get("embedder") if topic else None
 
         blocks: List[str] = []
@@ -121,6 +120,10 @@ class QueryChatMemoryTool(Tool):
         book = self._book_block(services, member, topic)
         if book:
             blocks.append(book)
+        # 剧情台账：物品/任务/伏笔的当前状态（与记忆簿同一挂载）
+        ledger_block = self._ledger_block(services, member, topic)
+        if ledger_block:
+            blocks.append(ledger_block)
         # 本房间记忆（member.memory）：原文同时完整注入在系统提示词里，
         # 但 AI 主动「回忆」时只信工具结果——不在这里给它，它就判定记忆为空，
         # 系统提示词里那份不会被当作检索证据
@@ -167,6 +170,33 @@ class QueryChatMemoryTool(Tool):
         )
 
     @staticmethod
+    def _ledger_block(services, member, topic: str):
+        """剧情台账命中条目；无存储/无条目/不该可见返回 None。"""
+        from ..memory.ledger import match_items, open_summary
+
+        mode = _book_read_mode(member)
+        if mode not in ("rw", "ro"):
+            return None
+        store = services.get("char_memory")
+        if store is None:
+            return None
+        ledger = store.load_ledger(_memory_owner(member))
+        if topic:
+            items = match_items(ledger, _topic_terms(topic),
+                                limit=_LEDGER_MAX_LINES)
+        else:
+            items = open_summary(ledger, limit_per_kind=2)
+        if not items:
+            return None
+        lines = [
+            "- [{0}/{1}] {2}: {3}".format(
+                it.kind, it.status, it.name, it.state
+            )
+            for it in items[:_LEDGER_MAX_LINES]
+        ]
+        return "[剧情台账]\n" + "\n".join(s[:_MAX_TEXT] for s in lines)
+
+    @staticmethod
     def _room_memory_block(member, topic: str):
         """本房间记忆（RoomMember.memory 的条目行）命中内容；无记忆/无命中返回 None。
 
@@ -198,28 +228,84 @@ class QueryChatMemoryTool(Tool):
     async def _collect(self, services, session, char_id: str, topic: str,
                        embedder=None, budget_start: int = 0) -> List[str]:
         thread_sets = self._candidate_sets(session, char_id)
-        # 有 topic + 配置了 embeddings → RAG 语义检索；服务出错则回退关键词
-        if topic and embedder is not None:
-            rag = await self._rag_search(services, session.id, char_id,
-                                         embedder, thread_sets, topic)
-            if rag is not None:
-                return rag
-        # 关键词 passage / 最近尾巴
         out: List[str] = []
         used = budget_start
+
+        if topic:
+            # 混合排序：向量余弦 + BM25 双路 RRF（embedder 缺失/失败自动 BM25 单路），
+            # 覆盖全部历史（消息向量走增量缓存，不产生重复 embedding 开销）
+            hits = await self._rank_all(
+                services, session.id, char_id, thread_sets, topic, embedder
+            )
+            log = services.get("recall_logs")
+            if log is not None:
+                try:
+                    log.add(kind="active", topic=topic, hits=len(hits))
+                except Exception:
+                    pass
+            for _score, label, who, text in hits:
+                block = "[{0}] {1}: {2}".format(
+                    label, who, text[:_MAX_TEXT]
+                )
+                if used + len(block) > _TOTAL_BUDGET:
+                    continue  # 可能后面有条更短的放得下
+                out.append(block)
+                used += len(block)
+            return out
+
+        # 无 topic：每个窗口取最近尾巴
         for _tid, label, msgs in thread_sets:
             if used >= _TOTAL_BUDGET:
                 break
-            passages = self._matched_passages(msgs, topic) if topic else [msgs[-_RECENT_TAIL:]]
-            for p in passages[-_MAX_PASSAGES:]:
-                block = "[{0}] {1}".format(
-                    label, " | ".join(f"{w}: {txt[:_MAX_TEXT]}" for w, txt, _i in p)
-                )
-                if used + len(block) > _TOTAL_BUDGET:
-                    break
-                out.append(block)
-                used += len(block)
+            tail = msgs[-_RECENT_TAIL:]
+            block = "[{0}] {1}".format(
+                label,
+                " | ".join(
+                    f"{w}: {txt[:_MAX_TEXT]}" for w, txt, _i in tail
+                ),
+            )
+            if used + len(block) > _TOTAL_BUDGET:
+                continue
+            out.append(block)
+            used += len(block)
         return out
+
+    async def _rank_all(self, services, sid, char_id, thread_sets,
+                        topic: str, embedder) -> List:
+        """逐窗口混合排序（向量缓存键按窗口隔离），全局按分数取 top-k。
+
+        返回 [(score, label, who, text), ...]。
+        """
+        from ..memory.recall import Candidate, hybrid_rank
+
+        cache = services.get("memory_vec_cache")
+        all_scored: List = []
+        for tid, label, msgs in thread_sets:
+            cands = [
+                Candidate(
+                    text=text, kind="message", position=i,
+                    label=label, who=who, identity=ident,
+                )
+                for i, (who, text, ident) in enumerate(msgs)
+            ]
+            ranked = await hybrid_rank(
+                cands, topic,
+                embedder=embedder,
+                vec_cache=cache,
+                cache_key=(sid, char_id, tid),
+            )
+            for cand, score in ranked[:_MAX_PASSAGES]:
+                all_scored.append((score, label, cand.who, cand.text))
+
+        all_scored.sort(key=lambda x: x[0], reverse=True)
+        top_k = _GLOBAL_TOP_K
+        if embedder is not None:
+            try:
+                top_k = int(getattr(embedder.cfg, "top_k", _GLOBAL_TOP_K)
+                            or _GLOBAL_TOP_K)
+            except (AttributeError, TypeError, ValueError):
+                top_k = _GLOBAL_TOP_K
+        return all_scored[:max(1, top_k)]
 
     @staticmethod
     def _candidate_sets(session, char_id: str):
@@ -250,66 +336,6 @@ class QueryChatMemoryTool(Tool):
                 label = t.title or ("群聊" if t.kind == "group" else "私聊")
                 sets.append((t.id, label, msgs))
         return sets[:_MAX_THREADS]
-
-    async def _rag_search(self, services, sid, char_id, embedder, thread_sets,
-                          topic: str):
-        """RAG 语义检索：查询向量化；消息向量走增量缓存（只 embed 新增消息），
-        在最新 _RAG_SCORE_WINDOW 条内按余弦相似度取 top-k。
-
-        任何嵌入服务异常返回 None，由调用方回退关键词检索。
-        """
-        cache = services.get("memory_vec_cache")
-        try:
-            qv = (await embedder.embed([topic]))[0]
-        except Exception:
-            return None
-        scored = []
-        try:
-            for tid, label, msgs in thread_sets:
-                if cache is not None:
-                    desired = [(ident, text) for _w, text, ident in msgs]
-                    vecs = await cache.vectors_for(
-                        (sid, char_id, tid), desired, embedder
-                    )
-                else:
-                    vecs = await embedder.embed([text for _w, text, _i in msgs])
-                for (who, text, _ident), v in zip(msgs, vecs):
-                    scored.append((dot(normalize(qv), normalize(v)), label, who, text))
-        except Exception:
-            return None
-        if not scored:
-            return None
-        # 只在最新窗口条范围内排序（跨窗口按稳定的窗口追加顺序近似时间序）
-        scored = scored[-_RAG_SCORE_WINDOW:]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top_k = int(getattr(embedder.cfg, "top_k", 4) or 4)
-        out: List[str] = []
-        used = 0
-        for _sim, label, who, text in scored[:top_k]:
-            block = "[{0}] {1}: {2}".format(label, who, text[:_MAX_TEXT])
-            if used + len(block) > _TOTAL_BUDGET:
-                break
-            out.append(block)
-            used += len(block)
-        return out
-
-    @staticmethod
-    def _matched_passages(msgs, topic: str):
-        """返回 topic 命中的连续片段列表（合并重叠），每条片段含命中消息的前后少量上下文。"""
-        terms = _topic_terms(topic)
-        marks = [i for i, (_w, txt, _i) in enumerate(msgs)
-                 if _topic_match(txt, topic, terms)]
-        if not marks:
-            return []
-        ranges = []
-        for i in marks:
-            a = max(0, i - _CONTEXT_RADIUS)
-            b = min(len(msgs), i + _CONTEXT_RADIUS + 1)
-            if ranges and a <= ranges[-1][1]:
-                ranges[-1] = (ranges[-1][0], max(ranges[-1][1], b))
-            else:
-                ranges.append((a, b))
-        return [msgs[a:b] for a, b in ranges]
 
     @staticmethod
     def _includes(session, thread, char_id: str) -> bool:

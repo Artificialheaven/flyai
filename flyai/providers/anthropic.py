@@ -29,10 +29,14 @@ class AnthropicProvider(BaseProvider):
         self,
         messages: List[Message],
         tool_specs: List[dict],
+        deep_thinking: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/v1/messages"
-        system, body_messages = self._encode_request(messages)
+        tcfg = self.cfg.params.get("thinking") or {}
+        # 持久配置开启，或本轮「深度思考」开关开启
+        thinking_on = bool(tcfg.get("enabled")) or bool(deep_thinking)
+        system, body_messages = self._encode_request(messages, thinking_on=thinking_on)
         body: Dict = {
             "model": self.cfg.model,
             "max_tokens": int(self.cfg.params.get("max_tokens", 4096)),
@@ -42,11 +46,10 @@ class AnthropicProvider(BaseProvider):
             body["system"] = system
         if tool_specs:
             body["tools"] = [self._to_anthropic_spec(spec) for spec in tool_specs]
-        thinking = self.cfg.params.get("thinking")
-        if thinking and thinking.get("enabled"):
+        if thinking_on:
             body["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": int(thinking.get("budget_tokens", 2048)),
+                "budget_tokens": int(tcfg.get("budget_tokens", 2048)),
             }
         headers = {
             "x-api-key": self.cfg.api_key,
@@ -61,15 +64,17 @@ class AnthropicProvider(BaseProvider):
                 raise ProviderError(
                     f"Anthropic 返回 HTTP {resp.status_code}", status_code=resp.status_code, detail=err_text
                 )
-            async for event in self._parse_stream(resp):
+            async for event in self._parse_stream(resp, thinking_on=thinking_on):
                 yield event
 
     # ---- 流式事件解析 ----
 
-    async def _parse_stream(self, resp) -> AsyncIterator[StreamEvent]:
+    async def _parse_stream(self, resp, thinking_on: bool = False) -> AsyncIterator[StreamEvent]:
         event_name = None
         # 工具调用按 content index 累积
         call_acc: Dict[int, Dict] = {}
+        # 思考块按 content index 累积（含 signature，供多轮工具调用原样回放）
+        think_acc: Dict[int, Dict] = {}
         stop_reason = None
         has_tool_use = False
         input_tokens = 0
@@ -100,13 +105,33 @@ class AnthropicProvider(BaseProvider):
                     if btype == "tool_use":
                         has_tool_use = True
                         call_acc[idx] = {"id": block.get("id"), "name": block.get("name"), "args": ""}
+                    elif thinking_on and btype == "thinking":
+                        think_acc[idx] = {
+                            "type": "thinking",
+                            "thinking": block.get("thinking") or "",
+                            "signature": "",
+                        }
+                    elif thinking_on and btype == "redacted_thinking":
+                        think_acc[idx] = {
+                            "type": "redacted_thinking",
+                            "data": block.get("data") or "",
+                        }
                 elif event_name == "content_block_delta":
                     delta = obj.get("delta") or {}
                     dtype = delta.get("type")
                     if dtype == "text_delta":
                         yield StreamEvent(StreamEventType.CONTENT_DELTA, text=delta.get("text", ""))
                     elif dtype == "thinking_delta":
-                        yield StreamEvent(StreamEventType.THINKING_DELTA, text=delta.get("thinking", ""))
+                        piece = delta.get("thinking", "")
+                        holder = think_acc.get(obj.get("index", 0))
+                        if holder is not None and holder.get("type") == "thinking":
+                            holder["thinking"] += piece
+                        yield StreamEvent(StreamEventType.THINKING_DELTA, text=piece)
+                    elif thinking_on and dtype == "signature_delta":
+                        idx = obj.get("index", 0)
+                        holder = think_acc.get(idx)
+                        if holder is not None and holder.get("type") == "thinking":
+                            holder["signature"] = delta.get("signature") or ""
                     elif dtype == "input_json_delta":
                         idx = obj.get("index", 0)
                         holder = call_acc.get(idx)
@@ -126,6 +151,27 @@ class AnthropicProvider(BaseProvider):
                     "completion_tokens": output_tokens,
                 },
             )
+
+        # 流结束：产出完整思考块（下轮工具调用时需原样回放，缺 signature 的块
+        # 被 Anthropic 拒绝，故只保留签名齐全的 thinking / 有 data 的 redacted）
+        if think_acc:
+            blocks: List[Dict] = []
+            for idx in sorted(think_acc):
+                b = think_acc[idx]
+                if b.get("type") == "thinking" and b.get("signature"):
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": b.get("thinking", ""),
+                            "signature": b["signature"],
+                        }
+                    )
+                elif b.get("type") == "redacted_thinking" and b.get("data"):
+                    blocks.append(
+                        {"type": "redacted_thinking", "data": b["data"]}
+                    )
+            if blocks:
+                yield StreamEvent(StreamEventType.THINKING_BLOCKS, blocks=blocks)
 
         # 流结束：若有工具调用则产出
         if call_acc:
@@ -153,14 +199,15 @@ class AnthropicProvider(BaseProvider):
             "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
         }
 
-    def _encode_request(self, messages: List[Message]):
+    def _encode_request(self, messages: List[Message], thinking_on: bool = False):
         """返回 (system 字符串, anthropic messages 列表)。
 
         规则：
         - system 消息拼成顶层 system。
         - assistant+tool_calls → text + tool_use blocks。
         - 连续多条 role=tool → 折叠成一条 user 消息含多个 tool_result blocks，保持严格交替。
-        - assistant 若有 thinking_blocks，原样插回 blocks 最前（保留 signature 供多轮工具调用回放）。
+        - thinking_on 时，assistant 若有 thinking_blocks，原样插回 blocks 最前
+          （保留 signature 供多轮工具调用回放）。
         """
         system_parts: List[str] = []
         non_system: List[Message] = []
@@ -203,8 +250,14 @@ class AnthropicProvider(BaseProvider):
             if msg.role == "assistant":
                 blocks: List[Dict] = []
                 # 思考块回放（extended thinking 开启时必需保留 signature）
-                if self._thinking_enabled() and msg.thinking_blocks:
+                if thinking_on and msg.thinking_blocks:
                     blocks.extend(msg.thinking_blocks)
+                elif thinking_on and msg.tool_calls:
+                    # 开启思考前产生的历史工具消息：Anthropic 要求 tool_use 块前
+                    # 必须有 thinking 块，用官方允许的空签名占位块补齐
+                    blocks.append(
+                        {"type": "thinking", "thinking": "", "signature": ""}
+                    )
                 if msg.content:
                     blocks.append({"type": "text", "text": msg.content})
                 if msg.tool_calls:

@@ -18,6 +18,12 @@ class StreamEventType(str, Enum):
     CONTENT_DELTA = "content_delta"
     TOOL_CALLS = "tool_calls"
     USAGE = "usage"               # 本次调用 token 用量 {prompt_tokens, completion_tokens}
+    # 整段思考块（Anthropic 带 signature，多轮工具调用回放必需）
+    THINKING_BLOCKS = "thinking_blocks"
+    # 正文整体替换：个别厂商会把工具调用 JSON 同时塞进 content 与 tool_calls，
+    # 适配器在流末识别出这种回声后下发本事件（text 为去噪后的正文），
+    # 覆盖此前逐字推送、已显示在界面上的回声文本
+    CONTENT_REPLACE = "content_replace"
 
 
 class StreamEvent:
@@ -29,11 +35,13 @@ class StreamEvent:
         text: str = "",
         tool_calls: Optional[List[ToolCall]] = None,
         usage: Optional[dict] = None,
+        blocks: Optional[List[dict]] = None,
     ):
         self.type = type
         self.text = text
         self.tool_calls = tool_calls or []
         self.usage = usage
+        self.blocks = blocks or []
 
 
 class BaseProvider(ABC):

@@ -197,3 +197,90 @@ def test_update_member_memory_mode_validation(tmp_path):
         request,
     )
     assert out["memory_mode"] == "rw" and out["memory_char_id"] == "c1"
+
+
+# ---- Galgame 房间 ----
+
+def _room_create_env(tmp_path):
+    store = JsonSessionStore(tmp_path / "s")
+    chars = [Character(id="c1", name="角色1"), Character(id="c2", name="角色2")]
+    sc = SimpleNamespace(
+        uid="u1", level=256, store=store, lore=_FakeLore(chars),
+        char_memory=CharacterMemoryStore(tmp_path / "cm"),
+    )
+    state = SimpleNamespace(config=SimpleNamespace(providers=[]))
+    state.user = lambda request: sc
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(flyai=state)))
+    return sc, request
+
+
+def test_create_galgame_room_single_character(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    out = create_room(
+        RoomCreate(title="g", character_ids=["c1"], mode="galgame"), request)
+    assert out["mode"] == "galgame"
+    assert len(out["members"]) == 2  # 用户座 + 1 AI
+    assert len(out["threads"]) == 1 and out["threads"][0]["kind"] == "dm"
+    # 已落盘
+    assert sc.store.get(out["id"]).mode == "galgame"
+
+
+def test_create_galgame_room_requires_exactly_one_character(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    with pytest.raises(HTTPException) as ei:
+        create_room(RoomCreate(character_ids=[], mode="galgame"), request)
+    assert ei.value.status_code == 400
+    with pytest.raises(HTTPException) as ei:
+        create_room(RoomCreate(character_ids=["c1", "c2"], mode="galgame"), request)
+    assert ei.value.status_code == 400
+    # 失败不留空会话文件
+    assert sc.store.list() == []
+
+
+def test_create_galgame_room_forbidden_when_user_override_off(tmp_path):
+    """用户覆盖关闭 Galgame → 403（即使全局默认开启）。"""
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    sc.user_settings = SimpleNamespace(galgame_enabled=False)
+    with pytest.raises(HTTPException) as ei:
+        create_room(
+            RoomCreate(character_ids=["c1"], mode="galgame"), request)
+    assert ei.value.status_code == 403
+    # 被门槛拦下，不落盘任何会话
+    assert sc.store.list() == []
+    # 普通房间不受影响
+    out = create_room(RoomCreate(character_ids=["c1"]), request)
+    assert out["mode"] == "normal"
+
+
+def test_create_galgame_room_forbidden_when_admin_disabled(tmp_path):
+    """管理员全局关闭且用户无覆盖 → 403；用户显式覆盖开启 → 允许
+    （"全局默认 + 用户可覆盖"语义）。"""
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    request.app.state.flyai.config = SimpleNamespace(
+        providers=[], galgame=SimpleNamespace(enabled=False, max_loops=40))
+    with pytest.raises(HTTPException) as ei:
+        create_room(
+            RoomCreate(character_ids=["c1"], mode="galgame"), request)
+    assert ei.value.status_code == 403
+    # 用户显式覆盖开启 → 允许（"全局默认 + 用户可覆盖"语义）
+    sc.user_settings = SimpleNamespace(galgame_enabled=True)
+    out = create_room(
+        RoomCreate(character_ids=["c1"], mode="galgame"), request)
+    assert out["mode"] == "galgame"
+
+
+def test_create_normal_room_default_mode(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    out = create_room(RoomCreate(character_ids=["c1", "c2"]), request)
+    assert out["mode"] == "normal"

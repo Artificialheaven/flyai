@@ -43,6 +43,9 @@ function onSend() {
       // @ 定向：被点名者优先、按 @ 顺序；随机顺序只影响其余成员
       target_member_ids: parseMentionTargets(text),
       shuffle_speakers: isShuffleOn(),
+      // 输入框开关：深度思考 + 本会话手动关闭的工具
+      deep_thinking: !!state.deepThinking,
+      disabled_tools: disabledToolNames(),
     };
     postChatSSE(payload);
   };
@@ -178,7 +181,7 @@ function renderMentionBox() {
     var ch = mem.character_id ? characterOf(mem.character_id) : null;
     if (ch && ch.avatar) {
       var img = document.createElement("img");
-      img.className = "mention-avatar"; img.src = ch.avatar; img.alt = "";
+      img.className = "mention-avatar"; img.src = assetUrl(ch.avatar); img.alt = "";
       img.addEventListener("error", function () { img.remove(); });
       row.appendChild(img);
     }
@@ -236,7 +239,7 @@ function onStop() {
   var rid = state.currentRunId;
   if (rid) {
     // 主动停止：通知后台任务取消（已生成部分仍保存），再断开本连接
-    fetch("/api/chat/runs/" + rid + "/cancel", {
+    fetch(apiUrl("/api/chat/runs/" + rid + "/cancel"), {
       method: "POST", headers: authHeaders(),
     }).catch(function () {});
   }
@@ -293,7 +296,7 @@ function consumeRun(runId, opts) {
   }
   fetchOpts.signal = state.abortController.signal;
   var runEstablished = !!runId;
-  return fetch(url, fetchOpts).then(function (resp) {
+  return fetch(apiUrl(url), fetchOpts).then(function (resp) {
     if (!resp.ok) {
       var err = new Error("HTTP " + resp.status);
       err.status = resp.status;
@@ -312,6 +315,13 @@ function consumeRun(runId, opts) {
     return autoReconnect(state.currentRunId);
   }).catch(function (e) {
     if (e.name === "AbortError") { finalizeTurn(); return; }
+    // 409：已有进行中的回答（其它标签页/设备发起）：不回填、不报错，
+    // 直接发现并续读该 run
+    if (e.status === 409 && opts.post && !runEstablished
+        && state.currentSessionId) {
+      maybeResumeRun(state.currentSessionId);
+      return;
+    }
     // POST 且运行未建立（请求失败/4xx）：消息没进会话，回填不丢字
     if (opts.post && !runEstablished) {
       restoreFailedSend("请求失败: " + e.message);
@@ -326,15 +336,20 @@ function makeStreamHandlers() {
     message_start: onMsgStart,
     speaker: onSpeaker,
     speaker_skip: onSpeakerSkip,
+    recall_notice: onRecallNotice,
     thinking_delta: onThinkingDelta,
     content_delta: onContentDelta,
+    content_replace: onContentReplace,
     tool_calls: onToolCalls,
     tool_start: onToolStart,
     tool_end: onToolEnd,
     attributes: onAttributes,
     error: function (data) {
       onStreamError(data);
-      if (data && data.fatal !== false) state.streamTerminal = true;
+      if (data && data.fatal !== false) {
+        state.streamTerminal = true;
+        refreshQuotaChip();  // 未生成的回复已退款，同步剩余次数
+      }
     },
     done: function (data) {
       recordUsage(data && data.usage);
@@ -342,6 +357,7 @@ function makeStreamHandlers() {
       if (data && data.terminal === false) { saveRunMarker(); return; }
       state.streamTerminal = true;
       finalizeTurn();
+      refreshQuotaChip();
     },
   };
 }
@@ -422,11 +438,12 @@ function onMsgStart(data) {
   }
   // 首页空状态直接发送：会话在服务端 bootstrap_room 升级，thread_id 此刻才诞生。
   // 采纳它，收尾 finalizeTurn 才会 loadThread 规范化重画（否则流式卡停在折叠态、
-  // 回复被藏起，侧栏也没有选中窗口）
+  // 回复被藏起，侧栏也没有选中窗口）。bootstrap 恒为单 AI：抽屉停在第一层
+  // 会话列表（roomView=false），不进窗口二级列表
   var threadAdopted = false;
   if (data.thread_id && !state.currentThreadId) {
     state.currentThreadId = data.thread_id;
-    state.roomView = true;
+    state.roomView = false;
     var exists = (state.roomThreads || []).some(function (t) {
       return t.id === data.thread_id;
     });
@@ -445,13 +462,31 @@ function onMsgStart(data) {
 function onSpeaker(data) {
   // 上一位发言者的卡片先收尾（收起），再为当前 AI 新建一张卡，避免多 AI 串进同一条消息
   var prev = state.currentAssistant;
-  if (prev && prev.speakerName) { prev.setThinking(false); if (!prev.revealed) prev.setOpen(false); }
+  if (prev) {
+    prev.finishThinking();
+    prev.thinkingEl.open = false;
+    if (prev.recallGroup) prev.recallGroup.open = false;
+    if (prev.toolGroup) prev.toolGroup.open = false;
+    if (prev.speakerName) {
+      prev.setThinking(false);
+      if (!prev.revealed) prev.setOpen(false);
+    }
+  }
   state.currentSpeaker = data || null;
   state.currentAssistant = null;
   var a = ensureAssistant();
   a.setSpeaker((data && data.name) || "AI", memberOf(data && data.member_id));
   a.setOpen(true);
   a.setThinking(true);
+}
+function onRecallNotice(data) {
+  // 自动召回折叠组：头部「已召回 N 段记忆」，展开看每条召回明细
+  var a = ensureAssistant(); if (!a) return;
+  var items = (data && data.items) || [];
+  if (!items.length) return;
+  fillRecallGroup(a, items);
+  // 持久化由服务端挂到本轮 assistant 消息（Message.recall），重画后不丢
+  scrollToBottom();
 }
 function onSpeakerSkip(data) {
   // 该 AI 自评无需发言：把这块输出整卡移除（仍保存在历史中，reload 不展示）
@@ -465,6 +500,7 @@ function onAttributes(data) {
 }
 function onThinkingDelta(data) {
   var a = ensureAssistant(); if (!a) return;
+  a.markThinkingStart();
   a.thinkingEl.classList.remove("hidden"); a.thinkingEl.open = true; a.thinkingDiv.textContent += data.text;
 }
 function onContentDelta(data) {
@@ -472,6 +508,11 @@ function onContentDelta(data) {
   a.contentEl.classList.add("streaming-cursor");
   setAssistantContent(a, a.rawContent + (data.text || ""));
   scrollToBottom();  // 不强制：用户上翻时停留在原位
+}
+function onContentReplace(data) {
+  // 厂商把工具调用 JSON 回声进正文：服务端去噪后整体替换已显示的文本
+  var a = ensureAssistant(); if (!a) return;
+  setAssistantContent(a, (data && data.text) || "");
 }
 function onToolCalls(data) {
   var a = ensureAssistant(); if (!a) return;
@@ -481,16 +522,40 @@ function appendToolCallCard(region, call, streaming) {
   var card = document.createElement("div");
   card.className = "tool-card";
   card.dataset.id = call.id;
-  var tname = document.createElement("div"); tname.className = "tname"; tname.textContent = "🔧 " + call.name;
-  var tstatus = document.createElement("div"); tstatus.className = "tstatus"; tstatus.textContent = streaming ? "等待执行…" : "已完成";
-  card.appendChild(tname); card.appendChild(tstatus); region.appendChild(card);
+  var tname = document.createElement("div"); tname.className = "tname";
+  tname.textContent = "🔧 " + call.name;
+  var tstatus = document.createElement("div"); tstatus.className = "tstatus";
+  tstatus.textContent = streaming ? "等待执行…" : "已完成";
+  card.appendChild(tname); card.appendChild(tstatus);
+  region.appendChild(card);
+  syncToolGroup(region, streaming);  // 执行中整组展开
+  return card;
+}
+// 同步工具折叠组的计数；openNow=true 时展开整组
+function syncToolGroup(region, openNow) {
+  if (!region || !region.closest) return null;
+  var group = region.closest(".tool-group");
+  if (!group) return null;
+  var nCards = region.querySelectorAll(".tool-card").length;
+  var cnt = group.querySelector(".tg-count");
+  if (cnt) cnt.textContent = String(nCards);
+  // 无工具卡片时整组隐藏；首次挂入卡片即显示并展开
+  group.classList.toggle("hidden", nCards === 0);
+  if (openNow && nCards) group.open = true;
+  return group;
 }
 function onToolStart(data) {
   var card = findCard(data.id); if (!card) return;
   card.classList.remove("err"); card.classList.remove("ok");
   var spin = document.createElement("span"); spin.className = "spinner";
   var tstatus = card.querySelector(".tstatus"); tstatus.innerHTML = "";
-  tstatus.appendChild(spin); tstatus.appendChild(document.createTextNode(data.status_text || ("正在调用 " + data.name)));
+  tstatus.appendChild(spin);
+  tstatus.appendChild(document.createTextNode(data.status_text || ("正在调用 " + data.name)));
+  var a = state.currentAssistant;
+  if (a) {
+    a.toolGroup.open = true;  // 运行期间整组保持展开
+    a.tgStatus.textContent = "执行中…";
+  }
 }
 // 从工具输出中提取图片标记 [图片已生成]/[图片] <url>
 function onToolEnd(data) {
@@ -531,13 +596,36 @@ function onToolEnd(data) {
       card.appendChild(pre);
     }
   }
+  var a = state.currentAssistant;
+  if (a) {
+    // 该轮所有卡片都结束后清掉组状态；计数同步（结果卡并入后仍为工具数）
+    var pending0 = a.toolRegion.querySelectorAll(".tool-card:not(.ok):not(.err)");
+    if (!pending0.length) a.tgStatus.textContent = "";
+    syncToolGroup(a.toolRegion, false);
+  }
   scrollToBottom();  // 不强制：用户上翻时停留在原位
 }
+function findCardIn(region, id) {
+  var cards = region.querySelectorAll(".tool-card");
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].dataset.id === id) return cards[i];
+  }
+  return null;
+}
 function appendToolResultCard(region, data) {
-  var card = document.createElement("div");
+  // 历史回放：调用卡已存在则并入（同一张卡），否则新建
+  var card = findCardIn(region, data.id);
+  if (!card) {
+    card = document.createElement("div");
+    card.dataset.id = data.id || "";
+    region.appendChild(card);
+  }
   card.className = "tool-card " + (data.ok ? "ok" : "err");
-  var tname = document.createElement("div"); tname.className = "tname"; tname.textContent = "🔧 " + (data.name || data.id || "tool");
-  var tstatus = document.createElement("div"); tstatus.className = "tstatus"; tstatus.textContent = data.ok ? "✓ 完成" : "✗ 失败";
+  card.innerHTML = "";
+  var tname = document.createElement("div"); tname.className = "tname";
+  tname.textContent = "🔧 " + (data.name || data.id || "tool");
+  var tstatus = document.createElement("div"); tstatus.className = "tstatus";
+  tstatus.textContent = data.ok ? "✓ 完成" : "✗ 失败";
   card.appendChild(tname); card.appendChild(tstatus);
   var output = data.output ? String(data.output) : "";
   if (isPixivCandidatesText(output)) {
@@ -569,11 +657,11 @@ function appendToolResultCard(region, data) {
       card.appendChild(pre);
     }
   }
-  region.appendChild(card);
+  syncToolGroup(region, false);
 }
 function findCard(id) {
   if (!state.currentAssistant) return null;
-  return state.currentAssistant.toolRegion.querySelector('.tool-card[data-id="' + id + '"]');
+  return findCardIn(state.currentAssistant.toolRegion, id);
 }
 
 function onStreamError(data) {
@@ -596,7 +684,10 @@ function recordUsage(usage) {
 function finalizeTurn() {
   var a = state.currentAssistant;
   if (a) {
+    a.finishThinking();
     a.thinkingEl.open = false;
+    if (a.recallGroup) a.recallGroup.open = false;
+    if (a.toolGroup) a.toolGroup.open = false;
     a.setThinking(false);
     a.contentEl.classList.remove("streaming-cursor");
     if (a.speakerName) a.setOpen(false);  // 群聊发言结束后折叠，点击头部展开

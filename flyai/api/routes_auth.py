@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -29,8 +31,12 @@ def _identity(request: Request):
         return {"id": ADMIN_UID, "name": state.config.auth.admin.username,
                 "role": "admin", "level": ADMIN_LEVEL}
     u = state.user_store.get_by_id(uid)
-    return ({"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0)}
-            if u else None)
+    if u is None:
+        return None
+    from ..billing import quota_view
+
+    return {"id": u.id, "name": u.name, "role": "user", "level": int(u.level or 0),
+            "quota": quota_view(state.user_store, u.id)}
 
 
 def _require_admin(request: Request):
@@ -52,10 +58,13 @@ class CreateUserPayload(BaseModel):
     name: str
     password: str = ""
     level: int = 0
+    # 对话次数总额；-1=无限，默认 0（需管理员充值后才能对话）
+    quota: float = 0
 
 
 class UpdateUserPayload(BaseModel):
-    level: int
+    level: Optional[int] = None
+    quota: Optional[float] = None
 
 
 class PasswordPayload(BaseModel):
@@ -116,8 +125,11 @@ def list_users(request: Request):
     """列出普通用户（仅管理员）。"""
     _require_admin(request)
     state = request.app.state.flyai
+    from ..billing import quota_view
+
     return {"users": [
-        {"id": u.id, "name": u.name, "level": int(u.level or 0)}
+        {"id": u.id, "name": u.name, "level": int(u.level or 0),
+         "quota": quota_view(state.user_store, u.id)}
         for u in state.user_store.list()
     ]}
 
@@ -134,27 +146,45 @@ def create_user(payload: CreateUserPayload, request: Request):
         raise HTTPException(400, f"用户名已存在: {name}")
     level = max(0, min(int(payload.level or 0), 255))
     u = state.user_store.create(name, payload.password, level=level)
-    return {"id": u.id, "name": u.name, "level": level}
+    quota = float(payload.quota or 0)
+    if quota:
+        state.user_store.set_quota_total(u.id, quota)
+    from ..billing import quota_view
+
+    return {"id": u.id, "name": u.name, "level": level,
+            "quota": quota_view(state.user_store, u.id)}
 
 
 @router.patch("/users/{uid}")
 def update_user(uid: str, payload: UpdateUserPayload, request: Request):
-    """修改用户权限等级（仅管理员，0-255）。"""
+    """修改用户权限等级（0-255）和/或对话次数总额（-1=无限）。仅管理员。"""
     _require_admin(request)
     state = request.app.state.flyai
     u = state.user_store.get_by_id(uid)
     if u is None:
         raise HTTPException(404, "用户不存在")
-    level = int(payload.level)
-    if level < 0 or level > 255:
-        raise HTTPException(400, "权限等级必须在 0-255 之间")
-    u.level = level
-    state.user_store._save()
-    # 已缓存的作用域同步刷新
-    scope = state._scopes.get(uid)
-    if scope is not None:
-        scope.level = level
-    return {"ok": True, "level": level}
+    out = {"ok": True}
+    if payload.level is not None:
+        level = int(payload.level)
+        if level < 0 or level > 255:
+            raise HTTPException(400, "权限等级必须在 0-255 之间")
+        u.level = level
+        state.user_store._save()
+        out["level"] = level
+        # 已缓存的作用域同步刷新
+        scope = state._scopes.get(uid)
+        if scope is not None:
+            scope.level = level
+    if payload.quota is not None:
+        try:
+            total = state.user_store.set_quota_total(uid, float(payload.quota))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        out["quota"] = total
+    from ..billing import quota_view
+
+    out["quota_view"] = quota_view(state.user_store, uid)
+    return out
 
 
 @router.patch("/users/{uid}/password")

@@ -1,0 +1,6 @@
+node_modules/
+www/
+android/
+capacitor.local.json
+*.keystore
+*.jks

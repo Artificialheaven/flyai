@@ -52,6 +52,12 @@ class ChatRun:
             self.finished = time.time()
             self.cond.notify_all()
 
+    def mark_failed(self, status: str = "error") -> None:
+        """请求在后台 drive 启动前就失败：同步终止，否则孤儿 running 运行会让
+        active_in_session 永远命中，用户后续重试恒被 409 拦截。"""
+        self.status = status
+        self.finished = time.time()
+
     @staticmethod
     def _is_terminal(event: str, data: dict) -> bool:
         if event == "done":

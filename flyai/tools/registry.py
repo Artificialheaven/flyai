@@ -34,8 +34,12 @@ class ToolRegistry:
     def all(self) -> List[Tool]:
         return list(self._tools.values())
 
-    def specs(self) -> List[dict]:
-        return [t.spec_openai() for t in self._tools.values()]
+    def specs(self, allowed: Optional[set] = None) -> List[dict]:
+        """生成 OpenAI tool specs；allowed 非空时只暴露其中的工具名。"""
+        tools = self._tools.values()
+        if allowed is not None:
+            tools = [t for t in tools if t.name in allowed]
+        return [t.spec_openai() for t in tools]
 
     async def execute(self, call: ToolCall, ctx: ToolContext) -> ToolResult:
         """执行单个工具调用。任何异常都转为失败 ToolResult，不向循环抛出。"""
@@ -48,7 +52,10 @@ class ToolRegistry:
             timeout = getattr(ctx.tool_settings, "timeout_seconds", timeout)
 
         try:
-            result = await asyncio.wait_for(tool.run(call.arguments, ctx), timeout=timeout)
+            coro = tool.run(call.arguments, ctx)
+            if not tool.interactive:
+                coro = asyncio.wait_for(coro, timeout=timeout)
+            result = await coro
             if not isinstance(result, ToolResult):
                 result = ToolResult(output=str(result))
             return result

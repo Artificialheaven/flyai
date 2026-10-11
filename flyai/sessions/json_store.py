@@ -16,6 +16,54 @@ from .store import SessionStore
 from .versions import heal_thread
 
 
+def session_from_dict(data: Dict, sid: str = "") -> Session:
+    """从完整快照还原会话（存档点恢复同样使用）。"""
+    return Session(
+        id=data.get("id", sid),
+        title=data.get("title", "新会话"),
+        provider_id=data.get("provider_id", ""),
+        character_id=data.get("character_id", ""),
+        world_id=data.get("world_id", ""),
+        created_at=data.get("created_at", ""),
+        updated_at=data.get("updated_at", ""),
+        messages=[Message.from_dict(m) for m in data.get("messages", [])],
+        attributes=data.get("attributes", {}),
+        character_override=data.get("character_override"),
+        world_override=data.get("world_override"),
+        members=[RoomMember.from_dict(m) for m in data.get("members", [])],
+        threads=[Thread.from_dict(t) for t in data.get("threads", [])],
+        pinned=bool(data.get("pinned", False)),
+        token_usage=data.get("token_usage", {}) or {},
+        mode=data.get("mode", "normal") or "normal",
+        galgame=data.get("galgame", {}) or {},
+        galgame_tts=data.get("galgame_tts", {}) or {},
+    )
+
+
+def session_to_dict(session: Session) -> Dict:
+    """会话完整序列化（存档点快照同样使用此结构）。"""
+    return {
+        "id": session.id,
+        "title": session.title,
+        "provider_id": session.provider_id,
+        "character_id": session.character_id,
+        "world_id": session.world_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "messages": [m.to_dict() for m in session.messages],
+        "attributes": session.attributes,
+        "character_override": session.character_override,
+        "world_override": session.world_override,
+        "members": [m.to_dict() for m in session.members],
+        "threads": [t.to_dict() for t in session.threads],
+        "pinned": session.pinned,
+        "token_usage": session.token_usage or {},
+        "mode": session.mode,
+        "galgame": session.galgame or {},
+        "galgame_tts": session.galgame_tts or {},
+    }
+
+
 class JsonSessionStore(SessionStore):
     def __init__(self, base_dir: Path = None):
         self._dir = base_dir or (PROJECT_ROOT / "data" / "sessions")
@@ -42,24 +90,7 @@ class JsonSessionStore(SessionStore):
             return None
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
-        msg_data = data.get("messages", [])
-        s = Session(
-            id=data.get("id", sid),
-            title=data.get("title", "新会话"),
-            provider_id=data.get("provider_id", ""),
-            character_id=data.get("character_id", ""),
-            world_id=data.get("world_id", ""),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
-            messages=[Message.from_dict(m) for m in msg_data],
-            attributes=data.get("attributes", {}),
-            character_override=data.get("character_override"),
-            world_override=data.get("world_override"),
-            members=[RoomMember.from_dict(m) for m in data.get("members", [])],
-            threads=[Thread.from_dict(t) for t in data.get("threads", [])],
-            pinned=bool(data.get("pinned", False)),
-            token_usage=data.get("token_usage", {}) or {},
-        )
+        s = session_from_dict(data, sid)
         # 旧单 AI 会话（beta 前）：迁移为一个用户座位 + 一个 AI 参与者 + 一条私聊线程
         migrated = False
         if not s.members and not s.threads:
@@ -92,6 +123,7 @@ class JsonSessionStore(SessionStore):
                     updated_at=data.get("updated_at", ""),
                     messages=[],
                     pinned=bool(data.get("pinned", False)),
+                    mode=data.get("mode", "normal") or "normal",
                 )
             except Exception:
                 continue
@@ -104,23 +136,7 @@ class JsonSessionStore(SessionStore):
 
     def save(self, session: Session) -> None:
         session.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        data = {
-            "id": session.id,
-            "title": session.title,
-            "provider_id": session.provider_id,
-            "character_id": session.character_id,
-            "world_id": session.world_id,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-            "messages": [m.to_dict() for m in session.messages],
-            "attributes": session.attributes,
-            "character_override": session.character_override,
-            "world_override": session.world_override,
-            "members": [m.to_dict() for m in session.members],
-            "threads": [t.to_dict() for t in session.threads],
-            "pinned": session.pinned,
-            "token_usage": session.token_usage or {},
-        }
+        data = session_to_dict(session)
         p = self._path(session.id)
         tmp = p.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:

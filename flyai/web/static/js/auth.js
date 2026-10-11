@@ -9,12 +9,19 @@ function authHeaders(extra) {
   return h;
 }
 function goLogin() {
-  window.location.href = "/login";
+  // APK：跳到内置登录页（同 WebView 内，token 存本地 origin）
+  window.location.href = state.isApp ? "login.html" : "/login";
 }
 function renderUserBadge() {
   if (el.userName) {
-    var tag = state.role === "admin" ? "（管理员 Lv256）" : "（Lv" + state.userLevel + "）";
-    el.userName.textContent = "👤 " + (state.userName || "……") + tag;
+    var name = state.userName || "……";
+    if (isMobileView()) {
+      // 手机端抽屉底部空间窄：只显示名字（等级在账号管理页可见）
+      el.userName.textContent = name;
+    } else {
+      var tag = state.role === "admin" ? "（管理员 Lv256）" : "（Lv" + state.userLevel + "）";
+      el.userName.textContent = "👤 " + name + tag;
+    }
   }
   if (el.btnUsers) el.btnUsers.classList.toggle("hidden", state.role !== "admin");
 }
@@ -36,6 +43,7 @@ function bootstrap() {
   state.authToken = token;
   state.imageModelId = localStorage.getItem("flyai-image-model") || "";
   state.sdEngine = localStorage.getItem("flyai-sd-engine") === "sd";
+  state.deepThinking = localStorage.getItem("flyai-deep-thinking") === "1";
   fetchJSON("/api/auth/me").then(function (res) {
     state.userId = res.id;
     localStorage.setItem("flyai-uid", res.id);  // 供 owner 比对/调试，非凭证
@@ -44,11 +52,12 @@ function bootstrap() {
     state.userLevel = parseInt(res.level, 10) || 0;
     localStorage.setItem("flyai-role", state.role);
     renderUserBadge();
+    renderQuotaChip(res.quota);
     init();
   }).catch(function () { clearAuth(); goLogin(); });
 }
 function doLogout() {
-  fetch("/api/auth/logout", { method: "POST", headers: authHeaders() }).catch(function () {});
+  fetch(apiUrl("/api/auth/logout"), { method: "POST", headers: authHeaders() }).catch(function () {});
   clearAuth();
   goLogin();
 }
@@ -84,6 +93,29 @@ function renderUserList() {
       });
       levelWrap.appendChild(level);
       row.appendChild(levelWrap);
+      // 对话次数：显示 剩余/已用；改总额（-1=无限）即 PATCH
+      var q = u.quota || {};
+      var quotaWrap = document.createElement("label");
+      quotaWrap.className = "user-quota";
+      var remainTxt = document.createElement("span");
+      remainTxt.className = "quota-remain";
+      remainTxt.textContent = q.remaining == null
+        ? "∞ / 已用 " + fmtQuota(q.used)
+        : "剩 " + fmtQuota(q.remaining) + " / 已用 " + fmtQuota(q.used);
+      var quotaInput = document.createElement("input");
+      quotaInput.type = "number";
+      quotaInput.min = "-1";
+      quotaInput.step = "0.5";
+      quotaInput.value = String(q.total == null ? 0 : q.total);
+      quotaInput.title = "对话次数总额（-1=无限）";
+      quotaInput.addEventListener("change", function () {
+        changeUserQuota(u.id, quotaInput, function () { renderUserList(); });
+      });
+      var qLabel = document.createElement("span"); qLabel.textContent = "总额 ";
+      quotaWrap.appendChild(remainTxt);
+      quotaWrap.appendChild(qLabel);
+      quotaWrap.appendChild(quotaInput);
+      row.appendChild(quotaWrap);
       // 改密码：点击后行内展开密码输入
       var pwdBtn = document.createElement("button");
       pwdBtn.className = "btn small";
@@ -107,6 +139,42 @@ function renderUserList() {
       el.userList.appendChild(row);
     });
   }).catch(function (e) { el.userList.textContent = "加载失败: " + e.message; });
+}
+function renderQuotaChip(q) {
+  if (!el.quotaChip) return;
+  if (!q) { el.quotaChip.classList.add("hidden"); return; }  // 管理员
+  el.quotaChip.classList.remove("hidden");
+  el.quotaRemain.textContent = q.remaining == null ? "∞" : fmtQuota(q.remaining);
+}
+function refreshQuotaChip() {
+  // 一轮结束后刷新剩余次数；管理员返回 {unlimited:true}
+  fetchJSON("/api/my/quota").then(function (q) {
+    if (q && q.unlimited) { el.quotaChip.classList.add("hidden"); return; }
+    renderQuotaChip(q);
+  }).catch(function () {});
+}
+function fmtQuota(v) {
+  var n = parseFloat(v);
+  if (isNaN(n)) n = 0;
+  // 整数去小数点，其余保留 2 位
+  return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toFixed(2);
+}
+function changeUserQuota(uid, input, done) {
+  var v = parseFloat(input.value);
+  if (isNaN(v)) v = 0;
+  el.userMsg.textContent = ""; el.userMsg.className = "msg-bar";
+  fetchJSON("/api/auth/users/" + encodeURIComponent(uid), {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ quota: v }),
+  }).then(function () {
+    el.userMsg.textContent = "对话次数总额已更新为 " + (v === -1 ? "无限" : fmtQuota(v));
+    el.userMsg.className = "msg-bar ok";
+    if (done) done();
+  }).catch(function (e) {
+    el.userMsg.textContent = "额度修改失败: " + e.message;
+    el.userMsg.className = "msg-bar err";
+  });
 }
 function changeUserLevel(uid, input) {
   var v = parseInt(input.value, 10);
@@ -184,16 +252,18 @@ function createUser() {
   var password = el.userPasswordInput.value;
   var level = parseInt(el.userLevelInput.value, 10);
   if (isNaN(level)) level = 0;
+  var quota = parseFloat(el.userQuotaInput.value);
+  if (isNaN(quota)) quota = 0;
   el.userMsg.textContent = ""; el.userMsg.className = "msg-bar";
   if (!name) { el.userMsg.textContent = "请输入用户名"; el.userMsg.className = "msg-bar err"; return; }
   fetchJSON("/api/auth/users", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: name, password: password, level: level }),
+    body: JSON.stringify({ name: name, password: password, level: level, quota: quota }),
   }).then(function () {
     el.userMsg.textContent = "已创建用户「" + name + "」"; el.userMsg.className = "msg-bar ok";
     el.userNameInput.value = ""; el.userPasswordInput.value = "";
-    el.userLevelInput.value = "0";
+    el.userLevelInput.value = "0"; el.userQuotaInput.value = "0";
     renderUserList();
     el.userNameInput.focus();
   }).catch(function (e) {

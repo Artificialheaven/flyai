@@ -1,0 +1,8 @@
+{
+  "appId": "top.eastcloud.flyai",
+  "appName": "FlyAI",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}
