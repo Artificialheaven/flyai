@@ -2517,3 +2517,47 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
 .mem-log-kind { color: var(--text); }
 .mem-log-topic { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mem-log-hits { color: var(--text-dim); }
+/* 钻取视图内的「记忆条目 / 剧情台账」子切换 */
+.mem-subtabs { display: inline-flex; gap: 4px; margin-left: auto; }
+.mem-subtab {
+  padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--input); color: var(--text-dim); cursor: pointer; font: inherit; font-size: 12px;
+}
+.mem-subtab.active { background: var(--accent, #6c8cff); color: #fff; border-color: transparent; }
+.mem-subtab-badge {
+  display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 5px;
+  border-radius: 999px; background: rgba(127,127,127,.25);
+  font-size: 10px; line-height: 15px; text-align: center;
+}
+.mem-subtab.active .mem-subtab-badge { background: rgba(255,255,255,.25); }
+.mem-ledger-group h4 { margin: 10px 0 6px; font-size: 13px; color: var(--text); }
+.mem-ledger-group-n {
+  display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--hover, rgba(127,127,127,.12)); color: var(--text-dim);
+  font-size: 11px; text-align: center; font-weight: normal;
+}
+.mem-ledger-item {
+  border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+  background: var(--card, var(--input));
+}
+.mem-ledger-item.terminal { opacity: .55; }
+.mem-ledger-name { font-weight: 600; font-size: 13px; }
+.mem-ledger-status {
+  font-size: 10px; padding: 1px 8px; border-radius: 999px;
+  background: var(--hover, rgba(127,127,127,.15)); color: var(--text-dim);
+}
+.mem-ledger-status.open, .mem-ledger-status.planted, .mem-ledger-status.active {
+  background: rgba(108,140,255,.18); color: var(--accent, #6c8cff);
+}
+.mem-ledger-status.done, .mem-ledger-status.resolved {
+  background: rgba(60,170,100,.18); color: #3caa64;
+}
+.mem-ledger-at {
+  display: inline-block; min-width: 82px; margin-right: 8px;
+  color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.mem-ledger-history { margin-top: 4px; font-size: 12px; }
+.mem-ledger-history summary { cursor: pointer; color: var(--text-dim); }
+.mem-ledger-history ul { margin: 6px 0 2px; padding-left: 4px; list-style: none; }
+.mem-ledger-history li { padding: 2px 0; border-bottom: 1px dashed var(--border); }
+.mem-seat-publish { white-space: nowrap; }

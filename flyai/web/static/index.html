@@ -893,12 +893,22 @@
           <div class="mem-filters">
             <button type="button" id="btn-memory-back" class="btn small">← 全部来源</button>
             <strong id="memory-drill-title"></strong>
+            <span class="mem-subtabs">
+              <button type="button" id="btn-mem-pane-entries" class="mem-subtab active">记忆条目</button>
+              <button type="button" id="btn-mem-pane-ledger" class="mem-subtab">📒 剧情台账<span id="mem-ledger-badge" class="mem-subtab-badge"></span></button>
+            </span>
           </div>
-          <div class="mem-filters">
-            <input type="search" id="memory-search" placeholder="搜索该卡记忆文本…" />
-            <label class="f-label toggle"><input type="checkbox" id="memory-show-superseded" /> 显示已失效</label>
+          <div id="memory-drill-entry-pane">
+            <div class="mem-filters">
+              <input type="search" id="memory-search" placeholder="搜索该卡记忆文本…" />
+              <label class="f-label toggle"><input type="checkbox" id="memory-show-superseded" /> 显示已失效</label>
+            </div>
+            <div id="memory-entry-list" class="mem-list"></div>
           </div>
-          <div id="memory-entry-list" class="mem-list"></div>
+          <div id="memory-drill-ledger-pane" class="hidden">
+            <div class="sub">人物 / 物品 / 地点 / 任务 / 伏笔的当前状态与变迁史，由每 N 轮自动整理维护。</div>
+            <div id="memory-ledger-list" class="mem-list"></div>
+          </div>
         </div>
       </div>
       <div id="memory-logs-pane" class="hidden">

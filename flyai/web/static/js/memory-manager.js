@@ -16,10 +16,17 @@
     logsPane: document.getElementById("memory-recall-logs"),
     logsTabPane: document.getElementById("memory-logs-pane"),
     entriesTabPane: document.getElementById("memory-entries-pane"),
+    drillEntryPane: document.getElementById("memory-drill-entry-pane"),
+    drillLedgerPane: document.getElementById("memory-drill-ledger-pane"),
+    btnPaneEntries: document.getElementById("btn-mem-pane-entries"),
+    btnPaneLedger: document.getElementById("btn-mem-pane-ledger"),
+    ledgerBadge: document.getElementById("mem-ledger-badge"),
+    ledgerList: document.getElementById("memory-ledger-list"),
     btnClose: document.getElementById("btn-memory-mgr-close"),
     msg: document.getElementById("memory-mgr-msg"),
     drillChar: null,
     drillName: "",
+    drillPane: "entries",
     sources: [],
   };
 
@@ -127,6 +134,21 @@
     loadSources();
   }
 
+  function ledgerCount(charId) {
+    var row = (mm.sources || []).find(function (s) { return s.char_id === charId; });
+    return row ? (row.ledger || 0) : 0;
+  }
+
+  function switchDrillPane(name) {
+    mm.drillPane = name;
+    var onLedger = name === "ledger";
+    if (mm.drillEntryPane) mm.drillEntryPane.classList.toggle("hidden", onLedger);
+    if (mm.drillLedgerPane) mm.drillLedgerPane.classList.toggle("hidden", !onLedger);
+    if (mm.btnPaneEntries) mm.btnPaneEntries.classList.toggle("active", !onLedger);
+    if (mm.btnPaneLedger) mm.btnPaneLedger.classList.toggle("active", onLedger);
+    if (onLedger) loadLedger(); else loadEntries();
+  }
+
   function enterDrill(charId, name) {
     mm.drillChar = charId;
     mm.drillName = name || shortId(charId);
@@ -135,10 +157,76 @@
     if (mm.drillTitle) mm.drillTitle.textContent = mm.drillName;
     if (mm.search) mm.search.value = "";
     if (mm.showSuperseded) mm.showSuperseded.checked = false;
-    loadEntries();
+    if (mm.ledgerBadge) {
+      var n = ledgerCount(charId);
+      mm.ledgerBadge.textContent = n ? String(n) : "";
+      mm.ledgerBadge.classList.toggle("hidden", !n);
+    }
+    switchDrillPane("entries");
   }
 
   mm.btnBack && mm.btnBack.addEventListener("click", showSources);
+  mm.btnPaneEntries && mm.btnPaneEntries.addEventListener("click", function () {
+    switchDrillPane("entries");
+  });
+  mm.btnPaneLedger && mm.btnPaneLedger.addEventListener("click", function () {
+    switchDrillPane("ledger");
+  });
+
+  // ---- 某张卡的剧情台账 ----
+  var KIND_LABEL = {
+    character: "人物", item: "物品", location: "地点",
+    task: "任务", foreshadow: "伏笔",
+  };
+  var TERMINAL_STATUS = { done: 1, cancelled: 1, resolved: 1 };
+  var STATUS_LABEL = {
+    active: "有效", open: "进行中", planted: "已埋下",
+    done: "已完成", cancelled: "已取消", resolved: "已回收",
+  };
+
+  function loadLedger() {
+    if (!mm.ledgerList || !mm.drillChar) return;
+    mm.ledgerList.textContent = "加载中…";
+    fetchJSON("/api/my/memory/ledger?char_id=" + encodeURIComponent(mm.drillChar))
+      .then(function (data) {
+        var groups = data.groups || [];
+        var total = groups.reduce(function (n, g) { return n + (g.items || []).length; }, 0);
+        if (!total) {
+          mm.ledgerList.innerHTML = '<div class="mem-empty">这张卡还没有台账条目。聊到人物、物品、任务或伏笔时，自动整理会在这里记录它们的状态。</div>';
+          return;
+        }
+        mm.ledgerList.innerHTML = groups.map(function (g) {
+          var items = g.items || [];
+          if (!items.length) return "";
+          var rows = items.map(function (it) {
+            var terminal = !!TERMINAL_STATUS[it.status];
+            var stLabel = STATUS_LABEL[it.status] || it.status || "";
+            var hist = "";
+            if (it.history && it.history.length) {
+              var lines = it.history.slice().reverse().map(function (h) {
+                return "<li><span class=\"mem-ledger-at\">" + esc(h.at || "") + "</span>"
+                  + esc(h.state || "") + "</li>";
+              }).join("");
+              hist = '<details class="mem-ledger-history"><summary>变迁史（'
+                + it.history.length + "）</summary><ul>" + lines + "</ul></details>";
+            }
+            return '<div class="mem-ledger-item' + (terminal ? " terminal" : "") + '">'
+              + '<div class="mem-row-head"><span class="mem-ledger-name">' + esc(it.name || "")
+              + '</span><span class="mem-ledger-status ' + esc(it.status || "") + '">'
+              + esc(stLabel) + '</span>'
+              + '<span class="mem-row-meta">' + esc(it.updated_at || "") + "</span></div>"
+              + (it.state ? '<div class="mem-row-text">' + esc(it.state) + "</div>" : "")
+              + hist + "</div>";
+          }).join("");
+          return '<div class="mem-ledger-group"><h4>' + esc(KIND_LABEL[g.kind] || g.kind)
+            + " <span class=\"mem-ledger-group-n\">" + items.length + "</span></h4>"
+            + rows + "</div>";
+        }).join("");
+      })
+      .catch(function (e) {
+        mm.ledgerList.innerHTML = '<div class="mem-empty">加载失败: ' + esc(e.message) + "</div>";
+      });
+  }
 
   // ---- 某张卡的条目列表 ----
   var searchTimer = null;
@@ -179,7 +267,8 @@
 
   function refreshCurrent() {
     loadStats();
-    if (mm.drillChar) loadEntries(); else loadSources();
+    if (!mm.drillChar) { loadSources(); return; }
+    if (mm.drillPane === "ledger") loadLedger(); else loadEntries();
   }
 
   mm.list && mm.list.addEventListener("click", function (e) {

@@ -185,6 +185,31 @@ def memory_sources(request: Request):
     return {"sources": rows}
 
 
+@router.get("/ledger")
+def memory_ledger(request: Request, char_id: str):
+    """某张角色卡的剧情台账全文：人物/物品/地点/任务/伏笔，含变迁史。
+
+    每组内未终结（active/open/planted）在前，其后按更新时间倒序。
+    """
+    _scope, store = _store(request)
+    if store is None:
+        raise HTTPException(500, "记忆存储不可用")
+    cid = (char_id or "").strip()
+    if not cid:
+        raise HTTPException(400, "缺少 char_id")
+    from ..memory.ledger import ACTIVE_STATUS, KINDS
+
+    ledger = store.load_ledger(cid)
+    groups: List[dict] = []
+    for kind in KINDS:
+        items = [it.to_dict() for it in ledger.get(kind) or []]
+        items.sort(key=lambda d: d.get("updated_at") or "", reverse=True)
+        active_states = ACTIVE_STATUS[kind]
+        items.sort(key=lambda d: 0 if d.get("status") in active_states else 1)
+        groups.append({"kind": kind, "items": items})
+    return {"char_id": cid, "groups": groups}
+
+
 @router.get("/recall-logs")
 def recall_logs(request: Request, limit: int = 100):
     """最近的召回记录（自动/主动），最新在前。"""

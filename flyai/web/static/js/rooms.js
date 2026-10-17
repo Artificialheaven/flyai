@@ -1153,6 +1153,31 @@ function doRemoveMember(m) {
   }).catch(function (e) { showToast("移除失败: " + e.message, "err"); });
 }
 
+/* 座位的会话副本另存为角色库新卡（入库后座位仍用副本，重复点会生成多张新卡） */
+function publishSeatCharacter(m, btn) {
+  askConfirm({
+    title: "座位副本入库",
+    text: "把「" + memberDisplayName(m) + "」当前的会话副本另存为角色库中的一张新卡？"
+      + "房间里仍继续使用这个副本，库主卡不受影响。重复操作会再生成一张新卡。",
+    okLabel: "入 库",
+    onOk: function () {
+      if (btn) { btn.disabled = true; btn.textContent = "入库中…"; }
+      fetchJSON("/api/rooms/" + state.currentSessionId + "/members/" + m.id
+        + "/character/publish", { method: "POST" })
+        .then(function (res) {
+          if (btn) btn.textContent = "✓ 已入库";
+          showToast("已保存为角色卡：" + ((res.character && res.character.name) || ""), "ok");
+          // 刷新卡列表，让挂载归属/角色下拉立刻能选到新卡
+          return refreshLore();
+        })
+        .catch(function (e) {
+          if (btn) { btn.disabled = false; btn.textContent = "💾 副本入库"; }
+          showToast("入库失败: " + e.message, "err");
+        });
+    },
+  });
+}
+
 /* ---- 窗口重命名 ---- */
 
 var renameTarget = null;
@@ -1311,6 +1336,15 @@ function openMemDialog() {
       ownerSel.appendChild(o);
     });
     seatLine.appendChild(ownerSel);
+
+    // 座位挂着未入库的会话副本：可另存为角色库新卡（座位继续用副本，不动库主卡）
+    if (m.override) {
+      var pubBtn = document.createElement("button");
+      pubBtn.type = "button"; pubBtn.className = "btn small mem-seat-publish";
+      pubBtn.textContent = "💾 副本入库";
+      pubBtn.addEventListener("click", function () { publishSeatCharacter(m, pubBtn); });
+      seatLine.appendChild(pubBtn);
+    }
 
     var rmBtn = document.createElement("button");
     rmBtn.type = "button"; rmBtn.className = "btn small danger";

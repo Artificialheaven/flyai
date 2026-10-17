@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
+from ..sessions.resolve import member_character
 from .routes_session import _session_dict
 
 
@@ -218,6 +219,34 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
     )
     sc.store.save(s)
     return m.to_dict()
+
+
+@router.post("/rooms/{rid}/members/{mid}/character/publish")
+def publish_member_character(rid: str, mid: str, request: Request):
+    """把座位当前有效角色（通常是未入库的会话副本）另存为角色库新卡。
+
+    复制入库：座位仍挂在原来的副本上，库主卡不受影响，新卡获得新 id。
+    """
+    state = request.app.state.flyai
+    sc = state.user(request)
+    s = _must_get(sc, rid)
+    m = s.member(mid)
+    if m is None:
+        raise HTTPException(404, "参与者不存在")
+    if m.is_user:
+        raise HTTPException(400, "用户座位没有角色卡")
+    eff = member_character(m, sc.lore)
+    if eff is None:
+        raise HTTPException(400, "该座位没有角色卡")
+    import uuid
+
+    from ..lore.models import Character
+
+    data = eff.to_dict()
+    data["id"] = uuid.uuid4().hex
+    new_card = Character.from_dict(data)
+    sc.lore.save_character(new_card)
+    return {"character": new_card.to_dict()}
 
 
 @router.delete("/rooms/{rid}/members/{mid}")
