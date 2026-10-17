@@ -336,6 +336,72 @@ def test_session_and_request_disabled_tools_are_unioned(tmp_path):
     _run(body())
 
 
+def test_ledger_reminder_auto_injected(tmp_path):
+    """未终结的台账状态每轮自动注入系统提示词，不依赖 AI 主动查。"""
+    from flyai.lore.character_memory import CharacterMemoryStore
+    from flyai.memory.ledger import LedgerItem
+
+    async def body():
+        store = JsonSessionStore(tmp_path / "s")
+        s, chars, _g, _ais = _group_room(store, n=1)
+        state, sc = _state_scope(tmp_path, store, chars)
+        sc.char_memory = CharacterMemoryStore(tmp_path / "cm")
+        ledger = {
+            "character": [], "location": [],
+            "item": [LedgerItem(kind="item", name="铁剑", state="随身佩戴",
+                                status="active")],
+            "task": [
+                LedgerItem(kind="task", name="旧委托", state="已交付",
+                           status="done"),
+                LedgerItem(kind="task", name="寻找商队", state="追到黑森林",
+                           status="open"),
+            ],
+            "foreshadow": [],
+        }
+        sc.char_memory.save_ledger(chars[0].id, ledger)
+        sc.user_settings = SimpleNamespace(
+            auto_recall=True, lore_auto_inject=False, max_tokens=None)
+        prov = _RecordingProvider()
+        resp = await _chat_in_thread(
+            state, sc, s, _req(s.threads[0].id, message="我们出发吧"), prov)
+        await _drain(resp)
+        sys_text = "\n".join(
+            m.content for m in prov.calls[0]["messages"] if m.role == "system"
+        )
+        assert "【剧情状态】" in sys_text
+        assert "寻找商队" in sys_text and "铁剑" in sys_text
+        assert "旧委托" not in sys_text  # 已完成的不注入
+
+    _run(body())
+
+
+def test_ledger_reminder_skipped_when_auto_recall_off(tmp_path):
+    from flyai.lore.character_memory import CharacterMemoryStore
+    from flyai.memory.ledger import LedgerItem
+
+    async def body():
+        store = JsonSessionStore(tmp_path / "s")
+        s, chars, _g, _ais = _group_room(store, n=1)
+        state, sc = _state_scope(tmp_path, store, chars)
+        sc.char_memory = CharacterMemoryStore(tmp_path / "cm")
+        ledger = {"character": [], "location": [], "item": [], "foreshadow": [],
+                  "task": [LedgerItem(kind="task", name="寻找商队",
+                                      state="追击中", status="open")]}
+        sc.char_memory.save_ledger(chars[0].id, ledger)
+        sc.user_settings = SimpleNamespace(
+            auto_recall=False, lore_auto_inject=False, max_tokens=None)
+        prov = _RecordingProvider()
+        resp = await _chat_in_thread(
+            state, sc, s, _req(s.threads[0].id, message="我们出发吧"), prov)
+        await _drain(resp)
+        sys_text = "\n".join(
+            m.content for m in prov.calls[0]["messages"] if m.role == "system"
+        )
+        assert "【剧情状态】" not in sys_text and "寻找商队" not in sys_text
+
+    _run(body())
+
+
 def test_seat_provider_not_visible_403(tmp_path):
     async def body():
         store = JsonSessionStore(tmp_path / "s")

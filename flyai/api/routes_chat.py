@@ -172,6 +172,32 @@ async def build_auto_recall_block(*, state, sc, char_id, history, member,
     return block, items
 
 
+def build_ledger_block(sc, char_id, member) -> str:
+    """每轮自动注入的剧情台账状态概览（未终结的任务/伏笔/物品）。
+
+    与自动回忆共用 auto_recall 开关与挂载可见性：关了自动回忆的用户不注入；
+    座位对簿不可见（未挂载/挂别人的簿）时不注入。与检索无关，每轮恒定概览。
+    """
+    settings = getattr(sc, "user_settings", None)
+    if settings is None or not getattr(settings, "auto_recall", False):
+        return ""
+    from ..memory.ledger import render_ledger_reminder
+    from ..tools.memory_tool import _book_read_mode, _memory_owner
+
+    owner = _memory_owner(member) if member is not None else char_id
+    mode = _book_read_mode(member) if member is not None else "ro"
+    if mode not in ("rw", "ro") or not owner:
+        return ""
+    store = getattr(sc, "char_memory", None)
+    if store is None:
+        return ""
+    try:
+        return render_ledger_reminder(store.load_ledger(owner))
+    except Exception:
+        logger.exception("剧情台账注入失败")
+        return ""
+
+
 def _schedule_extraction(state, sc, char_id, marker_key, history, member,
                          provider) -> None:
     """P4：回答结束后非阻塞触发一次结构化批量抽取（按 extract_markers 增量）。
@@ -593,7 +619,9 @@ async def chat(req: ChatRequest, request: Request):
                     )
                 except Exception:
                     logger.exception("内容表触发词注入失败")
+            ledger_block = build_ledger_block(sc, session.character_id or "", None)
             injected = (("\n\n" + lore_block) if lore_block else "") \
+                + (("\n\n" + ledger_block) if ledger_block else "") \
                 + (("\n\n" + recall_block) if recall_block else "")
             recall_head = len(session.messages)
             async for (ev, data) in run_agent_loop(
@@ -1092,9 +1120,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         )
                     except Exception:
                         logger.exception("内容表触发词注入失败")
+                ledger_block = build_ledger_block(sc, spk.character_id or "", spk)
                 injected_parts = ""
                 if lore_block:
                     injected_parts += "\n\n" + lore_block
+                if ledger_block:
+                    injected_parts += "\n\n" + ledger_block
                 if recall_block:
                     injected_parts += "\n\n" + recall_block
                 # 该 AI 的完整发言回合。

@@ -206,8 +206,61 @@ def open_summary(ledger: Dict[str, List[LedgerItem]],
     out: List[LedgerItem] = []
     for kind in ("task", "foreshadow", "item"):
         active = [
-            it for it in ledger[kind]
+            it for it in (ledger.get(kind) or [])
             if it.status in ACTIVE_STATUS[kind]
         ]
         out.extend(active[-limit_per_kind:])
     return out
+
+
+KIND_LABELS = {
+    "character": "人物", "item": "物品", "location": "地点",
+    "task": "任务", "foreshadow": "伏笔",
+}
+STATUS_LABELS = {
+    # 物品/人物/地点只有 active 一种态，标签冗余，留空只显示类别名
+    "active": "", "open": "进行中", "planted": "已埋下",
+    "done": "已完成", "cancelled": "已取消", "resolved": "已回收",
+}
+
+REMINDER_LIMIT_PER_KIND = 2
+REMINDER_STATE_LIMIT = 120
+REMINDER_BUDGET = 600
+
+
+def render_ledger_reminder(ledger: Dict[str, List[LedgerItem]],
+                           limit_per_kind: int = REMINDER_LIMIT_PER_KIND,
+                           state_limit: int = REMINDER_STATE_LIMIT,
+                           budget: int = REMINDER_BUDGET) -> str:
+    """每轮自动注入的未终结状态概览（任务/伏笔/物品各最近 N 条）。
+
+    与 query_chat_memory 的台账块不同：这里无需 AI 主动调用，也不依赖本轮
+    话题，只放"仍在进行中"的状态，防止模型把进行中的任务说成已完成。
+    无活跃条目返回空串。
+    """
+    items = open_summary(ledger, limit_per_kind=limit_per_kind)
+    if not items:
+        return ""
+    lines: List[str] = []
+    used = 0
+    for it in items:
+        kind_label = KIND_LABELS.get(it.kind, it.kind)
+        st_label = STATUS_LABELS.get(it.status, it.status)
+        head = kind_label + ("·" + st_label if st_label else "")
+        state = (it.state or "").strip()
+        if len(state) > state_limit:
+            state = state[:state_limit] + "…"
+        line = "- [{0}] {1}{2}".format(
+            head, it.name, ("：" + state) if state else ""
+        )
+        if used + len(line) > budget:
+            continue  # 超预算跳过本条，后面的短条目仍可能放得下
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        return ""
+    return (
+        "【剧情状态】以下是仍在进行中的任务、已埋下未回收的伏笔与重要物品的"
+        "当前状态，请自然沿用；不要把它们说成已完成、已取消或已回收：\n"
+        + "\n".join(lines)
+    )
