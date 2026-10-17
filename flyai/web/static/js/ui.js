@@ -43,6 +43,8 @@ function cacheElements() {
   el.setAutoRecall = document.getElementById("set-auto-recall");
   el.setAutoRecallMax = document.getElementById("set-auto-recall-max");
   el.setExtractEvery = document.getElementById("set-extract-every");
+  el.setLoreAutoInject = document.getElementById("set-lore-auto-inject");
+  el.setMaxTokens = document.getElementById("set-max-tokens");
   el.btnOpenMemoryManager = document.getElementById("btn-open-memory-manager");
   el.pluginChecks = document.getElementById("plugin-checks");
   el.setEmbBase = document.getElementById("set-emb-base");
@@ -340,7 +342,8 @@ function bindEvents() {
   // 对话上下文相关设置：即时保存到账号设置。
   // change 和 input 都要阻止冒泡——弹窗脏检查两个事件都监听，
   // 手机端操作数字框会持续触发 input，不拦就会被记为「未保存修改」
-  [el.setKeepTurns, el.setAutoRecall, el.setAutoRecallMax, el.setExtractEvery]
+  [el.setKeepTurns, el.setAutoRecall, el.setAutoRecallMax, el.setExtractEvery,
+   el.setLoreAutoInject, el.setMaxTokens]
     .forEach(function (node) {
       if (!node) return;
       node.addEventListener("change", function (e) {

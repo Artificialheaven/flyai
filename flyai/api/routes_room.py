@@ -132,13 +132,27 @@ def create_room(body: RoomCreate, request: Request):
     if body.world_id:
         s.world_id = body.world_id
     s.members.append(RoomMember(name="你", is_user=True))  # 用户座位
+    chosen = []
     for cid in (body.character_ids or []):
         ch = sc.lore.get_character(cid)
         if ch is None:
             raise HTTPException(400, f"角色不存在: {cid}")
+        chosen.append((ch, cid))
         m = RoomMember(name=ch.name, character_id=cid)
         s.members.append(m)
         s.threads.append(Thread(kind="dm", title=m.name, member_ids=[m.id]))
+    # 开场白（first_mes）：仅单角色普通房间自动落一条 AI 首条消息。
+    # 多角色归属不明、Galgame 有自己的初始剧情流程，均不播种。
+    if not is_galgame and len(chosen) == 1:
+        greeting = (chosen[0][0].first_mes or "").strip()
+        if greeting:
+            from ..lore.query import substitute_chat_macros
+            from ..schemas import Message
+
+            greeting = substitute_chat_macros(greeting, chosen[0][0].name, "你")
+            s.threads[0].messages.append(
+                Message(role="assistant", content=greeting)
+            )
     sc.store.save(s)
     return _session_dict(s, with_messages=True, lore=sc.lore)
 
@@ -182,9 +196,23 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
         # 设/改用户扮演的自设：校验角色存在；空串表示清除
         if body.character_id and not sc.lore.get_character(body.character_id):
             raise HTTPException(400, "角色不存在")
+        card_changed = body.character_id != m.character_id
         m.character_id = body.character_id
         # 换卡时清掉旧的会话专属副本，避免遮蔽库卡
         m.override = None
+        # AI 座位真正换到另一张卡：旧角色的属性数值与本房间记忆不能带给新角色，
+        # 否则新角色会带着旧角色的好感度/记忆出场（串人设）。
+        # memory_mode/memory_char_id 是用户显式挂载的跨会话记忆簿配置，保留。
+        if card_changed and not m.is_user:
+            m.attributes = {}
+            m.memory = ""
+        # 普通单聊房间：唯一 AI 座位即会话挂载角色，同步顶层兼容字段
+        # （GET 会话的 character / 压缩 / 导出均读顶层；群聊与 Galgame 不同步）
+        if not m.is_user and (s.mode or "normal") != "galgame":
+            ai_seats = [x for x in s.members if not x.is_user]
+            if len(ai_seats) == 1:
+                s.character_id = body.character_id
+                s.character_override = None
     _apply_member_seat_settings(
         state, sc, m, body.provider_id, body.memory_mode, body.memory_char_id
     )

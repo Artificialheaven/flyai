@@ -101,7 +101,28 @@ function afterSessionImport(s) {
     showToast(msg, "ok", 4000);
   });
 }
-/* 导入 FlyAI 导出包：.zip 自包含包走 multipart，.json 文本包走原接口 */
+/* 第三方对话导入（Chatbox 备份 JSON / Markdown）成功后：刷新列表并进入 */
+function afterExternalImport(resp) {
+  var list = resp.sessions || [resp];
+  var sum = resp.import_summary || list[0].import_summary || {};
+  return refreshSessions().then(function () {
+    return selectSession(list[0].id);
+  }).then(function () {
+    var msg;
+    if (list.length > 1) {
+      msg = "已从备份导入 " + list.length + " 个对话（共 "
+        + intOr(sum.messages, 0) + " 条消息）";
+    } else {
+      msg = "已导入「" + (list[0].title || "对话") + "」（"
+        + intOr(sum.messages, 0) + " 条消息";
+      if (intOr(sum.images, 0)) msg += " · 图片 " + sum.images;
+      msg += "）";
+    }
+    showToast(msg, "ok", 4000);
+  });
+}
+/* 导入对话：FlyAI .zip 自包含包 / v2 JSON 走原接口；
+   Chatbox 备份 JSON 与 Markdown 走第三方导入接口（后端自动识别） */
 function importSessionFromFile(ev) {
   var input = ev.target;
   var f = input.files && input.files[0];
@@ -110,9 +131,9 @@ function importSessionFromFile(ev) {
   var isZip = /\.zip$/i.test(f.name) ||
     (f.type || "").indexOf("zip") >= 0;
   if (isZip) {
-    var fd = new FormData();
-    fd.append("file", f);
-    fetchJSON("/api/sessions/import-zip", { method: "POST", body: fd })
+    var fdZip = new FormData();
+    fdZip.append("file", f);
+    fetchJSON("/api/sessions/import-zip", { method: "POST", body: fdZip })
       .then(afterSessionImport)
       .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
     return;
@@ -120,14 +141,29 @@ function importSessionFromFile(ev) {
 
   var reader = new FileReader();
   reader.onload = function () {
-    var obj;
+    var obj = null;
     try { obj = JSON.parse(reader.result); }
-    catch (e) { showToast("文件不是有效的 JSON", "err"); return; }
-    fetchJSON("/api/sessions/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(obj),
-    }).then(afterSessionImport)
+    catch (e) { obj = null; }  // Markdown 等非 JSON：交给第三方导入接口
+
+    if (obj && obj.type === "flyai-conversation") {
+      if (obj.version !== 2) {
+        showToast("该导出包版本需使用 .zip 导入", "err");
+        return;
+      }
+      fetchJSON("/api/sessions/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(obj),
+      }).then(afterSessionImport)
+        .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
+      return;
+    }
+
+    // Chatbox 备份 JSON / 单对话 Markdown / 其他第三方格式
+    var fd = new FormData();
+    fd.append("file", f);
+    fetchJSON("/api/sessions/import-chatbox", { method: "POST", body: fd })
+      .then(afterExternalImport)
       .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
   };
   reader.readAsText(f);

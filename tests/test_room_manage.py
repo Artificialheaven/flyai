@@ -199,6 +199,106 @@ def test_update_member_memory_mode_validation(tmp_path):
     assert out["memory_mode"] == "rw" and out["memory_char_id"] == "c1"
 
 
+# ---- 单聊换卡：AI 座位换卡同步会话顶层挂载 ----
+
+def _single_dm_env(tmp_path, mode="normal"):
+    store = JsonSessionStore(tmp_path / "s")
+    chars = [Character(id="c1", name="原角色"), Character(id="c2", name="新角色")]
+    s = Session(title="单聊", mode=mode)
+    s.members.append(RoomMember(name="你", is_user=True))
+    m = RoomMember(name="原角色", character_id="c1")
+    s.members.append(m)
+    s.threads.append(Thread(kind="dm", title="原角色", member_ids=[m.id]))
+    store.save(s)
+    state = SimpleNamespace()
+    state.config = SimpleNamespace(providers=[])
+    state.run_manager = ChatRunManager()
+    sc = SimpleNamespace(
+        uid="admin", level=256, store=store, lore=_FakeLore(chars),
+        char_memory=CharacterMemoryStore(tmp_path / "cm"),
+    )
+    state.user = lambda request: sc
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(flyai=state)))
+    return sc, request, store, s, m
+
+
+def test_single_dm_switch_card_syncs_top_level(tmp_path):
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    out = update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    assert out["character_id"] == "c2" and out["override"] is None
+    s2 = store.get(s.id)
+    # 座位与顶层会话挂载同步
+    assert s2.member(m.id).character_id == "c2"
+    assert s2.character_id == "c2" and s2.character_override is None
+
+    # 换成「无角色」：顶层一并清空
+    update_member(s.id, m.id, MemberUpdate(character_id=""), request)
+    s2 = store.get(s.id)
+    assert s2.character_id == "" and s2.member(m.id).character_id == ""
+
+
+def test_switch_card_replaces_scoped_override(tmp_path):
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    m.override = Character(id="x", name="副本").to_dict()
+    m.character_id = ""
+    s.character_override = m.override
+    store.save(s)
+    update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    s2 = store.get(s.id)
+    assert s2.member(m.id).override is None
+    assert s2.character_id == "c2" and s2.character_override is None
+
+
+def test_switch_card_clears_old_attrs_and_room_memory(tmp_path):
+    """换到另一张卡：旧角色的属性值与本房间记忆不能带给新角色（防串人设）；
+    但用户显式挂载的跨会话记忆簿配置保留。"""
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    m.attributes = {"好感": 80}
+    m.memory = "- [2026-10-12] 旧角色的房间记忆"
+    m.memory_mode = "rw"
+    m.memory_char_id = "c1"
+    store.save(s)
+    update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    s2 = store.get(s.id)
+    m2 = s2.member(m.id)
+    assert m2.attributes == {}
+    assert m2.memory == ""
+    assert m2.memory_mode == "rw" and m2.memory_char_id == "c1"
+
+    # 设置成同一张卡（幂等保存）不应清空
+    update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    s2 = store.get(s.id)
+    assert s2.member(m.id).memory_mode == "rw"
+
+
+def test_group_and_galgame_switch_keeps_top_level(tmp_path):
+    # 群聊（双 AI）：换座位卡不动顶层挂载
+    state, sc, request, store, s, g, ais = _env(tmp_path)
+    update_member(s.id, ais[0].id, MemberUpdate(character_id=""), request)
+    s2 = store.get(s.id)
+    assert s2.character_id == ""  # 顶层本来就空，保持空
+
+    # Galgame 单聊：同样不同步顶层
+    sc2, request2, store2, sg, mg = _single_dm_env(tmp_path / "g", mode="galgame")
+    sg.character_id = "c1"
+    store2.save(sg)
+    update_member(sg.id, mg.id, MemberUpdate(character_id="c2"), request2)
+    sg2 = store2.get(sg.id)
+    assert sg2.member(mg.id).character_id == "c2"
+    assert sg2.character_id == "c1"  # Galgame 顶层挂载保持
+
+
+def test_persona_switch_does_not_touch_top_level(tmp_path):
+    # 用户座位（persona）挂卡：从不是会话 AI 挂载，顶层不动
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    s.character_id = "c1"
+    store.save(s)
+    user_seat = s.members[0]
+    update_member(s.id, user_seat.id, MemberUpdate(character_id="c2"), request)
+    s2 = store.get(s.id)
+    assert s2.character_id == "c1"
+
+
 # ---- Galgame 房间 ----
 
 def _room_create_env(tmp_path):
@@ -284,3 +384,50 @@ def test_create_normal_room_default_mode(tmp_path):
     sc, request = _room_create_env(tmp_path)
     out = create_room(RoomCreate(character_ids=["c1", "c2"]), request)
     assert out["mode"] == "normal"
+
+
+# ---- 开场白（first_mes）播种 ----
+
+def test_single_normal_room_seeds_first_mes(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    sc.lore.get_character("c1").first_mes = "  {{char}}看向{{user}}：「来了？」  "
+    out = create_room(RoomCreate(character_ids=["c1"]), request)
+
+    msgs = out["threads"][0]["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "assistant"
+    # 宏已替换、首尾空白已剥
+    assert msgs[0]["content"] == "角色1看向你：「来了？」"
+    # 已随会话落盘
+    saved = sc.store.get(out["id"])
+    assert saved.threads[0].messages[0].content == "角色1看向你：「来了？」"
+
+
+def test_first_mes_not_seeded_for_multi_character_room(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    sc.lore.get_character("c1").first_mes = "不该出现的开场白"
+    out = create_room(RoomCreate(character_ids=["c1", "c2"]), request)
+    assert all(t["messages"] == [] for t in out["threads"])
+
+
+def test_first_mes_not_seeded_for_galgame_room(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    sc.lore.get_character("c1").first_mes = "不该出现的开场白"
+    out = create_room(
+        RoomCreate(character_ids=["c1"], mode="galgame"), request)
+    assert out["threads"][0]["messages"] == []
+
+
+def test_empty_first_mes_seeds_nothing(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _room_create_env(tmp_path)
+    sc.lore.get_character("c1").first_mes = "   \n  "
+    out = create_room(RoomCreate(character_ids=["c1"]), request)
+    assert out["threads"][0]["messages"] == []

@@ -75,6 +75,9 @@ class Message:
     ok: Optional[bool] = None
     # 群聊中 AI 自评「无需发言」时标记隐藏：仍存历史，但不展示
     hidden: Optional[bool] = None
+    # 群聊发言座位 id：该消息（含同一回合的工具调用/结果）由哪个 AI 座位产生。
+    # 必须落盘：刷新/重启后 _actor_view 靠它把别人的工具回合与思考隔离开
+    actor_id: Optional[str] = None
     # 本轮自动召回的记忆条目（仅前端折叠组展示用；发给模型时各适配器忽略，
     # 召回正文已在当时拼进系统提示词）
     recall: Optional[List[Dict[str, Any]]] = None
@@ -97,6 +100,7 @@ class Message:
             "name": self.name,
             "ok": self.ok,
             "hidden": self.hidden,
+            "actor_id": self.actor_id,
             "recall": self.recall,
             "images": [i.to_dict() for i in self.images] if self.images else None,
         }
@@ -116,6 +120,7 @@ class Message:
             ok=data.get("ok"),
             # 保留 None：from_dict→to_dict 必须幂等，heal 用签名比对识别孤儿消息
             hidden=data.get("hidden"),
+            actor_id=data.get("actor_id"),
             recall=data.get("recall"),
             images=(
                 [ImageAttachment.from_dict(i) for i in data.get("images")]

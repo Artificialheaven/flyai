@@ -798,6 +798,7 @@ label.f-label input:focus, label.f-label textarea:focus { border-color: var(--ac
 .entry-row input, .entry-row textarea { width: 100%; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical; }
 .entry-row input[type="checkbox"] { width: auto; padding: 0; border: none; accent-color: var(--accent); }
 .entry-row input:focus, .entry-row textarea:focus { border-color: var(--accent); outline: none; }
+.entry-row .ed-keys { grid-column: 1 / -1; font-size: 12px; color: var(--text-dim); }
 .simple-list { display: block; margin-top: 4px; }
 .tts-voice-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .tts-voice-row input { flex: 1; min-width: 0; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; }
@@ -986,6 +987,17 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   display: block; font-size: 11px; color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* 本窗口工具弹窗：分组勾选 */
+.td-groups { display: flex; flex-direction: column; gap: 6px; margin: 8px 0;
+  max-height: 52vh; overflow-y: auto; padding-right: 2px; }
+.td-group { border: 1px solid var(--border, #333); border-radius: 10px;
+  padding: 4px 8px 6px; }
+.td-group-head { display: flex; align-items: center; gap: 8px;
+  padding: 6px 2px; cursor: pointer; font-size: 13.5px; }
+.td-group-head input { width: auto; margin: 0; accent-color: var(--accent); }
+.td-tool { padding: 6px 8px; border-radius: 8px; }
+#td-max-tokens { max-width: 160px; }
 
 /* ==== 空状态（无会话时的主区引导）==== */
 .empty-state {
@@ -2477,6 +2489,8 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   font-size: 11px; padding: 2px 8px; border-radius: 999px;
   background: var(--hover, rgba(127,127,127,.12)); color: var(--text-dim);
 }
+.mem-chip-link { cursor: pointer; }
+.mem-chip-link:hover { color: var(--text); background: var(--accent, #6c8cff); color: #fff; }
 .mem-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
 .mem-filters input[type="search"] {
   flex: 1 1 160px; padding: 8px 10px; border-radius: 9px;
@@ -2489,6 +2503,8 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   background: var(--card, var(--input));
 }
 .mem-row.superseded { opacity: .5; }
+.mem-source { cursor: pointer; }
+.mem-source:hover { border-color: var(--accent, #6c8cff); }
 .mem-row-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .mem-row-meta { font-size: 11px; color: var(--text-dim); }
 .mem-row-text { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }

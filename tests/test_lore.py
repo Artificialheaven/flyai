@@ -157,3 +157,107 @@ def test_build_character_carries_voice():
 
     c2 = _build_character(CharacterPayload(id="c4", name="阿明"))
     assert c2.voice == ""
+
+
+# ---- 触发词 keys：序列化与检索打分 ----
+
+def test_lore_entry_keys_roundtrip():
+    e = LoreEntry("铁剑", "寒铁铸造", keys=["铁剑", "剑术"])
+    d = e.to_dict()
+    assert d["keys"] == ["铁剑", "剑术"]
+    assert LoreEntry.from_dict(d).keys == ["铁剑", "剑术"]
+
+
+def test_lore_entry_keys_legacy_compat():
+    # 旧数据缺 keys → 空列表；字符串/带空白元素归一化
+    assert LoreEntry.from_dict({"title": "旧条目", "content": "x"}).keys == []
+    assert LoreEntry.from_dict(
+        {"title": "t", "content": "x", "keys": "铁剑,剑术"}
+    ).keys == ["铁剑,剑术"]  # 字符串整体保留为单个触发词（前端导入负责拆分）
+    assert LoreEntry.from_dict(
+        {"title": "t", "content": "x", "keys": [" 铁剑 ", "", "剑术"]}
+    ).keys == ["铁剑", "剑术"]
+
+
+def test_search_matches_and_ranks_by_keys():
+    # 标题与正文都不含「铁剑」，只有 keys 命中 → 仍可被 AI 主动查询检出
+    hit = LoreEntry("身世线索", "与王室有关的旧物", keys=["铁剑"])
+    body_hit = LoreEntry("另一标题", "一把普通的铁剑罢了")
+    miss = LoreEntry("魔法", "火球术", keys=["魔术"])
+    q = LoreQuerier(Character(name="艾拉", table=[miss, hit, body_hit]), World(name="艾尔"))
+    rows = q.search("character", "铁剑")
+    assert hit in rows
+    # keys 精确（+50）应排在正文命中（+1）之前
+    assert rows[0] is hit
+    assert miss not in rows
+
+
+# ---- PHI / 开场白字段 ----
+
+def test_character_phi_and_first_mes_roundtrip():
+    c = Character(
+        id="c5", name="鲁迪",
+        post_history_instructions="保持角色语气。",
+        first_mes="{{char}}睁开眼：「{{user}}，你来了。」",
+    )
+    d = c.to_dict()
+    assert d["post_history_instructions"] == "保持角色语气。"
+    assert "{{char}}" in d["first_mes"]
+    c2 = Character.from_dict(d)
+    assert c2.post_history_instructions == "保持角色语气。"
+    assert c2.first_mes == "{{char}}睁开眼：「{{user}}，你来了。」"
+
+
+def test_character_phi_and_first_mes_legacy_defaults():
+    # 旧卡数据缺这两个键：缺省为空串，不报错
+    d = Character(id="c6", name="旧卡").to_dict()
+    d.pop("post_history_instructions")
+    d.pop("first_mes")
+    c = Character.from_dict(d)
+    assert c.post_history_instructions == ""
+    assert c.first_mes == ""
+    # None / 非字符串也归一化为空串
+    c2 = Character.from_dict({"id": "c7", "name": "怪卡",
+                              "post_history_instructions": None,
+                              "first_mes": None})
+    assert c2.post_history_instructions == "" and c2.first_mes == ""
+
+
+def test_build_character_carries_phi_and_first_mes():
+    from flyai.api.routes_lore import CharacterPayload, _build_character
+
+    c = _build_character(CharacterPayload(
+        id="c8", name="小梅",
+        post_history_instructions=" 用括号写心理活动 ",
+        first_mes="你好呀",
+    ))
+    assert c.post_history_instructions == " 用括号写心理活动 "
+    assert c.first_mes == "你好呀"
+
+    c2 = _build_character(CharacterPayload(id="c9", name="阿明"))
+    assert c2.post_history_instructions == "" and c2.first_mes == ""
+
+
+# ---- 开场白/范例宏替换 ----
+
+def test_substitute_chat_macros():
+    from flyai.lore.query import substitute_chat_macros
+
+    out = substitute_chat_macros(
+        "{{char}}看着{{ user }}，而 {{CHAR}} 没说话", "鲁迪", "你")
+    assert out == "鲁迪看着你，而 鲁迪 没说话"
+    # 空名回退默认；None/空文本不炸
+    assert substitute_chat_macros("{{char}}/{{user}}", "", "") == "角色/用户"
+    assert substitute_chat_macros(None, "鲁迪") == ""
+
+
+def test_parse_mes_example_substitutes_macros():
+    from flyai.lore.query import parse_mes_example
+
+    raw = "{{char}}：你好<START>{{user}}：嗨\n{{char}}：再见"
+    rounds = parse_mes_example(raw, "鲁迪", "你")
+    assert len(rounds) == 2
+    assert rounds[0] == "鲁迪：你好"
+    assert rounds[1] == "你：嗨\n鲁迪：再见"
+    assert parse_mes_example("", "鲁迪") == []
+    assert parse_mes_example("<START>  <start>", "鲁迪") == []

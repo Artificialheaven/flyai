@@ -6,9 +6,11 @@ char_id 经 CharacterMemoryStore 的 safe_child 校验，不可路径穿越。
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+
+from ..sessions.resolve import member_character
 
 router = APIRouter(prefix="/api/my/memory", tags=["memory"])
 
@@ -90,6 +92,97 @@ def memory_stats(request: Request):
         totals["superseded"] += sup
         totals["ledger"] += ledger_n
     return {"per_char": per, "total": totals}
+
+
+def _book_stats(store, cid: str) -> dict:
+    """单个记忆簿的有效条目/失效条目/台账条数。"""
+    book = store.load_book(cid)
+    active = sum(1 for e in book.entries if not e.superseded)
+    return {
+        "active": active,
+        "superseded": len(book.entries) - active,
+        "ledger": sum(len(items) for items in store.load_ledger(cid).values()),
+    }
+
+
+@router.get("/sources")
+def memory_sources(request: Request):
+    """记忆来源两级列表：每行「角色卡（副本名）· 房间名」，点击按 char_id 钻取。
+
+    聚合键是记忆簿实际归属（memory_char_id 优先，否则座位 character_id），
+    因此会话副本/派生卡座位也能正确归到它写入的簿；同一张卡在多个房间使用
+    时产生多行（点击都按该 char_id 过滤）。磁盘有簿但当前没有任何房间引用
+    的卡（卡被删/旧数据）给一行「未挂载」兜底，避免条目无处可找。
+    """
+    scope, store = _store(request)
+    if store is None:
+        raise HTTPException(500, "记忆存储不可用")
+
+    stats: Dict[str, dict] = {}
+    for cid in _book_ids(store):
+        st = _book_stats(store, cid)
+        if st["active"] or st["superseded"] or st["ledger"]:
+            stats[cid] = st
+
+    rows: List[dict] = []
+    seen = set()
+    linked = set()
+    for listed in scope.store.list():
+        sess = scope.store.get(listed.id)
+        if sess is None:
+            continue
+        owners = {}
+        for m in sess.members:
+            if getattr(m, "is_user", False):
+                continue
+            owner = (
+                (getattr(m, "memory_char_id", "") or "").strip()
+                or (getattr(m, "character_id", "") or "").strip()
+            )
+            if not owner or owner in owners:
+                continue
+            char = member_character(m, scope.lore)
+            owners[owner] = (
+                (getattr(char, "alias", "") or getattr(char, "name", "") or "")
+                if char is not None else ""
+            )
+        for owner, name in owners.items():
+            linked.add(owner)
+            key = (owner, sess.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            st = stats.get(owner)
+            if st is None:
+                continue  # 簿尚不存在/为空：不出现在记忆管理里
+            rows.append({
+                "char_id": owner,
+                "char_name": name,
+                "session_id": sess.id,
+                "session_title": sess.title,
+                "active": st["active"],
+                "superseded": st["superseded"],
+                "ledger": st["ledger"],
+                "orphan": False,
+            })
+
+    for cid, st in stats.items():
+        if cid in linked:
+            continue
+        rows.append({
+            "char_id": cid,
+            "char_name": "",
+            "session_id": "",
+            "session_title": "",
+            "active": st["active"],
+            "superseded": st["superseded"],
+            "ledger": st["ledger"],
+            "orphan": True,
+        })
+
+    rows.sort(key=lambda r: (r["orphan"], -(r["active"] + r["ledger"]),
+                             r["char_name"] or r["char_id"]))
+    return {"sources": rows}
 
 
 @router.get("/recall-logs")

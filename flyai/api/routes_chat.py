@@ -172,21 +172,27 @@ async def build_auto_recall_block(*, state, sc, char_id, history, member,
     return block, items
 
 
-def _schedule_extraction(state, sc, char_id, session_id, history, member,
-                         provider, cache_namespace) -> None:
+def _schedule_extraction(state, sc, char_id, marker_key, history, member,
+                         provider) -> None:
     """P4：回答结束后非阻塞触发一次结构化批量抽取（按 extract_markers 增量）。
 
-    写记忆簿遵循挂载语义：旧单 AI 路径总是允许；房间路径仅 rw 挂载允许。
+    marker_key：抽取进度键，必须对应一份独立历史——房间路径传窗口 id，
+    旧单 AI 路径传会话 id。
+    写记忆簿遵循挂载语义：旧单 AI 路径总是允许；房间路径要求该座位对簿
+    可写（自有卡默认读写，挂别人的簿需显式 rw）。
     """
     settings = getattr(sc, "user_settings", None)
     every = int(getattr(settings, "extract_every_turns", 0) or 0)
-    if every <= 0 or provider is None or not char_id:
+    if every <= 0 or provider is None or not char_id or not marker_key:
         return
     if member is not None:
-        from ..tools.memory_tool import _memory_mode
+        from ..tools.memory_tool import _book_write_mode, _memory_owner
 
-        if _memory_mode(member) != "rw":
+        if _book_write_mode(member) != "rw":
             return
+        # 与 update_chat_memory 工具保持同一归属：显式挂载（memory_char_id）
+        # 时抽取也必须写进挂载簿，不能写座位自己的簿
+        char_id = _memory_owner(member)
 
     async def _job():
         try:
@@ -195,13 +201,27 @@ def _schedule_extraction(state, sc, char_id, session_id, history, member,
             report = await maybe_structured_extract(
                 char_store=sc.char_memory,
                 char_id=char_id,
-                session_id=session_id,
+                marker_key=marker_key,
                 history=history,
                 provider=provider,
                 every=every,
             )
             if report is not None:
-                logger.info("结构化抽取完成 %s: %s", cache_namespace, report)
+                logger.info("结构化抽取完成 %s: %s", marker_key, report)
+                buf = getattr(state, "recall_logs", None)
+                if buf is not None:
+                    try:
+                        ent = report.get("entries") or {}
+                        led = report.get("ledger") or {}
+                        buf.add(
+                            kind="extract", topic=char_id,
+                            added=int(ent.get("added", 0) or 0),
+                            updated=int(ent.get("updated", 0) or 0),
+                            ledger=int(led.get("added", 0) or 0
+                                       + led.get("updated", 0) or 0),
+                        )
+                    except Exception:
+                        pass
         except Exception:
             logger.exception("结构化抽取失败")
 
@@ -256,6 +276,15 @@ class ChatRequest(BaseModel):
     # 输入框「⋯ → 工具」里手动关闭的工具名：只在功能偏好允许集内做差集，
     # 无法绕过管理员/用户的类别级开关
     disabled_tools: List[str] = []
+
+
+def _effective_max_tokens(session, user_settings) -> Optional[int]:
+    """本轮回复 token 上限：单窗口覆盖 > 用户全局 > None（跟随提供商配置）。"""
+    room_mt = int(getattr(session, "max_tokens", 0) or 0)
+    if room_mt > 0:
+        return room_mt
+    global_mt = int(getattr(user_settings, "max_tokens", 0) or 0)
+    return global_mt or None
 
 
 def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
@@ -442,7 +471,10 @@ async def chat(req: ChatRequest, request: Request):
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
-            disabled=set(getattr(req, "disabled_tools", None) or []),
+            disabled=(
+                set(getattr(req, "disabled_tools", None) or [])
+                | set(getattr(session, "disabled_tools", None) or [])
+            ),
         )
         if hasattr(_registry, "all") else None
     )
@@ -551,16 +583,25 @@ async def chat(req: ChatRequest, request: Request):
                     {"count": len(recall_items), "source": "auto",
                      "items": recall_items},
                 )
+            # 内容表触发词自动注入（世界书 selective）：系统侧扫描用户消息，
+            # 命中条目直接进系统提示词，不依赖 AI 主动 query_lore
+            lore_block = ""
+            if getattr(_us, "lore_auto_inject", True) and services.get("lore"):
+                try:
+                    lore_block = await services["lore"].trigger_block(
+                        req.message or "", services.get("embedder"),
+                    )
+                except Exception:
+                    logger.exception("内容表触发词注入失败")
+            injected = (("\n\n" + lore_block) if lore_block else "") \
+                + (("\n\n" + recall_block) if recall_block else "")
             recall_head = len(session.messages)
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
                 provider=provider,
                 registry=state.registry,
                 settings=eff_tools,
-                system_prompt=(
-                    system_prompt + "\n\n" + recall_block
-                    if recall_block else system_prompt
-                ),
+                system_prompt=system_prompt + injected,
                 session_id=session.id,
                 services=services,
                 web_max_iterations=getattr(
@@ -571,6 +612,10 @@ async def chat(req: ChatRequest, request: Request):
                 ) or 0,
                 allowed_tools=allowed_tools,
                 deep_thinking=getattr(req, "deep_thinking", False),
+                post_history_instructions=getattr(
+                    character, "post_history_instructions", ""
+                ) or "",
+                max_tokens=_effective_max_tokens(session, _us),
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -581,10 +626,9 @@ async def chat(req: ChatRequest, request: Request):
             _schedule_extraction(
                 state, sc,
                 char_id=session.character_id or "",
-                session_id=session.id,
+                marker_key=session.id,
                 history=session.messages, member=None,
                 provider=provider,
-                cache_namespace=session.id,
             )
             return "done"
         except ProviderError as exc:
@@ -646,6 +690,9 @@ def _heal_dangling_tool_calls(history, custom=None):
                     name=call.name,
                     content=content,
                     ok=False,
+                    # 继承发起该工具调用的 assistant 座位归属，
+                    # 否则补造消息无 actor_id 会泄露给同群其他 AI
+                    actor_id=getattr(m0, "actor_id", None) or None,
                 )
             )
             fixed.add(cid)
@@ -734,10 +781,15 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
-            disabled=set(getattr(req, "disabled_tools", None) or []),
+            disabled=(
+                set(getattr(req, "disabled_tools", None) or [])
+                | set(getattr(session, "disabled_tools", None) or [])
+            ),
         )
         if hasattr(_registry, "all") else None
     )
+    # 本窗口 max_tokens 覆盖（房间 > 用户全局 > 提供商配置）
+    eff_max_tokens = _effective_max_tokens(session, _us)
 
     # 用户扮演的自设（persona）：用户座位的角色卡；未设则 None（保持原「你」行为）
     user_char = member_character(user_seat(session), sc.lore)
@@ -1031,6 +1083,20 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                          "name": spk.name, "source": "auto",
                          "items": recall_items},
                     )
+                # 内容表触发词自动注入：该座位的角色表 + 共享世界表
+                lore_block = ""
+                if getattr(_us, "lore_auto_inject", True) and services.get("lore"):
+                    try:
+                        lore_block = await services["lore"].trigger_block(
+                            req.message or "", services.get("embedder"),
+                        )
+                    except Exception:
+                        logger.exception("内容表触发词注入失败")
+                injected_parts = ""
+                if lore_block:
+                    injected_parts += "\n\n" + lore_block
+                if recall_block:
+                    injected_parts += "\n\n" + recall_block
                 # 该 AI 的完整发言回合。
                 # 群聊里若模型一次给「空回复」（0 个字、且没通过工具得到内容），视为没开口成功：
                 # 不要当跳过，用一句系统提醒重试几次，避免『第二个 AI 不说话』。
@@ -1061,9 +1127,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         registry=state.registry,
                         settings=loop_settings,
                         system_prompt=(
-                            sys_prompt + recall_block + retry_nudge
-                            if recall_block
-                            else sys_prompt + retry_nudge
+                            sys_prompt + injected_parts + retry_nudge
                         ),
                         session_id=session.id,
                         run_id=run.id,
@@ -1073,11 +1137,16 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             "max_iterations", None,
                         ),
                         actor=spk.id,
+                        actor_name=spk.name,
                         keep_turns=getattr(
                             getattr(sc, "user_settings", None), "keep_turns", 0
                         ) or 0,
                         allowed_tools=allowed_tools,
                         deep_thinking=getattr(req, "deep_thinking", False),
+                        post_history_instructions=getattr(
+                            char, "post_history_instructions", ""
+                        ) or "",
+                        max_tokens=eff_max_tokens,
                     ):
                         if ev == "done":
                             done_data = data
@@ -1155,10 +1224,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 _schedule_extraction(
                     state, sc,
                     char_id=spk.character_id or "",
-                    session_id=session.id,
+                    marker_key=thread.id,
                     history=history, member=spk,
                     provider=spk_provider,
-                    cache_namespace=thread.id,
                 )
             _merge_galgame_tts_overlay(state, session)
             sc.store.save(session)
@@ -1221,7 +1289,10 @@ def _snapshot_transcript(session, member) -> str:
     from ..tools.memory_tool import QueryChatMemoryTool
 
     char_id = (getattr(member, "character_id", "") or "").strip()
-    sets = QueryChatMemoryTool._candidate_sets(session, char_id)
+    # 按座位精确匹配窗口：同一张卡挂多个座位时不互相回顾私聊窗口
+    sets = QueryChatMemoryTool._candidate_sets(
+        session, char_id, getattr(member, "id", "") or ""
+    )
     chunks: List[str] = []
     used = 0
     for _tid, label, msgs in sets:
@@ -1359,6 +1430,9 @@ async def memory_snapshot(rid: str, request: Request,
                 services=services,
                 actor=spk.id,
                 allowed_tools=snap_allowed,
+                post_history_instructions=getattr(
+                    char, "post_history_instructions", ""
+                ) or "",
             ):
                 if ev == "done":
                     done_data = data

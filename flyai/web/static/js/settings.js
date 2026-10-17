@@ -48,6 +48,8 @@ function loadMySettings() {
   if (el.setAutoRecall) el.setAutoRecall.checked = false;
   if (el.setAutoRecallMax) el.setAutoRecallMax.value = 5;
   if (el.setExtractEvery) el.setExtractEvery.value = 10;
+  if (el.setLoreAutoInject) el.setLoreAutoInject.checked = true;
+  if (el.setMaxTokens) el.setMaxTokens.value = 0;
   return fetchJSON("/api/my/settings").then(function (s) {
     if (!s) return;
     state.mySettings = s;
@@ -55,6 +57,8 @@ function loadMySettings() {
     if (el.setAutoRecall) el.setAutoRecall.checked = !!s.auto_recall;
     if (el.setAutoRecallMax) el.setAutoRecallMax.value = s.auto_recall_max || 5;
     if (el.setExtractEvery) el.setExtractEvery.value = s.extract_every_turns != null ? s.extract_every_turns : 10;
+    if (el.setLoreAutoInject) el.setLoreAutoInject.checked = s.lore_auto_inject !== false;
+    if (el.setMaxTokens) el.setMaxTokens.value = s.max_tokens || 0;
     if (state.role !== "admin") renderUserFeatures();
   }).catch(function () {});
 }
@@ -72,9 +76,14 @@ function saveMySettings() {
     extract_every_turns: el.setExtractEvery
       ? Math.max(0, _intInput(el.setExtractEvery, 10))
       : 10,
+    lore_auto_inject: el.setLoreAutoInject ? !!el.setLoreAutoInject.checked : true,
+    max_tokens: el.setMaxTokens
+      ? Math.max(0, Math.min(100000, _intInput(el.setMaxTokens, 0)))
+      : 0,
   };
   if (el.setAutoRecallMax) el.setAutoRecallMax.value = payload.auto_recall_max;
   if (el.setExtractEvery) el.setExtractEvery.value = payload.extract_every_turns;
+  if (el.setMaxTokens) el.setMaxTokens.value = payload.max_tokens;
   fetchJSON("/api/my/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -257,6 +266,7 @@ function renderUserFeatures() {
     follow.className = "uf-follow";
     var chk = document.createElement("input");
     chk.type = "checkbox";
+    chk.className = "uf-follow-chk";
     chk.checked = followed;
     follow.appendChild(chk);
     follow.appendChild(document.createTextNode(" 跟随全局默认"));
@@ -310,6 +320,9 @@ function saveFeaturePrefs() {
       ? Math.max(1, Math.min(20, _intInput(el.setAutoRecallMax, 5))) : 5,
     extract_every_turns: el.setExtractEvery
       ? Math.max(0, _intInput(el.setExtractEvery, 10)) : 10,
+    lore_auto_inject: el.setLoreAutoInject ? !!el.setLoreAutoInject.checked : true,
+    max_tokens: el.setMaxTokens
+      ? Math.max(0, Math.min(100000, _intInput(el.setMaxTokens, 0))) : 0,
   };
   // 默认全部跟随（null），取消跟随的区块逐字段收集
   USER_FEATURE_BLOCKS.forEach(function (block) {

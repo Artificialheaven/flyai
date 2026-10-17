@@ -136,6 +136,11 @@ function characterEditorHtml(c, scoped, parentForNew) {
     '<label class="f-label">角色简介<textarea id="ed-intro" rows="2">' + escapeHtml(v.intro) + "</textarea></label>" +
     '<label class="f-label">角色经历<textarea id="ed-bg" rows="4">' + escapeHtml(v.background) + "</textarea></label>" +
     "<div class='spacer'></div>" +
+    "<h4>开场白</h4>" +
+    '<p class="sub">用该角色新建<b>单角色普通对话</b>时，自动作为 AI 的第一条消息出现（不调用模型、不消耗额度）。可用 {{char}} 代表本角色、{{user}} 代表用户；留空则不发送。多角色群聊与 Galgame 模式不生效。</p>' +
+    '<label class="f-label">开场白 first_mes<textarea id="ed-first-mes" rows="5" placeholder="{{char}}缓缓睁开眼，看向刚走进房间的你……">'
+    + escapeHtml(v.first_mes || "") + "</textarea></label>" +
+    "<div class='spacer'></div>" +
     "<h4>对话范例（few-shot，维持原创角色语气的关键）</h4>" +
     '<p class="sub">3~5 轮范例对白，轮与轮之间单独一行写 &lt;START&gt;；可用 {{char}} 代表本角色、{{user}} 代表用户。' +
     "范例剧情不会真实发生，仅供 AI 模仿语气、节奏与格式。</p>" +
@@ -144,6 +149,10 @@ function characterEditorHtml(c, scoped, parentForNew) {
     "<div class='spacer'></div>" +
     "<h4>系统级提示词</h4>" +
     '<label class="f-label">高优先级系统指令，直接约束模型行为（留空则不注入）<textarea id="ed-system" rows="3">' + escapeHtml(v.system_prompt || "") + "</textarea></label>" +
+    "<h4>历史后指令（PHI）</h4>" +
+    '<p class="sub">每轮注入在<b>聊天历史之后、AI 开口之前</b>的末位指令，离生成位置最近、约束力最强；适合放扮演红线、每轮自检、文风要求。留空则不注入。</p>' +
+    '<label class="f-label">历史后指令 post_history_instructions<textarea id="ed-phi" rows="3" placeholder="每轮回复前自检：保持角色语气；不得透露角色未得知的信息；心理活动用（）。">'
+    + escapeHtml(v.post_history_instructions || "") + "</textarea></label>" +
     "<div class='spacer'></div>" +
     "<h4>属性（AI 每回合可维护的数值，显示在点击头像处）</h4>" +
     '<div id="ed-attrs"></div>' +
@@ -154,7 +163,7 @@ function characterEditorHtml(c, scoped, parentForNew) {
     '<label class="f-label">对白格式要求<textarea id="ed-format" rows="3">' + escapeHtml(v.prompt_format || defaultFormatReq()) + "</textarea></label>" +
     '<label class="f-label">工具使用要求<textarea id="ed-tools" rows="2">' + escapeHtml(v.prompt_tools || defaultToolReq()) + "</textarea></label>" +
     "<div class='spacer'></div>" +
-    "<h4>内容表（AI 通过工具可查询）</h4>" +
+    "<h4>内容表（AI 可主动查询；填了触发词的条目会在用户消息模糊命中时自动注入）</h4>" +
     '<div id="ed-tables"></div>' +
     '<button class="btn small" id="ed-add-entry">＋ 添加条目</button>' +
     '<div class="dialog-actions"><button class="btn" id="ed-cancel">取消</button>' +
@@ -190,7 +199,7 @@ function worldEditorHtml(w) {
     '<label class="f-label">对白格式要求<textarea id="ed-format" rows="3">' + escapeHtml(v.prompt_format || defaultFormatReq()) + "</textarea></label>" +
     '<label class="f-label">工具使用要求<textarea id="ed-tools" rows="2">' + escapeHtml(v.prompt_tools || defaultToolReq()) + "</textarea></label>" +
     "<div class='spacer'></div>" +
-    "<h4>内容表（AI 通过工具可查询）</h4>" +
+    "<h4>内容表（AI 可主动查询；填了触发词的条目会在用户消息模糊命中时自动注入）</h4>" +
     '<div id="ed-tables"></div>' +
     '<button class="btn small" id="ed-add-entry">＋ 添加条目</button>' +
     '<div class="dialog-actions"><button class="btn" id="ed-cancel">取消</button><button class="btn primary" id="ed-save">保存世界观</button></div>' +
@@ -274,6 +283,10 @@ function bindEditorCommon(kind, id, saveFn, opts) {
       payload.background = document.getElementById("ed-bg").value;
       var mesEl = document.getElementById("ed-mes-example");
       if (mesEl) payload.mes_example = mesEl.value;
+      var fmEl = document.getElementById("ed-first-mes");
+      if (fmEl) payload.first_mes = fmEl.value;
+      var phiEl = document.getElementById("ed-phi");
+      if (phiEl) payload.post_history_instructions = phiEl.value;
       payload.avatar = (avatarEl && avatarEl.dataset.avatar) || (v.avatar || "");
       if (attrsEl) payload.attributes = readAttrs(attrsEl);
       if (!opts.scoped) {
@@ -327,14 +340,17 @@ function bindEditorCommon(kind, id, saveFn, opts) {
   }
 }
 
-function entryRowHtml(title, content, pinned) {
+function entryRowHtml(title, content, pinned, keys) {
+  keys = (keys || []).join(", ");
   return (
     '<div class="entry-row">' +
     '<input type="text" class="ed-title" placeholder="标题" value="' + escapeAttr(title) + '" />' +
     '<textarea class="ed-content" rows="2" placeholder="内容">' + escapeHtml(content) + "</textarea>" +
     '<label class="ed-pin" title="常驻：无条件注入系统提示词，等同世界书 Constant"><input type="checkbox" class="ed-pinned"'
       + (pinned ? " checked" : "") + " />常驻</label>" +
-    '<button class="btn small ed-del">✕</button></div>'
+    '<button class="btn small ed-del">✕</button>' +
+    '<input type="text" class="ed-keys" placeholder="触发词（可选，逗号/顿号分隔；用户消息模糊命中时自动注入，留空则用标题匹配）" value="' + escapeAttr(keys) + '" />' +
+    "</div>"
   );
 }
 function addEntryRow(container, entry) {
@@ -342,7 +358,8 @@ function addEntryRow(container, entry) {
   row.innerHTML = entryRowHtml(
     entry ? entry.title || "" : "",
     entry ? entry.content || "" : "",
-    entry ? !!entry.pinned : false
+    entry ? !!entry.pinned : false,
+    entry ? entry.keys || [] : []
   );
   row.querySelector(".ed-del").addEventListener("click", function () { row.remove(); });
   container.appendChild(row);
@@ -386,7 +403,15 @@ function readEntries(container) {
     var title = row.querySelector(".ed-title").value;
     var content = row.querySelector(".ed-content").value;
     var pinnedEl = row.querySelector(".ed-pinned");
-    out.push({ title: title, content: content, pinned: pinnedEl ? pinnedEl.checked : false });
+    var keysEl = row.querySelector(".ed-keys");
+    var keys = [];
+    if (keysEl) {
+      keysEl.value.split(/[\s,，、;；/]+/).forEach(function (k) {
+        k = k.trim();
+        if (k && keys.indexOf(k) < 0) keys.push(k);
+      });
+    }
+    out.push({ title: title, content: content, pinned: pinnedEl ? pinnedEl.checked : false, keys: keys });
   });
   return out;
 }

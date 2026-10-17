@@ -66,7 +66,10 @@ def test_values_normalized():
 def test_api_get_default(tmp_path):
     s = get_my_settings(_req(_scope(tmp_path)))
     assert s["keep_turns"] == 0
-    assert s["auto_recall"] is False
+    # 新用户默认开启自动回忆与内容表触发词注入；max_tokens 默认跟随模型
+    assert s["auto_recall"] is True
+    assert s["lore_auto_inject"] is True
+    assert s["max_tokens"] is None
     assert s["auto_recall_max"] == 5
     assert s["extract_every_turns"] == 10
 
@@ -75,15 +78,32 @@ def test_api_put_then_get_persists(tmp_path):
     scope = _scope(tmp_path)
     out = put_my_settings(
         MySettingsPayload(keep_turns=2, auto_recall=True,
-                          auto_recall_max=8, extract_every_turns=5),
+                          auto_recall_max=8, extract_every_turns=5,
+                          lore_auto_inject=False, max_tokens=2048),
         _req(scope),
     )
     assert out["keep_turns"] == 2 and out["auto_recall"] is True
     assert out["auto_recall_max"] == 8 and out["extract_every_turns"] == 5
+    assert out["lore_auto_inject"] is False and out["max_tokens"] == 2048
     # 已落盘：重新构建作用域后设置仍在
     rebuilt = UserScope.build("u1", AppConfig(), tmp_path, None)
     assert rebuilt.user_settings.keep_turns == 2
     assert rebuilt.user_settings.auto_recall is True
+    assert rebuilt.user_settings.lore_auto_inject is False
+    assert rebuilt.user_settings.max_tokens == 2048
+
+
+def test_api_max_tokens_zero_means_follow_model(tmp_path):
+    scope = _scope(tmp_path)
+    out = put_my_settings(MySettingsPayload(max_tokens=0), _req(scope))
+    assert out["max_tokens"] is None  # 0/空归一化为 None = 跟随提供商配置
+    assert scope.user_settings.max_tokens is None
+
+
+def test_api_max_tokens_clamped(tmp_path):
+    scope = _scope(tmp_path)
+    out = put_my_settings(MySettingsPayload(max_tokens=10 ** 9), _req(scope))
+    assert out["max_tokens"] == 100000
 
 
 def test_api_negative_clamps_to_zero(tmp_path):

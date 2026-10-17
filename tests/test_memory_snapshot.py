@@ -1,5 +1,5 @@
 """记忆存档：房间所有 AI 各自回顾并写进跨房间角色记忆簿；
-同一角色在其他房间默认只读可见；存档与回答互斥。"""
+自有簿默认可读可写、挂别人的簿默认不可见；存档与回答互斥。"""
 
 import asyncio
 import os
@@ -206,9 +206,9 @@ def test_snapshot_transcript_only_own_threads(tmp_path):
     assert _snapshot_transcript(s, outsider) == ""
 
 
-# ---- 未挂载时：同一角色的簿默认只读可见；挂别人的簿默认不可见 ----
+# ---- 未挂载时：自有簿默认可读可写；挂别人的簿默认不可见不可写 ----
 
-def test_default_read_own_character_book(tmp_path):
+def test_default_readwrite_own_character_book(tmp_path):
     async def body():
         store, s, chars, ais, g = _room_with_history(tmp_path)
         books = CharacterMemoryStore(tmp_path / "mem")
@@ -223,11 +223,12 @@ def test_default_read_own_character_book(tmp_path):
         res = await QueryChatMemoryTool().run({"topic": "怕黑"}, ctx)
         assert res.ok and "怕黑" in res.output
 
-        # 默认只读：update 不写簿，只写本会话
+        # 自有卡默认读写：update 同时写本会话与跨会话记忆簿
         before = len(books.load(chars[0].id))
         res2 = await UpdateChatMemoryTool().run({"add": "新小事"}, ctx)
         assert res2.ok
-        assert len(books.load(chars[0].id)) == before
+        assert len(books.load(chars[0].id)) == before + 1
+        assert any("新小事" in line for line in books.load(chars[0].id))
 
     _run(body())
 

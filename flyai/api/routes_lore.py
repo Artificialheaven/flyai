@@ -50,6 +50,8 @@ class CharacterPayload(BaseModel):
     prompt_format: str = ""
     prompt_tools: str = ""
     system_prompt: str = ""
+    post_history_instructions: str = ""
+    first_mes: str = ""
     parent_id: str = ""
     alias: str = ""
     voice: str = ""
@@ -83,6 +85,8 @@ def _build_character(payload) -> Character:
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
         system_prompt=payload.system_prompt or "",
+        post_history_instructions=payload.post_history_instructions or "",
+        first_mes=payload.first_mes or "",
         parent_id=payload.parent_id or "",
         alias=payload.alias or "",
         voice=(payload.voice or "").strip(),
@@ -319,6 +323,29 @@ def export_world(wid: str, request: Request):
         content=body,
         headers={"Content-Disposition": f'attachment; filename="world-{w.id[:8]}.json"'},
     )
+
+
+@router.post("/characters/import-card")
+async def import_character_card(request: Request, file: UploadFile = File(...)):
+    """导入酒馆（CCv2/v3）角色卡：PNG 卡（图片即头像）或 JSON 卡。"""
+    sc = _state(request)
+    raw = await file.read()
+    from ..lore import card_import
+
+    try:
+        card = card_import.extract_card_json(raw)
+        c = card_import.character_from_cc(card)
+    except card_import.CardImportError as e:
+        raise HTTPException(400, str(e))
+
+    c.id = uuid.uuid4().hex
+    c.author = sc.uid
+    if raw.startswith(card_import.PNG_SIGNATURE):
+        fname = f"{uuid.uuid4().hex}.png"
+        (sc.upload_dir / fname).write_bytes(raw)
+        c.avatar = f"/uploads/{sc.uid}/{fname}"
+    sc.lore.save_character(c)
+    return c.to_dict()
 
 
 @router.post("/worlds/import")

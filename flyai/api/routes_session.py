@@ -49,6 +49,9 @@ class SessionUpdate(BaseModel):
     pinned: Optional[bool] = None
     character_id: Optional[str] = None
     world_id: Optional[str] = None
+    # 单窗口覆盖：0/None=跟随；禁用工具名列表（全量替换，非法名忽略不 400）
+    max_tokens: Optional[int] = None
+    disabled_tools: Optional[List[str]] = None
 
 
 @router.get("/sessions")
@@ -100,6 +103,26 @@ def update_session(sid: str, req: SessionUpdate, request: Request):
     if req.world_id is not None:
         s.world_id = req.world_id
         s.world_override = None
+    if req.max_tokens is not None:
+        try:
+            s.max_tokens = max(0, min(100000, int(req.max_tokens)))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "max_tokens 必须是整数")
+    if req.disabled_tools is not None:
+        if not isinstance(req.disabled_tools, list):
+            raise HTTPException(400, "disabled_tools 必须是字符串数组")
+        # 只信任注册表里真实存在的工具名；注册表缺失时全部忽略（无法验证）
+        registry = getattr(request.app.state.flyai, "registry", None)
+        known = ({t.name for t in registry.all()}
+                 if hasattr(registry, "all") else set())
+        picked, seen = [], set()
+        for name in req.disabled_tools:
+            name = str(name or "").strip()
+            # 只收已注册工具名；未知工具静默忽略（可能来自已卸载插件/旧客户端）
+            if name and name in known and name not in seen:
+                seen.add(name)
+                picked.append(name)
+        s.disabled_tools = picked
     sc.store.save(s)
     return _session_dict(s)
 
@@ -468,6 +491,52 @@ async def import_session_zip(request: Request, file: UploadFile = File(...)):
     return install_session_zip(sc, raw)
 
 
+@router.post("/sessions/import-chatbox")
+async def import_chatbox(request: Request, file: UploadFile = File(...)):
+    """导入 Chatbox 导出的对话历史：备份 JSON（可一次含多个对话）或单对话
+    Markdown。每个对话重建为一个全新普通会话（用户座位 + 一个 AI 私聊窗口）。
+
+    单个对话返回会话 dict（与 /import 口径一致）；多个对话返回
+    {"sessions": [...]}，由前端逐个加入列表。
+    """
+    from ..sessions.chat_import import ChatImportError, parse_external_chats
+
+    sc = request.app.state.flyai.user(request)
+    raw = await file.read()
+    try:
+        items = parse_external_chats(raw)
+    except ChatImportError as exc:
+        raise HTTPException(400, str(exc))
+
+    built = []
+    total_msgs = 0
+    total_images = 0
+    for d in items:
+        title = (d.get("session") or {}).get("title") or "Chatbox 对话"
+        s = _build_imported_session(d, title)
+        _resolve_import_cards_world(s, d, sc)
+        sc.store.save(s)
+        n_msgs = sum(len(t.messages) for t in s.threads)
+        n_imgs = sum(
+            len(m.images or []) for t in s.threads for m in t.messages
+        )
+        total_msgs += n_msgs
+        total_images += n_imgs
+        out = _session_dict(s)
+        out["message_count"] = n_msgs
+        built.append(out)
+
+    summary = {
+        "conversations": len(built),
+        "messages": total_msgs,
+        "images": total_images,
+    }
+    if len(built) == 1:
+        built[0]["import_summary"] = summary
+        return built[0]
+    return {"sessions": built, "import_summary": summary}
+
+
 class CompressApplyBody(BaseModel):
     proposal_id: str
 
@@ -703,6 +772,8 @@ def _session_dict(s, with_messages: bool = False, lore=None):
         "mode": getattr(s, "mode", "normal") or "normal",
         "galgame": getattr(s, "galgame", None) or {},
         "galgame_tts": getattr(s, "galgame_tts", None) or {},
+        "max_tokens": int(getattr(s, "max_tokens", 0) or 0),
+        "disabled_tools": list(getattr(s, "disabled_tools", None) or []),
     }
     if with_messages:
         d["messages"] = [m.to_dict() for m in s.messages]

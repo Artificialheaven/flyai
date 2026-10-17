@@ -16,6 +16,58 @@ from .store import SessionStore
 from .versions import heal_thread
 
 
+def _norm_name(s: str) -> str:
+    return (s or "").strip().casefold()
+
+
+def migrate_actor_ids(session: Session) -> bool:
+    """旧群聊消息没有 actor_id（2026-10 前的数据）：按 assistant 消息持久化的
+    name 精确匹配当前 AI 座位名补归属；tool 结果按 tool_call_id 跟随发起调用的
+    assistant，匹配不上再退而跟随紧邻的上一条 assistant。
+
+    补归属后，老对话也能享受 _actor_view 的座位隔离（否则旧工具回合只能整条
+    透传，旧正文靠 _actor_view 内的 name 兜底临时加前缀但不落盘）。
+    返回是否改动过（调用方据此落盘一次）。
+    """
+    ai_members = [m for m in session.members if not getattr(m, "is_user", False)]
+    if not ai_members:
+        return False
+    name_to_id: Dict[str, str] = {}
+    for m in ai_members:
+        key = _norm_name(m.name)
+        if key and key not in name_to_id:
+            name_to_id[key] = m.id
+    changed = False
+    for t in session.threads:
+        # 第一遍：assistant 按名字补归属，同时建 tool_call_id -> actor 索引
+        call_owner: Dict[str, str] = {}
+        for m in t.messages:
+            if m.role != "assistant":
+                continue
+            owner = m.actor_id
+            if not owner:
+                owner = name_to_id.get(_norm_name(m.name))
+                if owner:
+                    m.actor_id = owner
+                    changed = True
+            if owner:
+                for tc in (m.tool_calls or []):
+                    cid = getattr(tc, "id", None)
+                    if cid:
+                        call_owner[cid] = owner
+        # 第二遍：无主 tool 结果跟随它所属的工具调用，再退而跟随上一条 assistant
+        last_owner = ""
+        for m in t.messages:
+            if m.role == "assistant":
+                last_owner = m.actor_id or last_owner
+            elif m.role == "tool" and not m.actor_id:
+                owner = call_owner.get(m.tool_call_id or "") or last_owner
+                if owner:
+                    m.actor_id = owner
+                    changed = True
+    return changed
+
+
 def session_from_dict(data: Dict, sid: str = "") -> Session:
     """从完整快照还原会话（存档点恢复同样使用）。"""
     return Session(
@@ -37,6 +89,8 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         mode=data.get("mode", "normal") or "normal",
         galgame=data.get("galgame", {}) or {},
         galgame_tts=data.get("galgame_tts", {}) or {},
+        max_tokens=int(data.get("max_tokens", 0) or 0),
+        disabled_tools=list(data.get("disabled_tools", []) or []),
     )
 
 
@@ -61,6 +115,8 @@ def session_to_dict(session: Session) -> Dict:
         "mode": session.mode,
         "galgame": session.galgame or {},
         "galgame_tts": session.galgame_tts or {},
+        "max_tokens": int(session.max_tokens or 0),
+        "disabled_tools": list(session.disabled_tools or []),
     }
 
 
@@ -100,6 +156,9 @@ class JsonSessionStore(SessionStore):
         # 自愈：流式中途被硬 kill 留下的孤儿/半成品回复
         for t in s.threads:
             heal_thread(t)
+        # 旧群聊消息补座位归属（一次性，补完落盘）
+        if migrate_actor_ids(s):
+            migrated = True
         # 迁移必须落盘：否则每次 get() 都会生成新的随机线程 id，
         # GET 会话返回的线程随后按 id 加载会 404「窗口不存在」
         if migrated:

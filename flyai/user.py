@@ -199,12 +199,18 @@ class UserSettings:
 
     # 发给模型的最近对话轮数；0 = 全部发送。历史仍完整保存在会话文件中
     keep_turns: int = 0
-    # 发消息前自动从角色记忆簿/历史中召回相关事实（keep_turns 的配套）
-    auto_recall: bool = False
+    # 发消息前自动从角色记忆簿/历史中召回相关事实（keep_turns 的配套）。
+    # 新用户默认开启；已落盘 settings.json（含显式 false）的老用户保持原值
+    auto_recall: bool = True
     # 自动召回注入的事实条数上限
     auto_recall_max: int = 5
     # 每 N 轮做一次结构化批量抽取；0 = 关闭
     extract_every_turns: int = 10
+    # 内容表触发词自动注入：用户消息模糊命中世界书/角色卡条目的 keys/标题时，
+    # 系统直接把条目注入系统提示词（不依赖 AI 调 query_lore）
+    lore_auto_inject: bool = True
+    # 单次回复最大 token（None/0=跟随提供商配置）
+    max_tokens: Optional[int] = None
 
     # ---- 功能开关覆盖（None=跟随管理员全局默认；见 flyai/feature_prefs.py）----
     # 工具与迭代
@@ -254,6 +260,8 @@ class UserSettings:
             "auto_recall": bool(self.auto_recall),
             "auto_recall_max": int(self.auto_recall_max or 5),
             "extract_every_turns": int(self.extract_every_turns or 0),
+            "lore_auto_inject": bool(self.lore_auto_inject),
+            "max_tokens": self.max_tokens if self.max_tokens else None,
         }
         for key in self.OVERRIDE_FIELDS:
             out[key] = getattr(self, key)  # None 原样落盘 = 跟随默认
@@ -272,10 +280,16 @@ class UserSettings:
         every = max(0, _int("extract_every_turns", 10))
         kwargs = dict(
             keep_turns=keep,
-            auto_recall=bool(d.get("auto_recall", False)),
+            auto_recall=bool(d.get("auto_recall", True)),
             auto_recall_max=recall_max,
             extract_every_turns=every,
+            lore_auto_inject=bool(d.get("lore_auto_inject", True)),
         )
+        try:
+            mt = d.get("max_tokens", None)
+            kwargs["max_tokens"] = int(mt) if mt else None
+        except (TypeError, ValueError):
+            kwargs["max_tokens"] = None
         # 可空覆盖：仅接受 bool/int；None 与缺键都表示跟随默认（0/False 是合法覆盖值）
         for key, kind in cls.OVERRIDE_FIELDS.items():
             if key not in d or d[key] is None:

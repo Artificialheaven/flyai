@@ -64,6 +64,18 @@ function makeAudioCard(url, meta) {
   dl.download = url.split("/").pop() || "tts.mp3";
   dl.textContent = "⤓";
   dl.title = "下载";
+  dl.addEventListener("click", function (ev) {
+    if (!(window.NativeSaver && NativeSaver.isNative())) return;
+    // APK 里锚点下载不生效：fetch 回 Blob 后交原生插件存下载目录
+    ev.preventDefault();
+    var name = (url.split("/").pop() || "tts.mp3").split("?")[0] || "tts.mp3";
+    fetch(url).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.blob();
+    }).then(function (blob) {
+      downloadBlob(blob, name);
+    }).catch(function (e) { showToast("保存语音失败: " + e.message, "err"); });
+  });
 
   var audio = document.createElement("audio");
   audio.preload = "metadata";

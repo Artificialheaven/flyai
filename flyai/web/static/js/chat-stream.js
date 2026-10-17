@@ -10,6 +10,7 @@ function onSend() {
   if (!text && !images.length) return;
   var doSend = function () {
     closeMentionBox();
+    if (typeof NativeNotify !== "undefined") NativeNotify.ensurePermission();  // 首条消息时请求通知权限
     state.busy = true;
     el.btnSend.disabled = true;
     el.btnStop.classList.remove("hidden");
@@ -28,6 +29,7 @@ function onSend() {
     // 每个 AI 各自一条卡片：流式期间按 speaker 事件新建，不预建占位
     state.currentAssistant = null;
     state.currentSpeaker = null;
+    state.runKind = "chat";
     scrollToBottom();
     var tid = state.currentThreadId ||
       ((state.roomThreads && state.roomThreads.length) ? state.roomThreads[0].id : undefined);
@@ -82,6 +84,7 @@ function runMemorySnapshot() {
   state.stickBottom = true;
   state.reconnectAttempts = 0;
   state.lastEventSeq = 0;
+  state.runKind = "memory";
   showToast("各角色开始记录记忆…", "info", 3000);
   consumeRun(null, {
     post: true,
@@ -278,10 +281,122 @@ function postChatSSE(payload) {
   return consumeRun(null, { post: true, payload: payload });
 }
 
+/* ==== 移动端前后台：后台被系统掐断的流不在后台重试/弹错，回前台再续 ==== */
+function appHidden() {
+  return !!(document.hidden || state.appPaused);
+}
+/* 等待页面/应用回到前台（visibilitychange 与 Capacitor App.resume 双保险） */
+function waitForResume() {
+  return new Promise(function (resolve) {
+    var finished = false;
+    var safety = null;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      document.removeEventListener("visibilitychange", onVis);
+      document.removeEventListener("flyai:app-resume", onResumeEv);
+      if (safety) clearInterval(safety);
+      resolve();
+    }
+    function onVis() { if (!document.hidden && !state.appPaused) finish(); }
+    function onResumeEv() { finish(); }
+    document.addEventListener("visibilitychange", onVis);
+    document.addEventListener("flyai:app-resume", onResumeEv);
+    // 兜底：个别机型 resume 事件丢失时每 10s 自查一次
+    safety = setInterval(onVis, 10000);
+  });
+}
+/* 回前台后主动续读：运行仍在 → 立刻接流；已结束 → 落盘重画；404 → 收尾 */
+function resumeStreamIfNeeded() {
+  if (!state.busy || !state.currentRunId || state.streamTerminal) return;
+  if (state.streamLive || state.reconnectWaiting) return;  // 旧流还活着/已在等回前台
+  var rid = state.currentRunId;
+  state.reconnectAttempts = 0;  // 回台后给一份全新的重连预算
+  fetchJSON("/api/chat/runs/" + rid).then(function (r) {
+    if (rid !== state.currentRunId || state.streamTerminal) return;
+    if (r.status !== "running") { finalizeTurn(); return; }
+    consumeRun(rid, { post: false });
+  }).catch(function (e) {
+    if (String(e.message || "").indexOf("404") >= 0) { finalizeTurn(); return; }
+    autoReconnect(rid);
+  });
+}
+/* 本轮发言角色身份：群聊按当前 speaker 座位的挂卡；单聊退到会话有效角色卡 */
+function replyIdentity() {
+  var sp = state.currentSpeaker;
+  if (sp && sp.member_id) {
+    var mem = (state.roomMembers || []).find(function (m) { return m.id === sp.member_id; });
+    if (mem) {
+      var ch = mem.character_id ? characterOf(mem.character_id) : null;
+      var name = (ch && ch.name) || memberDisplayName(mem) || sp.name || "AI";
+      return { name: name, avatar: (ch && ch.avatar) ? assetUrl(ch.avatar) : null };
+    }
+    if (sp.name) return { name: sp.name, avatar: null };
+  }
+  var ec = effectiveChar();
+  if (ec) return { name: ec.name || "AI", avatar: ec.avatar ? assetUrl(ec.avatar) : null };
+  return { name: "AI", avatar: null };
+}
+/* 回复摘要：压掉换行的前 80 字纯文本；纯图片/工具回复给兜底文案 */
+function replySnippet(a) {
+  var t = (a && a.rawContent || "").replace(/\s+/g, " ").trim();
+  return t ? t.slice(0, 80) : "回复了一条新消息";
+}
+/* 回答在后台结束 → 本地通知（带头像+摘要）；前台结束不打扰。
+ * 先撤掉原生轮询兜底，避免 watcher 再发一条重复通知 */
+function maybeNotifyReply() {
+  if (state.runKind === "memory") return;  // 记忆存档完成不算「回复完毕」
+  if (typeof NativeNotify === "undefined") return;
+  NativeNotify.cancelWatch();
+  if (!appHidden()) return;
+  var idt = replyIdentity();
+  NativeNotify.notify("「" + idt.name + "」回复完毕", replySnippet(state.currentAssistant), idt.avatar || "");
+}
+
+/* 切后台时挂原生轮询兜底：后台 socket 被回收后 done 帧到不了 JS，
+ * 由原生线程每 4s 探一次 run 状态，完成即推送 */
+function armBackgroundWatch() {
+  if (state.runKind === "memory") return;
+  if (!state.busy || !state.currentRunId || state.streamTerminal) return;
+  if (typeof NativeNotify === "undefined" || !window.Capacitor) return;
+  var idt = replyIdentity();
+  NativeNotify.watchRun({
+    runId: state.currentRunId,
+    statusUrl: apiUrl("/api/chat/runs/" + state.currentRunId),
+    token: state.authToken || "",
+    title: "「" + idt.name + "」回复完毕",
+    body: "回答已完成，点击查看",
+    iconUrl: idt.avatar || "",
+  });
+}
+
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) armBackgroundWatch();
+  else {
+    if (typeof NativeNotify !== "undefined") NativeNotify.cancelWatch();
+    resumeStreamIfNeeded();
+  }
+});
+if (window.Capacitor && typeof window.Capacitor.addListener === "function") {
+  window.Capacitor.addListener("App", "pause", function () {
+    state.appPaused = true;
+    armBackgroundWatch();
+  });
+  window.Capacitor.addListener("App", "resume", function () {
+    state.appPaused = false;
+    if (typeof NativeNotify !== "undefined") NativeNotify.cancelWatch();
+    document.dispatchEvent(new Event("flyai:app-resume"));
+    resumeStreamIfNeeded();
+  });
+}
+
 // 消费一个运行：post=true 走 POST /api/chat（新建运行）；否则 GET 续读
 function consumeRun(runId, opts) {
   state.abortController = new AbortController();
   state.streamTerminal = false;
+  // 世代号：回前台主动续读会开启新流，旧流迟到的错误回调直接作废
+  var gen = ++state.streamGen;
+  state.streamLive = true;
   var url, fetchOpts;
   if (opts.post) {
     url = opts.url || "/api/chat";
@@ -310,10 +425,14 @@ function consumeRun(runId, opts) {
     }
     return readSSE(resp.body, makeStreamHandlers());
   }).then(function () {
+    if (gen !== state.streamGen) return;  // 已被回前台续读等新流取代
+    state.streamLive = false;
     // 连接结束：收到终态 → 正常结束；否则尝试自动重连
     if (state.streamTerminal) return;
     return autoReconnect(state.currentRunId);
   }).catch(function (e) {
+    if (gen !== state.streamGen) return;  // 旧流的迟到错误，忽略
+    state.streamLive = false;
     if (e.name === "AbortError") { finalizeTurn(); return; }
     // 409：已有进行中的回答（其它标签页/设备发起）：不回填、不报错，
     // 直接发现并续读该 run
@@ -356,6 +475,7 @@ function makeStreamHandlers() {
       // 群聊单个 AI 的 done（terminal=false）：只记用量，不收尾
       if (data && data.terminal === false) { saveRunMarker(); return; }
       state.streamTerminal = true;
+      maybeNotifyReply();  // 须在 finalizeTurn 清掉 currentAssistant/currentSpeaker 之前
       finalizeTurn();
       refreshQuotaChip();
     },
@@ -365,6 +485,15 @@ function makeStreamHandlers() {
 // 连接意外中断后的自动重连（指数退避，最多 8 次）
 function autoReconnect(runId) {
   if (!runId) { finalizeTurn(); return Promise.resolve(); }
+  // 切后台/锁屏期间断流：不弹提示、不消耗重连次数，回前台由 resumeStreamIfNeeded 续
+  if (appHidden()) {
+    state.reconnectWaiting = true;
+    return waitForResume().then(function () {
+      state.reconnectWaiting = false;
+      if (!state.currentRunId || state.streamTerminal || state.streamLive) return;
+      resumeStreamIfNeeded();
+    });
+  }
   state.reconnectAttempts += 1;
   if (state.reconnectAttempts > 8) {
     showToast("连接中断且多次重连失败，请手动刷新页面", "err", 6000);
@@ -682,6 +811,7 @@ function recordUsage(usage) {
   renderSessionMeta();
 }
 function finalizeTurn() {
+  if (typeof NativeNotify !== "undefined") NativeNotify.cancelWatch();
   var a = state.currentAssistant;
   if (a) {
     a.finishThinking();
@@ -702,6 +832,9 @@ function finalizeTurn() {
   state.currentRunId = null;
   state.lastEventSeq = 0;
   state.streamTerminal = false;
+  state.streamLive = false;
+  state.reconnectWaiting = false;
+  state.runKind = "";
   state.reconnectAttempts = 0;
   if (state.runMarkerTimer) { clearTimeout(state.runMarkerTimer); state.runMarkerTimer = null; }
   clearRunMarker();

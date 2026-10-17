@@ -128,11 +128,11 @@ def test_apply_room_compression_writes_member_overrides_and_world():
     assert ai.override["name"] == "初"
     assert ai.override["intro"] == "更新的简介"
     assert ai.override["table"] == [
-        {"title": "关键设定", "content": "内容值", "pinned": False}
+        {"title": "关键设定", "content": "内容值", "pinned": False, "keys": []}
     ]
     assert s.world_override["content"] == "世界变化"
     assert s.world_override["table"] == [
-        {"title": "规则", "content": "一条", "pinned": False}
+        {"title": "规则", "content": "一条", "pinned": False, "keys": []}
     ]
 
     assert out["members"][ai.id] is ai.override
@@ -149,7 +149,7 @@ def test_apply_room_compression_merges_table_by_title_and_keeps_pinned():
         name="初",
         table=[
             LoreEntry(title="旧设定", content="旧内容", pinned=True),
-            LoreEntry(title="待更新", content="原内容"),
+            LoreEntry(title="待更新", content="原内容", keys=["触发词A", "触发词B"]),
         ],
     )
     lore = _FakeLore([base])
@@ -174,6 +174,8 @@ def test_apply_room_compression_merges_table_by_title_and_keeps_pinned():
     assert [t["title"] for t in table] == ["旧设定", "待更新", "新设定"]
     assert table[0]["content"] == "旧内容" and table[0]["pinned"] is True
     assert table[1]["content"] == "新内容"
+    # 同标题只更新正文/pinned：用户配的触发词不能被压缩抹掉
+    assert table[1]["keys"] == ["触发词A", "触发词B"]
     assert table[2]["content"] == "追加内容"
 
 
@@ -184,3 +186,35 @@ def test_apply_room_compression_ignores_unknown_member():
     )
     assert out["members"] == {}
     assert s.members[1].override is None
+
+
+def test_apply_room_compression_rejects_cross_member_patch():
+    """AI 把 B 角色的资料写到 A 的 member_id 下（补丁 name 与座位不符）：拒绝该补丁。"""
+    from flyai.sessions.resolve import plan_room_compression
+
+    s, chars = _room(["c1", "c2"])  # 座位名：初、两个
+    lore = _FakeLore(chars)
+    # 给座位 c1 的 member_id 塞了名字是另一位角色「两个」的补丁
+    data = {
+        "members": [
+            {"member_id": s.members[1].id,
+             "character": {"name": "两个", "intro": "我其实是另一个人"}},
+            {"member_id": s.members[2].id,
+             "character": {"name": "两个", "intro": "正确归属的更新"}},
+        ]
+    }
+    planned = plan_room_compression(s, data, lore)
+    assert s.members[1].id not in planned["members"]  # 张冠李戴，拒绝
+    assert s.members[2].id in planned["members"]
+    assert planned["members"][s.members[2].id]["intro"] == "正确归属的更新"
+
+
+def test_apply_room_compression_accepts_patch_without_name():
+    """补丁省略 name（旧提示词输出）：不阻断，照常合并。"""
+    s, chars = _room(["c1"])
+    out = apply_room_compression(
+        s, {"members": [{"member_id": s.members[1].id,
+                         "character": {"intro": "新简介"}}]},
+        _FakeLore(chars),
+    )
+    assert s.members[1].id in out["members"]

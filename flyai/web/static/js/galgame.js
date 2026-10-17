@@ -1302,6 +1302,7 @@ function postGalgame(text) {
     image_engine: state.sdEngine ? "sd" : "",
     target_member_ids: [],
     shuffle_speakers: false,
+    disabled_tools: (typeof disabledToolNames === "function") ? disabledToolNames() : [],
   };
   dbgEvent("发送：" + text.slice(0, 24));
   gvConnect(null, { post: true, payload: payload });
@@ -1991,6 +1992,7 @@ function postGalgameResume(dangling, text) {
     image_engine: state.sdEngine ? "sd" : "",
     target_member_ids: [],
     shuffle_speakers: false,
+    disabled_tools: (typeof disabledToolNames === "function") ? disabledToolNames() : [],
     galgame_resume: { tool_call_id: callId, text: text },
   };
   dbgEvent("续接选项：" + text.slice(0, 20));

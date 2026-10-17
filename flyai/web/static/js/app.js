@@ -50,6 +50,11 @@ var state = {
   lastEventSeq: 0,          // 已收到的最后事件序号
   streamTerminal: false,    // 本次连接是否已收到终态帧
   reconnectAttempts: 0,
+  streamGen: 0,             // 流世代号：新连接使旧流的迟到回调失效
+  streamLive: false,        // 当前是否有存活的 SSE 连接
+  appPaused: false,         // APK 切后台（Capacitor App.pause）
+  reconnectWaiting: false,  // 断在后台，正等待回前台再续读
+  runKind: "",              // 本轮运行类型：chat=普通回答（完成时后台通知）；memory=记忆存档
   runMarkerTimer: null,
   draftTimer: null,
   tokenTotals: {},          // 会话 id -> 累计总 token（含服务端持久值 + 本页面新增）

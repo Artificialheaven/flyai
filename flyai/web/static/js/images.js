@@ -252,9 +252,20 @@ function toggleImageInfo() {
 function downloadViewerImage() {
   var src = el.ivImg.src;
   if (!src) return;
+  var name = suggestImageName(src);
+  if (window.NativeSaver && NativeSaver.isNative()) {
+    // /uploads 公开挂载，无需鉴权头；blob:/data: 同样可 fetch
+    fetch(src).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.blob();
+    }).then(function (blob) {
+      downloadBlob(blob, name);
+    }).catch(function (e) { showToast("保存图片失败: " + e.message, "err"); });
+    return;
+  }
   var a = document.createElement("a");
   a.href = src;
-  a.download = suggestImageName(src);
+  a.download = name;
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();

@@ -109,25 +109,59 @@ def _tag_actor(m: Message, actor: str) -> Message:
     return m
 
 
-def _actor_view(history: List[Message], actor: str) -> List[Message]:
+def _spoken_text(content: str, name: str) -> str:
+    """别人的台词加「名字：」前缀（幂等）。
+
+    provider 适配器不发送消息的 name 字段，群聊历史里多个 AI 的 assistant
+    消息若无署名，模型会把别人的台词当成自己说过的话，导致串人设。
+    """
+    text = content or ""
+    prefix = f"{name}："
+    return text if text.startswith(prefix) else prefix + text
+
+
+def _actor_view(history: List[Message], actor: str,
+                actor_name: str = "") -> List[Message]:
     """群聊发言视图：别人座位产生的工具调用/工具结果/思考对当前发言者隐藏，
-    只保留对方说出口的正文（复制成不带 tool_calls 的干净 assistant 消息）；
-    自己座位与没有 actor 标记的旧消息原样保留。
+    只保留对方说出口的正文（复制成不带 tool_calls 的干净 assistant 消息，
+    并加「名字：」前缀，避免模型把别人的台词当成自己的）；
+    自己座位的消息原样保留。
+
+    旧数据（actor_id 未落盘时代产生的消息）用持久化的 name 与当前座位名
+    比对兜底归属；既无 actor_id 也无 name 的消息无法判断归属，原样保留
+    （以维持 tool_call/result 配对合法、避免提供商 400）。
     """
     if not actor:
         return list(history)
     view: List[Message] = []
     for m in history:
         owner = getattr(m, "actor_id", "") or ""
-        if not owner or owner == actor:
+        if not owner:
+            # 无归属旧消息：能凭名字认出是别人 → 按别人处理；否则原样。
+            # 带 tool_calls 的旧回合不能拆（配对的 tool 结果同样无归属，
+            # 拆了会产生孤立 tool 消息触发提供商 400），整条原样保留
+            if (m.role == "assistant" and not m.tool_calls and actor_name
+                    and (m.name or "") and m.name != actor_name):
+                if not m.hidden and (m.content or "").strip():
+                    view.append(
+                        Message(role="assistant", id=m.id,
+                                content=_spoken_text(m.content, m.name),
+                                name=m.name)
+                    )
+                continue
+            view.append(m)
+            continue
+        if owner == actor:
             view.append(m)
             continue
         # 其他发言者：只留正文（跳过隐藏的「略」与工具回合）
         if (m.role == "assistant" and not m.hidden
                 and (m.content or "").strip()):
+            speaker = m.name or "其他角色"
             view.append(
                 Message(role="assistant", id=m.id,
-                        content=m.content, name=m.name)
+                        content=_spoken_text(m.content, speaker),
+                        name=m.name)
             )
     return view
 
@@ -179,9 +213,12 @@ async def run_agent_loop(
     services: Optional[Dict[str, Any]] = None,
     web_max_iterations: Optional[int] = None,
     actor: str = "",
+    actor_name: str = "",
     keep_turns: int = 0,
     allowed_tools: Optional[set] = None,
     deep_thinking: bool = False,
+    post_history_instructions: str = "",
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -192,11 +229,17 @@ async def run_agent_loop(
     其他发言者的工具调用/工具结果/思考对其不可见，只能看到对方说出口的内容
     （见 _actor_view），避免后发言者看到别人已调 update_chat_memory 就不写
     自己的记忆，也避免他人记忆内容串场。actor 为空时不过滤。
+    actor_name：当前发言座位显示名，用于给 actor_id 缺失的旧消息按 name
+    兜底判断归属。
     keep_turns：发给模型的最近对话轮数（1 轮 = 一条 user 消息及其回复链），
     只截断请求、不动 history；0（默认）表示全量发送。
     allowed_tools：按用户功能偏好过滤后允许暴露的工具名集合；None=全量。
     deep_thinking：本轮开启深度思考（Anthropic 原生 extended thinking；
     OpenAI 兼容厂商合并模型配置的 thinking_params 请求片段）。
+    post_history_instructions：角色卡 PHI，每轮追加在聊天历史之后（工具续写
+    nudge 之前），不写入 history；空串不追加。
+    max_tokens：本轮回复 token 上限覆盖（窗口 > 用户全局 > 提供商配置），
+    None/0 时不传，由提供商按自身配置处理。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -221,10 +264,15 @@ async def run_agent_loop(
     while True:
         iteration += 1
         tool_specs = registry.specs(allowed_tools) if settings.enabled else []
-        request_messages = _actor_view(history, actor)
+        request_messages = _actor_view(history, actor, actor_name)
         request_messages = _keep_recent_turns(request_messages, keep_turns)
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
+        # PHI（角色卡历史后指令）：紧贴历史尾部；工具轮时续写 nudge 放在它之后，
+        # 让"继续完成回复"保持为模型看到的最后一句
+        phi = (post_history_instructions or "").strip()
+        if phi:
+            request_messages.append(Message(role="system", content=phi))
         if pending_nudge:
             request_messages.append(
                 Message(role="system", content=_POST_TOOL_NUDGE)
@@ -236,7 +284,8 @@ async def run_agent_loop(
         calls: Optional[List[ToolCall]] = None
         try:
             async for ev in provider.stream_chat(
-                request_messages, tool_specs, deep_thinking=deep_thinking
+                request_messages, tool_specs,
+                deep_thinking=deep_thinking, max_tokens=max_tokens,
             ):
                 if ev.type == StreamEventType.THINKING_DELTA:
                     thinking_parts.append(ev.text)

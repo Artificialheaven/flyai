@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import AsyncIterator, Dict, List
+from typing import AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -87,6 +87,7 @@ class OpenAICompatProvider(BaseProvider):
         messages: List[Message],
         tool_specs: List[dict],
         deep_thinking: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
@@ -99,6 +100,10 @@ class OpenAICompatProvider(BaseProvider):
             body["tools"] = tool_specs
             body["tool_choice"] = "auto"
         body.update(self.cfg.params)
+        # 窗口/用户级 max_tokens 覆盖：在模型配置 params 之后，优先级最高；
+        # None/0 不覆盖（跟随模型配置）
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
         # 深度思考开关：在基础参数之后合并，确保开关参数优先于基础 params。
         # 各厂商协议不统一，具体片段由模型配置给出：
         # - thinking_params：开关开启时合并（默认不思考的模型靠它开启）

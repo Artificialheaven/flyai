@@ -83,7 +83,52 @@ function renderLoreCharRoots(body) {
   imp.type = "button"; imp.className = "btn small"; imp.textContent = "⇪ 导入角色";
   imp.addEventListener("click", function () { importLore("characters"); });
   row.appendChild(imp);
+  var ti = document.createElement("button");
+  ti.type = "button"; ti.className = "btn small"; ti.textContent = "✨ 从文本导入";
+  ti.addEventListener("click", function () { textImportCharacter(); });
+  row.appendChild(ti);
   body.appendChild(row);
+}
+
+/* 从任意文本经 AI 解析为角色卡：解析结果只预填进编辑器，用户保存后才真正创建 */
+function textImportCharacter() {
+  clearDirty();
+  el.loreBody.innerHTML =
+    '<div class="dialog-actions"><button class="btn" id="ti-back">← 返回列表</button></div>' +
+    "<h3>✨ 从文本导入角色</h3>" +
+    "<p class='sub'>粘贴角色档案、百科片段、小说节选或任意设定文本，AI 会自动提取并填充名称、简介、经历、开场白、对话范例、历史后指令（PHI）与内容表。" +
+    "解析完成后会打开角色编辑器供你核对修改，<b>点击保存后才会真正创建角色卡</b>。原文上限 2 万字，解析会消耗少量模型额度。</p>" +
+    '<label class="f-label">原文<textarea id="ti-text" rows="16" style="width:100%" placeholder="把角色相关的文本粘贴到这里……"></textarea></label>' +
+    '<div class="dialog-actions"><button class="btn" id="ti-cancel">取消</button>' +
+    '<button class="btn primary" id="ti-go">✨ 开始解析</button></div>' +
+    '<div id="ti-msg" class="msg-bar"></div>';
+
+  var backToList = function () { clearDirty(); renderLoreSections(); };
+  document.getElementById("ti-back").addEventListener("click", backToList);
+  document.getElementById("ti-cancel").addEventListener("click", backToList);
+  var goBtn = document.getElementById("ti-go");
+  var msg = document.getElementById("ti-msg");
+  goBtn.addEventListener("click", function () {
+    var text = document.getElementById("ti-text").value.trim();
+    if (!text) { msg.textContent = "请先粘贴文本"; msg.className = "msg-bar err"; return; }
+    msg.textContent = "AI 解析中，可能需要几十秒……";
+    msg.className = "msg-bar";
+    goBtn.disabled = true;
+    fetchJSON("/api/gen/character-from-text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    }).then(function (res) {
+      var c = (res && res.character) || null;
+      if (!c || !c.name) throw new Error("返回数据缺少角色信息");
+      characterEditor(c);
+      showToast("解析完成，请核对后保存");
+    }).catch(function (e) {
+      msg.textContent = "解析失败: " + e.message;
+      msg.className = "msg-bar err";
+      goBtn.disabled = false;
+    });
+  });
 }
 function renderLoreCharVariants(body, rootId) {
   var root = characterOf(rootId);
@@ -219,30 +264,78 @@ function exportLore(endpoint, id) {
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(function (obj) {
       var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-      var a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = (obj.name || type) + ".json";
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(a.href);
+      downloadBlob(blob, (obj.name || type) + ".json");
     }).catch(function (e) { showToast("导出失败: " + e.message, "err"); });
 }
 
+/* 酒馆（CCv2/v3）卡判定：信封 spec / data 包装，或 v1 平铺字段。
+   FlyAI 自有导出恒带 type:"flyai-character"。 */
+function looksLikeTavernCard(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  if (typeof obj.spec === "string" && obj.spec.indexOf("chara_card") === 0) return true;
+  var d = obj.data;
+  if (d && typeof d === "object" && !Array.isArray(d) &&
+      ("description" in d || "first_mes" in d || "character_book" in d) &&
+      !("table" in d)) return true;
+  // v1：name/description 等字段平铺在顶层
+  return !obj.type && !("table" in obj) &&
+      ("description" in obj && ("mes_example" in obj || "first_mes" in obj));
+}
+
 function importLore(endpoint) {
+  var isChar = endpoint === "characters";
   var input = document.createElement("input");
-  input.type = "file"; input.accept = ".json,application/json";
+  input.type = "file";
+  input.accept = isChar ? ".json,application/json,image/png" : ".json,application/json";
+  input.className = "hidden";
+  // 游离节点（未挂 DOM）的程序化 click 在部分 Android WebView 上不弹选择器
+  document.body.appendChild(input);
+  // 用户取消选择时 onchange 不触发，窗口焦点回来后把隐藏 input 清掉
+  var cleanup = function () { input.remove(); window.removeEventListener("focus", cleanup); };
+  window.addEventListener("focus", cleanup);
   input.onchange = function () {
-    var f = input.files[0]; if (!f) return;
+    var f = input.files[0];
+    if (input.parentNode) input.remove();
+    if (!f) return;
+    var isPng = isChar && /\.png$/i.test(f.name || "") ||
+                (f.type || "").indexOf("image/png") === 0;
+
+    var afterImport = function () {
+      return refreshLore().then(function () {
+        state.loreNav = "";
+        renderLoreSections();
+        renderSessionMeta();
+        showToast("导入成功：" + (f.name || ""));
+      });
+    };
+    var fail = function (e) { showToast("导入失败: " + e.message, "err"); };
+
+    if (isPng) {
+      // 酒馆 PNG 卡 → 走卡片导入端点（图片即头像）
+      var fd = new FormData();
+      fd.append("file", f);
+      fetchJSON("/api/characters/import-card", { method: "POST", body: fd })
+        .then(afterImport).catch(fail);
+      return;
+    }
+
     var reader = new FileReader();
     reader.onload = function () {
       var obj;
       try { obj = JSON.parse(reader.result); } catch (e) { showToast("JSON 解析失败", "err"); return; }
+      if (isChar && looksLikeTavernCard(obj)) {
+        // 酒馆 JSON 卡：仍走卡片导入端点（multipart 原样上传）
+        var cardFd = new FormData();
+        cardFd.append("file", f, f.name || "card.json");
+        fetchJSON("/api/characters/import-card", { method: "POST", body: cardFd })
+          .then(afterImport).catch(fail);
+        return;
+      }
       fetchJSON("/api/" + endpoint + "/import", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(obj),
-      }).then(function () { return refreshLore(); })
-        .then(function () { state.loreNav = ""; renderLoreSections(); renderSessionMeta(); })
-        .catch(function (e) { showToast("导入失败: " + e.message, "err"); });
+      }).then(afterImport).catch(fail);
     };
     reader.readAsText(f);
   };

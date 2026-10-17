@@ -3,20 +3,26 @@
 "use strict";
 
 /* ==== R7：导出 / 压缩 / 会话副本 ==== */
-function downloadJSON(obj, filename) {
-  var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+/* 所有前端下载的统一入口：APK 里 a[download] + blob: 不生效（WebView 无 DownloadListener），
+   原生平台走 FlySaver 插件存进系统下载目录；浏览器走传统锚点点击。 */
+function downloadBlob(blob, filename) {
+  if (window.NativeSaver && NativeSaver.isNative()) {
+    NativeSaver.saveBlob(blob, filename).then(function (saved) {
+      showToast("已保存到「下载」目录：" + saved, "ok", 3500);
+    }).catch(function (e) {
+      showToast("保存失败: " + e.message, "err", 4000);
+    });
+    return;
+  }
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(a.href);
 }
-function downloadBlob(blob, filename) {
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(a.href);
+function downloadJSON(obj, filename) {
+  var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  downloadBlob(blob, filename);
 }
 function downloadConversation() {
   // 自包含 zip：对话 + 立绘 / 背景 / BGM / 已合成语音

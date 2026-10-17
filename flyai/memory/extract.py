@@ -156,18 +156,24 @@ async def structured_extract(
 
 
 async def maybe_structured_extract(*, char_store, char_id: str,
-                                   session_id: str, history, provider,
+                                   marker_key: str, history, provider,
                                    every: int):
     """达到每 N 轮节奏时执行一次增量抽取；未到节奏返回 None。
 
-    进度按 EntryBook.extract_markers[session_id]（已见 user 轮数）。
+    进度按 EntryBook.extract_markers[marker_key]（已见 user 轮数）。
+    marker_key 必须对应一份独立历史：房间路径传窗口 id，旧单 AI 路径传
+    会话 id——多个窗口共用会话 id 会让进度互相覆盖。
     """
     book = char_store.load_book(char_id)
     user_positions = [
         i for i, m in enumerate(history) if m.role == "user"
     ]
     user_total = len(user_positions)
-    seen = int(book.extract_markers.get(session_id, 0) or 0)
+    seen = int(book.extract_markers.get(marker_key, 0) or 0)
+    # 标记领先于当前历史（换历史形态/旧键复用）：按 0 重抽，避免负数差
+    # 永远卡在「未到节奏」或把标记回写成更小的值
+    if seen > user_total:
+        seen = 0
     if user_total - seen < every:
         return None
 
@@ -176,12 +182,14 @@ async def maybe_structured_extract(*, char_store, char_id: str,
     )
     from ..lore.gen import messages_to_script
 
-    new_script = messages_to_script(history[start:])
+    # 群聊共享历史必须带发言人名字，否则会把别的角色说的话/做的事
+    # 抽进当前角色的记忆簿（单 AI 消息无 name，前缀为空，无副作用）
+    new_script = messages_to_script(history[start:], with_names=True)
     report = await structured_extract(
         char_store, char_id, provider, new_script
     )
 
     book = char_store.load_book(char_id)
-    book.extract_markers[session_id] = user_total
+    book.extract_markers[marker_key] = user_total
     char_store.save_book(char_id, book)
     return report

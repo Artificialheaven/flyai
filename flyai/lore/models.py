@@ -16,16 +16,29 @@ class LoreEntry:
     title: str = ""
     content: str = ""
     pinned: bool = False     # 常驻/钉选：True 时无条件注入系统提示词（类似世界书 constant）
+    # 触发词（世界书 selective/keys）：用户消息命中任一词（含模糊匹配）时
+    # 该条目自动注入系统提示词；为空时以标题作为触发词
+    keys: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"title": self.title, "content": self.content, "pinned": self.pinned}
+        return {
+            "title": self.title,
+            "content": self.content,
+            "pinned": self.pinned,
+            "keys": list(self.keys or []),
+        }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "LoreEntry":
+        raw_keys = d.get("keys") or []
+        if isinstance(raw_keys, str):
+            raw_keys = [raw_keys]
+        keys = [str(k).strip() for k in raw_keys if str(k or "").strip()]
         return cls(
             title=d.get("title", ""),
             content=d.get("content", ""),
             pinned=bool(d.get("pinned", False)),
+            keys=keys,
         )
 
 
@@ -48,6 +61,8 @@ class Character:
     prompt_format: str = ""   # 对白格式要求（覆盖内置默认）
     prompt_tools: str = ""    # 工具使用要求（覆盖内置默认）
     system_prompt: str = ""   # 系统级提示词（高优先级自定义系统指令，空则不注入）
+    post_history_instructions: str = ""  # PHI：每轮注入在聊天历史之后、生成之前的末位 system 指令（空则不注入）
+    first_mes: str = ""       # 开场白：用该角色（单角色普通房间）新建会话时自动发送的首条 AI 消息（可用 {{char}}/{{user}}）
     parent_id: str = ""       # 空=根卡（主角色卡）；非空=该根卡下的副本
     alias: str = ""           # 副本在列表中显示的别名（空则回退 name）
     voice: str = ""           # 绑定音色的 speaker ID（空=用全局默认音色）
@@ -81,6 +96,8 @@ class Character:
             "prompt_format": self.prompt_format,
             "prompt_tools": self.prompt_tools,
             "system_prompt": self.system_prompt,
+            "post_history_instructions": self.post_history_instructions,
+            "first_mes": self.first_mes,
             "parent_id": self.parent_id,
             "alias": self.alias,
             "voice": self.voice,
@@ -102,6 +119,8 @@ class Character:
             prompt_format=d.get("prompt_format", ""),
             prompt_tools=d.get("prompt_tools", ""),
             system_prompt=d.get("system_prompt", "") or "",
+            post_history_instructions=d.get("post_history_instructions", "") or "",
+            first_mes=d.get("first_mes", "") or "",
             parent_id=d.get("parent_id", "") or "",
             alias=d.get("alias", "") or "",
             voice=d.get("voice", "") or "",

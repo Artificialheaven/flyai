@@ -8,7 +8,12 @@
 
 from __future__ import annotations
 
+import logging
+import re
+from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..lore.diff import content_signature
 from ..lore.merge import merge_character_patch, merge_world_patch
@@ -94,6 +99,31 @@ def member_character(member, lore) -> Optional[Character]:
     return None
 
 
+def _norm_name(s: str) -> str:
+    return re.sub(r"\s+", "", str(s or "")).casefold()
+
+
+def _patch_name_matches(member: RoomMember, cur, patch_name: str) -> bool:
+    """压缩补丁回带的角色名是否与座位一致。补丁省略 name 时放行（不阻断旧行为）。"""
+    pn = _norm_name(patch_name)
+    if not pn:
+        return True
+    expected = []
+    if cur is not None and getattr(cur, "name", ""):
+        expected.append(_norm_name(cur.name))
+    if member.name:
+        expected.append(_norm_name(member.name))
+    expected = [x for x in expected if x]
+    if not expected:
+        return True
+    for ex in expected:
+        if pn == ex or pn in ex or ex in pn:
+            return True
+        if SequenceMatcher(None, pn, ex).ratio() >= 0.6:
+            return True
+    return False
+
+
 def plan_room_compression(session: Session, data: dict, lore=None) -> dict:
     """只计算房间压缩结果，不赋值。返回 {"members": {mid: dict}, "world": dict|None}。"""
     members_out = {}
@@ -105,6 +135,14 @@ def plan_room_compression(session: Session, data: dict, lore=None) -> dict:
         if m is None or not isinstance(patch, dict):
             continue
         cur = member_character(m, lore) if lore is not None else None
+        # 防张冠李戴：AI 可能把 A 角色的资料写到 B 的 member_id 下。
+        # 要求补丁回带角色名，与该座位的角色名/座位名明显不符则拒绝此补丁
+        if not _patch_name_matches(m, cur, str(patch.get("name") or "")):
+            logger.warning(
+                "群聊压缩：成员 %s 的补丁名字 %r 与座位角色不符，已跳过",
+                m.id, patch.get("name"),
+            )
+            continue
         if cur is not None:
             base = cur.to_dict()
         elif m.override:

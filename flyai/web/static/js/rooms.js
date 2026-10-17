@@ -221,7 +221,8 @@ var TOOL_LABELS = {
 function disabledToolsStorageKey() {
   return "flyai-disabled-tools-" + (state.currentSessionId || "none");
 }
-/* 当前会话被手动关闭的工具名（过滤掉服务端已不可用的名字，防脏数据） */
+/* 当前会话被手动关闭的工具名（过滤掉服务端已不可用的名字，防脏数据）。
+ * localStorage 是服务端会话值的即时镜像（刷新瞬间/旧发送路径仍读它）。 */
 function getDisabledTools() {
   var names = [];
   try {
@@ -236,50 +237,178 @@ function getDisabledTools() {
 }
 /* 发送 payload 用 */
 function disabledToolNames() { return getDisabledTools(); }
-function setToolEnabled(name, on) {
-  var names = getDisabledTools();
+
+/* 本窗口工具/输出设置的权威存根：当前会话对象（PATCH 持久化到服务端） */
+function _roomToolState() {
+  var sess = currentSession();
+  if (!sess) return null;
+  if (!Array.isArray(sess.disabled_tools)) sess.disabled_tools = [];
+  if (sess.max_tokens == null) sess.max_tokens = 0;
+  return sess;
+}
+
+var _toolPrefsTimer = null;
+/* 勾选/输入后防抖 PATCH；两个字段全量带上，避免互相覆盖 */
+function persistRoomToolPrefs() {
+  var sess = _roomToolState();
+  if (!sess || !state.currentSessionId) return;
+  var payload = {
+    disabled_tools: sess.disabled_tools.slice(),
+    max_tokens: Math.max(0, intOr(sess.max_tokens, 0)),
+  };
+  clearTimeout(_toolPrefsTimer);
+  _toolPrefsTimer = setTimeout(function () {
+    fetchJSON("/api/sessions/" + state.currentSessionId, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (s) {
+      var cur = currentSession();
+      if (cur) {
+        cur.disabled_tools = s.disabled_tools || [];
+        cur.max_tokens = s.max_tokens || 0;
+      }
+    }).catch(function (e) { addErrorBar("本窗口设置保存失败: " + e.message); });
+  }, 300);
+}
+
+/* 服务端值镜像到 localStorage（发送路径即时读取），并剔除已不可用的脏名 */
+function mirrorDisabledTools(names) {
+  var valid = {};
+  (state.toolsMeta || []).forEach(function (t) {
+    if (t.allowed) valid[t.name] = true;
+  });
+  var clean = (names || []).filter(function (n) { return valid[n]; });
+  try {
+    localStorage.setItem(disabledToolsStorageKey(), JSON.stringify(clean));
+  } catch (e) {}
+  return clean;
+}
+
+/* 勾选/取消单个工具：on=true 表示启用（从禁用集移除） */
+function setRoomToolEnabled(name, on) {
+  var sess = _roomToolState();
+  var names = sess ? sess.disabled_tools.slice() : getDisabledTools();
   var i = names.indexOf(name);
   if (on && i >= 0) names.splice(i, 1);
   if (!on && i < 0) names.push(name);
-  localStorage.setItem(disabledToolsStorageKey(), JSON.stringify(names));
+  if (sess) {
+    sess.disabled_tools = names;
+    persistRoomToolPrefs();
+  } else {
+    try { localStorage.setItem(disabledToolsStorageKey(), JSON.stringify(names)); } catch (e) {}
+  }
+  mirrorDisabledTools(names);
 }
-function mmToolRow(t, disabled) {
+
+function _toolRowEl(t, disabledNames, onChanged) {
   var lbl = document.createElement("label");
-  lbl.className = "mm-tool";
+  lbl.className = "td-tool mm-tool";
   lbl.title = t.description || "";
   var chk = document.createElement("input");
   chk.type = "checkbox";
-  chk.checked = disabled.indexOf(t.name) < 0;
-  chk.addEventListener("click", function (e) { e.stopPropagation(); });
-  chk.addEventListener("change", function () { setToolEnabled(t.name, chk.checked); });
-  var name = document.createElement("span");
-  name.className = "mm-tool-name";
+  chk.className = "td-tool-chk";
+  chk.checked = disabledNames.indexOf(t.name) < 0;
+  chk.addEventListener("change", function () {
+    setRoomToolEnabled(t.name, chk.checked);
+    onChanged();
+  });
+  var span = document.createElement("span");
+  span.className = "mm-tool-name";
   var html = escapeHtml(TOOL_LABELS[t.name] || t.name);
   if (t.description) html += '<span class="mm-tool-desc">' + escapeHtml(t.description) + "</span>";
-  name.innerHTML = html;
+  span.innerHTML = html;
   lbl.appendChild(chk);
-  lbl.appendChild(name);
-  return lbl;
+  lbl.appendChild(span);
+  return { row: lbl, chk: chk, name: t.name };
 }
-function buildToolsMenuSection() {
+
+function openToolsDialog() {
+  var dlg = document.getElementById("tools-dialog");
+  if (!dlg) return;
+  var groupsBox = document.getElementById("td-groups");
+  var mtInput = document.getElementById("td-max-tokens");
+  var sess = _roomToolState();
   var allowed = (state.toolsMeta || []).filter(function (t) { return t.allowed; });
-  if (!allowed.length) return null;
-  var disabled = getDisabledTools();
-  var frag = document.createDocumentFragment();
-  var head = document.createElement("div");
-  head.className = "mm-tool-group";
-  head.textContent = "🧰 提供给 AI 的工具（仅本对话）";
-  frag.appendChild(head);
+  var disabled = sess ? sess.disabled_tools.slice() : getDisabledTools();
+  var toolChks = [];
+
+  mtInput.value = sess ? intOr(sess.max_tokens, 0) : 0;
+  mtInput.disabled = !sess;
+  mtInput.title = sess ? "" : "请先打开一个聊天窗口";
+  groupsBox.innerHTML = "";
+  if (!allowed.length) {
+    var empty = document.createElement("p");
+    empty.className = "sub";
+    empty.textContent = "当前没有可用工具（功能开关可能被管理员全局关闭）。";
+    groupsBox.appendChild(empty);
+  }
   TOOL_GROUPS.forEach(function (g) {
     var items = allowed.filter(function (t) { return (t.category || "base") === g[0]; });
     if (!items.length) return;
-    var sub = document.createElement("div");
-    sub.className = "mm-tool-group";
-    sub.textContent = g[1];
-    frag.appendChild(sub);
-    items.forEach(function (t) { frag.appendChild(mmToolRow(t, disabled)); });
+    var sec = document.createElement("div");
+    sec.className = "td-group";
+    var head = document.createElement("label");
+    head.className = "td-group-head";
+    var gchk = document.createElement("input");
+    gchk.type = "checkbox";
+    gchk.className = "td-group-chk";
+    var gtitle = document.createElement("strong");
+    gtitle.textContent = g[1];
+    head.appendChild(gchk);
+    head.appendChild(gtitle);
+    sec.appendChild(head);
+
+    var built = items.map(function (t) {
+      var b = _toolRowEl(t, disabled, syncGroup);
+      toolChks.push(b);
+      sec.appendChild(b.row);
+      return b;
+    });
+    function syncGroup() {
+      var onN = built.filter(function (b) { return b.chk.checked; }).length;
+      gchk.checked = onN === built.length;
+      gchk.indeterminate = onN > 0 && onN < built.length;
+    }
+    gchk.addEventListener("change", function () {
+      var on = gchk.checked;
+      built.forEach(function (b) {
+        if (b.chk.checked !== on) {
+          b.chk.checked = on;
+          setRoomToolEnabled(b.name, on);
+        }
+      });
+      syncGroup();
+    });
+    syncGroup();
+    groupsBox.appendChild(sec);
   });
-  return frag;
+
+  function applyAll(on) {
+    toolChks.forEach(function (b) {
+      if (b.chk.checked !== on) {
+        b.chk.checked = on;
+        setRoomToolEnabled(b.name, on);
+      }
+    });
+    groupsBox.querySelectorAll(".td-group-chk").forEach(function (c) {
+      c.checked = on;
+      c.indeterminate = false;
+    });
+  }
+  var btnEnable = document.getElementById("td-enable-all");
+  var btnDisable = document.getElementById("td-disable-all");
+  btnEnable.onclick = function () { applyAll(true); };
+  btnDisable.onclick = function () { applyAll(false); };
+  document.getElementById("td-done").onclick = function () { dlg.close(); };
+  mtInput.oninput = function () {
+    if (!sess) return;
+    var n = intOr(mtInput.value, 0);
+    n = Math.max(0, Math.min(100000, n));
+    sess.max_tokens = n;
+    persistRoomToolPrefs();
+  };
+  dlg.showModal();
 }
 function buildMoreMenu() {
   var menu = el.moreMenu;
@@ -335,6 +464,27 @@ function buildMoreMenu() {
 
   if (isRoom) {
     menu.appendChild(mmSep());
+    // 🤖 AI 角色：仅普通单聊可更换当前会话挂载的角色卡（群聊各座位在记忆面板管理）
+    var aiSeat = singleAiSeat();
+    if (aiSeat) {
+      var ar = document.createElement("div");
+      ar.className = "mm-row-item";
+      var ak = document.createElement("span");
+      ak.className = "mm-k";
+      ak.textContent = "角色卡";
+      var asel = document.createElement("select");
+      asel.innerHTML = charOptionTags(
+        aiSeat.character_id || "",
+        aiSeat.override ? "会话副本（未入库）" : "无角色（自由对话）"
+      );
+      asel.addEventListener("change", function () {
+        var cid = asel.value;
+        changeRoomCharacter(aiSeat, cid);
+      });
+      ar.appendChild(ak);
+      ar.appendChild(asel);
+      menu.appendChild(ar);
+    }
     // 🎭 扮演（persona）：行内下拉
     var seat = roomUserSeat();
     if (seat) {
@@ -365,11 +515,9 @@ function buildMoreMenu() {
     menu.appendChild(sh);
   }
 
-  menu.appendChild(mmSep());
-  var toolSection = buildToolsMenuSection();
-  if (toolSection) {
-    menu.appendChild(toolSection);
+  if ((state.toolsMeta || []).some(function (t) { return t.allowed; })) {
     menu.appendChild(mmSep());
+    menu.appendChild(mmItem("🧰 提供给 AI 的工具与输出…", openToolsDialog));
   }
   if (isRoom) {
     menu.appendChild(mmItem("🧠 记忆与属性（座位 / 挂载 / 移除成员）", openMemDialog));
@@ -522,7 +670,9 @@ function cardDetailHtml(c) {
     "标识：" + escapeHtml((c.author || "?") + ":" + c.id) + "</div></div></div>";
   if (c.intro) h += '<h4>简介</h4><div class="cd-sec">' + escapeHtml(c.intro) + "</div>";
   if (c.background) h += '<h4>经历</h4><div class="cd-sec">' + escapeHtml(c.background) + "</div>";
+  if (c.first_mes) h += '<h4>开场白</h4><div class="cd-sec">' + escapeHtml(c.first_mes) + "</div>";
   if (c.system_prompt) h += '<h4>系统级提示词</h4><div class="cd-sec">' + escapeHtml(c.system_prompt) + "</div>";
+  if (c.post_history_instructions) h += '<h4>历史后指令（PHI）</h4><div class="cd-sec">' + escapeHtml(c.post_history_instructions) + "</div>";
   if (c.attributes && c.attributes.length) {
     h += '<h4>属性</h4><ul class="cd-list">' + c.attributes.map(function (a) {
       return "<li>" + escapeHtml(a.label || a.key) + "（" + escapeHtml(a.key) + "）· 初值 " +
@@ -811,7 +961,16 @@ function selectSession(id) {
   return fetchJSON("/api/sessions/" + id).then(function (s) {
     // 更新本地 session 中的角色/世界与标题
     var sess = currentSession();
-    if (sess) { sess.character_id = s.character_id; sess.world_id = s.world_id; sess.title = s.title; }
+    if (sess) {
+      sess.character_id = s.character_id; sess.world_id = s.world_id; sess.title = s.title;
+      // 本窗口工具/输出设置以服务端为权威，覆盖本地镜像（多端同步）
+      sess.disabled_tools = Array.isArray(s.disabled_tools) ? s.disabled_tools.slice() : [];
+      sess.max_tokens = intOr(s.max_tokens, 0);
+      try {
+        localStorage.setItem("flyai-disabled-tools-" + id,
+                             JSON.stringify(mirrorDisabledTools(sess.disabled_tools)));
+      } catch (e) {}
+    }
     state.currentAttrs = s.attributes || null;
     // 累计 token：以服务端持久值为准（页面周期内再叠加新 done 事件）
     var tu = s.token_usage || {};
@@ -893,6 +1052,44 @@ function setPersona(seat, characterId) {
     // 刷新当前窗口，让已有用户气泡也按新扮演角色重标注
     if (state.currentThreadId) loadThread(state.currentThreadId);
   }).catch(function (e) { addErrorBar("设置自设失败: " + e.message); });
+}
+
+/* 普通单聊房间唯一的 AI 座位（群聊 / Galgame 返回 null）：仅它支持直接换挂卡 */
+function singleAiSeat() {
+  if (!roomMode()) return null;
+  var s = currentSession();
+  if (s && s.mode === "galgame") return null;
+  var ais = (state.roomMembers || []).filter(function (m) { return !m.is_user; });
+  return ais.length === 1 ? ais[0] : null;
+}
+/* 更换当前单聊会话挂载的角色卡：PATCH AI 座位，清旧副本；历史气泡按新卡重标注 */
+function changeRoomCharacter(seat, characterId) {
+  fetchJSON("/api/rooms/" + state.currentSessionId + "/members/" + seat.id, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ character_id: characterId }),
+  }).then(function (m) {
+    var idx = state.roomMembers.findIndex(function (x) { return x.id === seat.id; });
+    if (idx >= 0) state.roomMembers[idx] = m;
+    var sess = currentSession();
+    if (sess) {
+      sess.character_id = characterId;
+      sess.character_override = null;
+    }
+    var sc = state.scopeCache[state.currentSessionId];
+    if (sc) {
+      sc.char = characterId ? (characterOf(characterId) || null) : null;
+      sc.scoped = false;
+    }
+    renderSessionMeta();
+    renderSessionList();  // 左栏窗口名跟随角色名（单聊虽不进二级列表，标题 chip 也要刷新）
+    if (state.currentThreadId) loadThread(state.currentThreadId);
+    var name = characterId ? cardDisplayName(characterOf(characterId)) : "无角色";
+    showToast("已更换角色为「" + name + "」", "ok", 3000);
+  }).catch(function (e) {
+    addErrorBar("更换角色失败: " + e.message);
+    renderSessionMeta();  // 还原下拉选中态
+  });
 }
 
 function renderThreads() {

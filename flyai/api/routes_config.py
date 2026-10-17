@@ -349,6 +349,8 @@ class MySettingsPayload(BaseModel):
     auto_recall: Optional[bool] = False
     auto_recall_max: Optional[int] = 5
     extract_every_turns: Optional[int] = 10
+    lore_auto_inject: Optional[bool] = True
+    max_tokens: Optional[int] = None
 
     # 功能开关覆盖：None（JSON null）= 跟随全局默认
     tools_enabled: Optional[bool] = None
@@ -386,17 +388,6 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
             raise HTTPException(400, f"{name} 必须是整数")
         return max(minimum, min(maximum, n))
 
-    scope.user_settings.keep_turns = _as_int(
-        payload.keep_turns, "keep_turns", 0, 0, 500)
-    scope.user_settings.auto_recall = bool(payload.auto_recall)
-    scope.user_settings.auto_recall_max = _as_int(
-        payload.auto_recall_max, "auto_recall_max", 5, 1, 20)
-    scope.user_settings.extract_every_turns = _as_int(
-        payload.extract_every_turns, "extract_every_turns", 10, 0, 500)
-
-    # ---- 功能开关覆盖（None=跟随全局默认）----
-    us = scope.user_settings
-
     def _opt_int(value, name, minimum, maximum):
         if value is None:
             return None
@@ -405,6 +396,21 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
         except (TypeError, ValueError):
             raise HTTPException(400, f"{name} 必须是整数或 null")
         return max(minimum, min(maximum, n))
+
+    scope.user_settings.keep_turns = _as_int(
+        payload.keep_turns, "keep_turns", 0, 0, 500)
+    scope.user_settings.auto_recall = bool(payload.auto_recall)
+    scope.user_settings.auto_recall_max = _as_int(
+        payload.auto_recall_max, "auto_recall_max", 5, 1, 20)
+    scope.user_settings.extract_every_turns = _as_int(
+        payload.extract_every_turns, "extract_every_turns", 10, 0, 500)
+    scope.user_settings.lore_auto_inject = bool(payload.lore_auto_inject)
+    # 0/空 = 跟随提供商配置，归一化为 None 落盘
+    scope.user_settings.max_tokens = _opt_int(
+        payload.max_tokens, "max_tokens", 0, 100000) or None
+
+    # ---- 功能开关覆盖（None=跟随全局默认）----
+    us = scope.user_settings
 
     us.tools_enabled = (None if payload.tools_enabled is None
                         else bool(payload.tools_enabled))

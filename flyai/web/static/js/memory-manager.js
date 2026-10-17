@@ -1,4 +1,4 @@
-/* 记忆管理弹窗：结构化记忆条目浏览/删除、统计、召回日志（P6）。 */
+/* 记忆管理弹窗：按角色卡·房间两级浏览结构化记忆、删除、统计、整理/召回记录。 */
 
 (function () {
   var mm = {
@@ -8,12 +8,19 @@
     showSuperseded: document.getElementById("memory-show-superseded"),
     btnRefresh: document.getElementById("btn-memory-refresh"),
     list: document.getElementById("memory-entry-list"),
-    logsPane: document.getElementById("memory-logs"),
-    entriesPane: document.getElementById("memory-entries-pane"),
+    sourceList: document.getElementById("memory-source-list"),
+    sourceView: document.getElementById("memory-source-view"),
+    drillView: document.getElementById("memory-drill-view"),
+    btnBack: document.getElementById("btn-memory-back"),
+    drillTitle: document.getElementById("memory-drill-title"),
+    logsPane: document.getElementById("memory-recall-logs"),
     logsTabPane: document.getElementById("memory-logs-pane"),
     entriesTabPane: document.getElementById("memory-entries-pane"),
     btnClose: document.getElementById("btn-memory-mgr-close"),
     msg: document.getElementById("memory-mgr-msg"),
+    drillChar: null,
+    drillName: "",
+    sources: [],
   };
 
   function setMsg(text, kind) {
@@ -35,7 +42,11 @@
     return "记忆";
   }
 
-  // ---- 统计 ----
+  function shortId(cid) {
+    return cid.length > 10 ? cid.slice(0, 10) + "…" : cid;
+  }
+
+  // ---- 统计（chips 可点击钻取）----
   function loadStats() {
     if (!mm.stats) return;
     mm.stats.textContent = "加载中…";
@@ -48,9 +59,9 @@
       if ((data.per_char || []).length > 1) {
         html += '<div class="mem-per-char">';
         (data.per_char || []).forEach(function (p) {
-          html += '<span class="mem-chip" title="{0}">{1}: {2}</span>'
+          html += '<span class="mem-chip mem-chip-link" data-char="{0}" title="点击查看该卡的记忆">{1}: {2}</span>'
             .replace("{0}", esc(p.char_id))
-            .replace("{1}", esc(p.char_id.length > 8 ? p.char_id.slice(0, 8) + "…" : p.char_id))
+            .replace("{1}", esc(shortId(p.char_id)))
             .replace("{2}", p.active);
         });
         html += "</div>";
@@ -59,20 +70,90 @@
     }).catch(function () { mm.stats.textContent = "统计加载失败"; });
   }
 
-  // ---- 条目列表 ----
+  mm.stats && mm.stats.addEventListener("click", function (e) {
+    var chip = e.target.closest(".mem-chip-link");
+    if (!chip) return;
+    var cid = chip.getAttribute("data-char");
+    var known = (mm.sources || []).filter(function (s) { return s.char_id === cid; });
+    var name = known.length ? known[0].char_name : "";
+    enterDrill(cid, name || shortId(cid));
+  });
+
+  // ---- 来源两级列表 ----
+  function sourceName(s) {
+    if (s.orphan || !s.char_name) return "未挂载的记忆簿（" + shortId(s.char_id) + "）";
+    return s.char_name;
+  }
+
+  function loadSources() {
+    if (!mm.sourceList) return;
+    mm.sourceList.textContent = "加载中…";
+    fetchJSON("/api/my/memory/sources").then(function (data) {
+      mm.sources = data.sources || [];
+      if (!mm.sources.length) {
+        mm.sourceList.innerHTML = '<div class="mem-empty">还没有任何记忆条目。多聊几轮后，自动整理会把重要事实写进这里。</div>';
+        return;
+      }
+      mm.sourceList.innerHTML = mm.sources.map(function (s) {
+        var room = s.orphan ? "当前没有房间引用这张卡" : (s.session_title || "未命名会话");
+        var meta = [];
+        meta.push("有效 " + (s.active || 0));
+        if (s.superseded) meta.push("失效 " + s.superseded);
+        if (s.ledger) meta.push("台账 " + s.ledger);
+        return '<div class="mem-row mem-source" data-id="{0}" data-name="{1}">'
+          .replace("{0}", esc(s.char_id)).replace("{1}", esc(sourceName(s)))
+          + '<div class="mem-row-head"><span class="mem-row-meta">'
+          + esc(sourceName(s) + " · " + room) + "</span>"
+          + '<span class="mem-row-meta">' + esc(meta.join(" · ")) + "</span></div>"
+          + "</div>";
+      }).join("");
+    }).catch(function (e) {
+      mm.sourceList.innerHTML = '<div class="mem-empty">加载失败: ' + esc(e.message) + "</div>";
+    });
+  }
+
+  mm.sourceList && mm.sourceList.addEventListener("click", function (e) {
+    var row = e.target.closest(".mem-source");
+    if (!row) return;
+    enterDrill(row.getAttribute("data-id"), row.getAttribute("data-name"));
+  });
+
+  function showSources() {
+    mm.drillChar = null;
+    mm.drillName = "";
+    if (mm.sourceView) mm.sourceView.classList.remove("hidden");
+    if (mm.drillView) mm.drillView.classList.add("hidden");
+    loadStats();
+    loadSources();
+  }
+
+  function enterDrill(charId, name) {
+    mm.drillChar = charId;
+    mm.drillName = name || shortId(charId);
+    if (mm.sourceView) mm.sourceView.classList.add("hidden");
+    if (mm.drillView) mm.drillView.classList.remove("hidden");
+    if (mm.drillTitle) mm.drillTitle.textContent = mm.drillName;
+    if (mm.search) mm.search.value = "";
+    if (mm.showSuperseded) mm.showSuperseded.checked = false;
+    loadEntries();
+  }
+
+  mm.btnBack && mm.btnBack.addEventListener("click", showSources);
+
+  // ---- 某张卡的条目列表 ----
   var searchTimer = null;
 
   function loadEntries() {
-    if (!mm.list) return;
+    if (!mm.list || !mm.drillChar) return;
     mm.list.textContent = "加载中…";
     var params = new URLSearchParams();
+    params.set("char_id", mm.drillChar);
     if (mm.search && mm.search.value.trim()) params.set("q", mm.search.value.trim());
     if (mm.showSuperseded && mm.showSuperseded.checked) params.set("include_superseded", "true");
-    var url = "/api/my/memory" + (params.toString() ? "?" + params.toString() : "");
-    fetchJSON(url).then(function (data) {
+    fetchJSON("/api/my/memory?" + params.toString()).then(function (data) {
       var entries = data.entries || [];
       if (!entries.length) {
-        mm.list.innerHTML = '<div class="mem-empty">没有符合条件的记忆条目。</div>';
+        mm.list.innerHTML = '<div class="mem-empty">这张卡还没有符合条件的记忆条目。</div>';
         return;
       }
       mm.list.innerHTML = entries.map(function (e) {
@@ -96,9 +177,9 @@
     });
   }
 
-  function refreshAll() {
+  function refreshCurrent() {
     loadStats();
-    loadEntries();
+    if (mm.drillChar) loadEntries(); else loadSources();
   }
 
   mm.list && mm.list.addEventListener("click", function (e) {
@@ -113,7 +194,7 @@
       + "?char_id=" + encodeURIComponent(charId);
     fetchJSON(url, { method: "DELETE" }).then(function () {
       showToast("记忆已删除", "ok");
-      refreshAll();
+      refreshCurrent();
     }).catch(function (err) {
       setMsg("删除失败: " + err.message, "err");
     });
@@ -126,10 +207,10 @@
     });
   }
   mm.showSuperseded && mm.showSuperseded.addEventListener("change", loadEntries);
-  mm.btnRefresh && mm.btnRefresh.addEventListener("click", refreshAll);
+  mm.btnRefresh && mm.btnRefresh.addEventListener("click", refreshCurrent);
   mm.btnClose && mm.btnClose.addEventListener("click", function () { mm.dlg.close(); });
 
-  // ---- 召回日志 ----
+  // ---- 整理 / 召回记录 ----
   function fmtTime(ts) {
     var d = new Date(ts * 1000);
     var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
@@ -143,17 +224,27 @@
     fetchJSON("/api/my/memory/recall-logs").then(function (data) {
       var logs = data.logs || [];
       if (!logs.length) {
-        mm.logsPane.innerHTML = '<div class="mem-empty">暂无召回记录。</div>';
+        mm.logsPane.innerHTML = '<div class="mem-empty">暂无记录。</div>';
         return;
       }
       mm.logsPane.innerHTML = logs.map(function (l) {
-        var kind = l.kind === "auto" ? "自动回忆" : "主动查询";
+        var kind, topic;
+        if (l.kind === "extract") {
+          kind = "自动整理";
+          topic = "新增 " + (l.added || 0) + " · 更新 " + (l.updated || 0)
+            + (l.ledger ? " · 台账 " + l.ledger : "");
+        } else if (l.kind === "auto") {
+          kind = "自动回忆";
+          topic = (l.topic || "") + "（" + (l.hits || 0) + " 条）";
+        } else {
+          kind = "主动查询";
+          topic = (l.topic || "(最近)") + "（" + (l.hits || 0) + " 条）";
+        }
         return '<div class="mem-log-row"><span class="mem-log-ts">' + esc(fmtTime(l.ts))
           + '</span><span class="mem-log-kind">' + esc(kind) + "</span>"
-          + '<span class="mem-log-topic">' + esc(l.topic || "") + "</span>"
-          + '<span class="mem-log-hits">' + (l.hits || 0) + " 条</span></div>";
+          + '<span class="mem-log-topic">' + esc(topic) + "</span></div>";
       }).join("");
-    }).catch(function () { mm.logsPane.textContent = "日志加载失败"; });
+    }).catch(function () { mm.logsPane.textContent = "记录加载失败"; });
   }
 
   // ---- 页签 ----
@@ -165,7 +256,7 @@
     tabs.forEach(function (t) {
       t.classList.toggle("active", t.getAttribute("data-mtab") === name);
     });
-    if (showEntries) loadEntries(); else loadLogs();
+    if (showEntries) refreshCurrent(); else loadLogs();
   }
 
   mm.dlg.querySelectorAll(".mem-tab").forEach(function (t) {
@@ -179,6 +270,6 @@
     setMsg("");
     mm.dlg.showModal();
     switchTab("entries");
-    loadStats();
+    showSources();
   };
 })();

@@ -45,9 +45,9 @@
     <aside id="sidebar">
       <div class="sidebar-header">
         <span class="logo"><span class="dot"></span>FlyAI</span>
-        <button id="btn-import-session" class="icon-btn" title="导入对话">⇪</button>
+        <button id="btn-import-session" class="icon-btn" title="导入对话（FlyAI 导出包 / Chatbox 备份）">⇪</button>
         <button id="btn-new-session" class="icon-btn" title="新建会话">＋</button>
-        <input type="file" id="session-import-file" accept=".json,.zip,application/json,application/zip" class="hidden" />
+        <input type="file" id="session-import-file" accept=".json,.zip,.md,.markdown,.txt,application/json,application/zip,text/markdown,text/plain" class="hidden" />
       </div>
       <div class="search-wrap">
         <svg class="search-ico"><use href="#i-search"/></svg>
@@ -306,6 +306,10 @@
             <label class="f-label">每 N 轮自动整理记忆（0=关闭）
               <input type="number" id="set-extract-every" value="10" min="0" max="500" />
               <small>对话多了以后，AI 每隔这么多轮自动把重要事实、物品/任务/伏笔状态整理进跨会话记忆簿。</small>
+            </label>
+            <label class="f-label toggle"><input type="checkbox" id="set-lore-auto-inject" /> 内容表触发词自动注入（用户消息模糊命中角色卡/世界书条目的触发词或标题时，直接把相关设定加入提示词，不必等 AI 自己查询）</label>
+            <label class="f-label">单次回复最大 token（全局默认，0=跟随模型配置；单个聊天窗口可另行覆盖）
+              <input type="number" id="set-max-tokens" value="0" min="0" max="100000" />
             </label>
             <button type="button" id="btn-open-memory-manager" class="btn small">记忆管理</button>
 
@@ -874,16 +878,28 @@
       <h3>🧠 记忆管理</h3>
       <div class="mem-tabs">
         <button type="button" data-mtab="entries" class="mem-tab active">记忆条目</button>
-        <button type="button" data-mtab="logs" class="mem-tab">召回记录</button>
+        <button type="button" data-mtab="logs" class="mem-tab">记录</button>
       </div>
       <div id="memory-entries-pane">
         <div id="memory-stats" class="mem-stats"></div>
-        <div class="mem-filters">
-          <input type="search" id="memory-search" placeholder="搜索记忆文本…" />
-          <label class="f-label toggle"><input type="checkbox" id="memory-show-superseded" /> 显示已失效</label>
-          <button type="button" id="btn-memory-refresh" class="btn small">刷新</button>
+        <div id="memory-source-view">
+          <div class="mem-filters">
+            <span class="sub">按角色卡与所在房间分类，点击查看该卡的全部记忆</span>
+            <button type="button" id="btn-memory-refresh" class="btn small">刷新</button>
+          </div>
+          <div id="memory-source-list" class="mem-list"></div>
         </div>
-        <div id="memory-entry-list" class="mem-list"></div>
+        <div id="memory-drill-view" class="hidden">
+          <div class="mem-filters">
+            <button type="button" id="btn-memory-back" class="btn small">← 全部来源</button>
+            <strong id="memory-drill-title"></strong>
+          </div>
+          <div class="mem-filters">
+            <input type="search" id="memory-search" placeholder="搜索该卡记忆文本…" />
+            <label class="f-label toggle"><input type="checkbox" id="memory-show-superseded" /> 显示已失效</label>
+          </div>
+          <div id="memory-entry-list" class="mem-list"></div>
+        </div>
       </div>
       <div id="memory-logs-pane" class="hidden">
         <div id="memory-recall-logs" class="mem-logs"></div>
@@ -979,6 +995,24 @@
       <div class="dialog-actions">
         <button id="btn-thread-rename-cancel" class="btn ghost">取消</button>
         <button id="btn-thread-rename-ok" class="btn primary">保 存</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 本窗口工具与输出设置 -->
+  <dialog id="tools-dialog">
+    <div class="dialog-body">
+      <h3>🧰 本窗口工具与输出</h3>
+      <p class="sub">勾选提供给 AI 的工具，可按组整类开关；设置保存在这个聊天窗口里，换设备登录同样生效。</p>
+      <label class="f-label">本窗口单次回复最大 token（0=跟随全局设置/模型配置）
+        <input type="number" id="td-max-tokens" value="0" min="0" max="100000" />
+      </label>
+      <div id="td-groups" class="td-groups"></div>
+      <div class="dialog-actions">
+        <button type="button" id="td-enable-all" class="btn ghost">全部启用</button>
+        <button type="button" id="td-disable-all" class="btn ghost">全部关闭</button>
+        <span class="spacer"></span>
+        <button type="button" id="td-done" class="btn primary">完 成</button>
       </div>
     </div>
   </dialog>
@@ -1130,20 +1164,20 @@
   </div>
 
   <!-- 原生经典脚本（js/ 目录），按「核心 → 界面 → 数据 → 功能」顺序加载；函数共享全局作用域，勿加 defer -->
-  <script src="/static/js/native.js?v=20261009k"></script>
+  <script src="/static/js/native.js?v=20261011a"></script>
   <script src="/static/js/app.js?v=20261011b"></script>
   <script src="/static/js/auth.js?v=20261011b"></script>
   <script src="/static/js/ui.js?v=20261011b"></script>
   <script src="/static/js/sessions.js?v=20261009k"></script>
-  <script src="/static/js/rooms.js?v=20261011e"></script>
-  <script src="/static/js/compress.js?v=20261010e"></script>
-  <script src="/static/js/lore.js?v=20261009k"></script>
-  <script src="/static/js/editor.js?v=20261009k"></script>
+  <script src="/static/js/rooms.js?v=20261011f"></script>
+  <script src="/static/js/compress.js?v=20261011a"></script>
+  <script src="/static/js/lore.js?v=20261011h"></script>
+  <script src="/static/js/editor.js?v=20261011f"></script>
   <script src="/static/js/cropper.js?v=20261009k"></script>
   <script src="/static/js/chat-history.js?v=20261011e"></script>
   <script src="/static/js/chat-stream.js?v=20261011e"></script>
-  <script src="/static/js/images.js?v=20261009k"></script>
-  <script src="/static/js/audio.js?v=20261009k"></script>
+  <script src="/static/js/images.js?v=20261011a"></script>
+  <script src="/static/js/audio.js?v=20261011a"></script>
   <!-- BGM：FluidSynth WASM + GS 音色库（顺序不可换：先 WASM 再 JSSynth 封装） -->
   <script src="/static/vendor/libfluidsynth.js"></script>
   <script src="/static/vendor/js-synthesizer.min.js"></script>

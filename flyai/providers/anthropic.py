@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator, Dict, List
+from typing import AsyncIterator, Dict, List, Optional
 
 from ..errors import ProviderError
 from ..schemas import Message, ToolCall
@@ -30,6 +30,7 @@ class AnthropicProvider(BaseProvider):
         messages: List[Message],
         tool_specs: List[dict],
         deep_thinking: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/v1/messages"
@@ -37,9 +38,12 @@ class AnthropicProvider(BaseProvider):
         # 持久配置开启，或本轮「深度思考」开关开启
         thinking_on = bool(tcfg.get("enabled")) or bool(deep_thinking)
         system, body_messages = self._encode_request(messages, thinking_on=thinking_on)
+        # 优先级：窗口/用户级覆盖 > 模型配置 params > 内置默认 4096
+        effective_max_tokens = int(
+            max_tokens or self.cfg.params.get("max_tokens", 4096))
         body: Dict = {
             "model": self.cfg.model,
-            "max_tokens": int(self.cfg.params.get("max_tokens", 4096)),
+            "max_tokens": effective_max_tokens,
             "messages": body_messages,
         }
         if system:

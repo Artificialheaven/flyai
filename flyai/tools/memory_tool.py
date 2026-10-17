@@ -77,6 +77,21 @@ def _book_read_mode(member) -> str:
     return ""
 
 
+def _book_write_mode(member) -> str:
+    """记忆簿的写入模式：显式挂载（rw/ro）优先；
+    未显式挂载且归属就是本角色自身时，默认按读写——
+    自己的跨会话记忆簿本就应在各房间延续（自动整理与 update_chat_memory
+    默认即可写入，否则用户会觉得「记忆功能没生效」）；
+    挂载别人卡的簿（副本/派生卡）必须显式选成读写，默认不可写。
+    """
+    mode = _memory_mode(member)
+    if mode:
+        return mode
+    if not (getattr(member, "memory_char_id", "") or "").strip():
+        return "rw"
+    return ""
+
+
 class QueryChatMemoryTool(Tool):
     name = "query_chat_memory"
     description = (
@@ -135,6 +150,7 @@ class QueryChatMemoryTool(Tool):
                 await self._collect(
                     services, session, char_id, topic, embedder,
                     budget_start=sum(len(b) for b in blocks),
+                    member_id=getattr(member, "id", "") or "",
                 )
             )
         except Exception as exc:  # 检索一律兜底，不让工具炸掉对话流
@@ -226,8 +242,9 @@ class QueryChatMemoryTool(Tool):
         return "[本房间记忆]\n" + "\n".join(s[:_MAX_TEXT] for s in picked)
 
     async def _collect(self, services, session, char_id: str, topic: str,
-                       embedder=None, budget_start: int = 0) -> List[str]:
-        thread_sets = self._candidate_sets(session, char_id)
+                       embedder=None, budget_start: int = 0,
+                       member_id: str = "") -> List[str]:
+        thread_sets = self._candidate_sets(session, char_id, member_id)
         out: List[str] = []
         used = budget_start
 
@@ -308,9 +325,11 @@ class QueryChatMemoryTool(Tool):
         return all_scored[:max(1, top_k)]
 
     @staticmethod
-    def _candidate_sets(session, char_id: str):
+    def _candidate_sets(session, char_id: str, member_id: str = ""):
         """收集该角色参与的所有窗口里的消息（过滤 tool/hidden/空），按窗口分组。
 
+        传 member_id 时按座位精确匹配窗口（同一张卡挂了多个座位时，不会把
+        另一个座位的私聊窗口也回顾进来）；否则回退按 character_id 匹配。
         每条消息带身份 (tid, index, sha1[:12])，供向量增量缓存判定前缀。
         返回 [(tid, label, [(who, text, ident), ...]), ...]。
         """
@@ -318,7 +337,7 @@ class QueryChatMemoryTool(Tool):
 
         sets: List = []
         for t in session.threads:
-            if not QueryChatMemoryTool._includes(session, t, char_id):
+            if not QueryChatMemoryTool._includes(session, t, char_id, member_id):
                 continue
             msgs = []
             for idx, m in enumerate(t.messages):
@@ -338,7 +357,9 @@ class QueryChatMemoryTool(Tool):
         return sets[:_MAX_THREADS]
 
     @staticmethod
-    def _includes(session, thread, char_id: str) -> bool:
+    def _includes(session, thread, char_id: str, member_id: str = "") -> bool:
+        if member_id:
+            return member_id in thread.member_ids
         for mid in thread.member_ids:
             m = session.member(mid)
             if m is not None and not _is_user(m) and _char_id(m) == char_id:
@@ -350,7 +371,8 @@ class UpdateChatMemoryTool(Tool):
     name = "update_chat_memory"
     description = (
         "把你在当前对话里确认的新事实写进长期记忆，供以后沿用：写入本会话记忆；"
-        "若为你挂载了可读写的跨会话角色记忆簿，会同时记进该簿，其它会话里的你也能记得。"
+        "你自己名下的跨会话角色记忆簿会同时记入，其它会话里的你也能记得"
+        "（仅当你被只读挂载到别人的记忆簿时，才只写本会话）。"
         "add 为要记住的一句话或条目，写入后立即生效并永久保存。"
         "适合记录：对方告诉你的重要信息、约定、时间、地点，以及你或对方的状态变化等仍需长期记得的内容。"
         "不要反复写入完全相同的内容。"
@@ -396,7 +418,7 @@ class UpdateChatMemoryTool(Tool):
         # 用户显式触发的一次性记入，即使本座位是只读/未挂载也写入；
         # 其余情况只写本会话，不报错
         force_write = bool(services.get("book_force_write"))
-        if _memory_mode(member) == "rw" or force_write:
+        if _book_write_mode(member) == "rw" or force_write:
             char_store = services.get("char_memory")
             if char_store is not None:
                 try:

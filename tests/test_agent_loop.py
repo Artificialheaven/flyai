@@ -36,9 +36,11 @@ class _ScriptedProvider:
         self._turns = list(turns)
         self._idx = 0
         self.received = []  # 记录每次调用收到的消息（截断测试用）
+        self.kwargs_list = []  # 记录每次调用的额外 kwargs（max_tokens 透传断言）
 
     async def stream_chat(self, messages, tool_specs, **kwargs):
         self.received.append(list(messages))
+        self.kwargs_list.append(dict(kwargs))
         kind, payload = self._turns[self._idx]
         self._idx += 1
         if kind == "final":
@@ -178,6 +180,32 @@ def test_other_round_still_allowed_after_web_capped():
     assert _done(events)["reason"] == "stop"
     assert registry.executed.count("web_fetch") == 3
     assert registry.executed.count("read_file") == 1
+
+
+async def _collect_simple(max_tokens=None):
+    provider = _ScriptedProvider([("final", "好")])
+    settings = ToolSettings(enabled=True)
+    out = []
+    async for ev, data in run_agent_loop(
+        [Message(role="user", content="hi")],
+        provider,
+        _FakeRegistry(),
+        settings,
+        max_tokens=max_tokens,
+    ):
+        out.append((ev, data))
+    return provider, out
+
+
+def test_max_tokens_passed_through_to_provider():
+    provider, events = _run(_collect_simple(max_tokens=512))
+    assert provider.kwargs_list[0]["max_tokens"] == 512
+    assert _done(events)["reason"] == "stop"
+
+
+def test_max_tokens_none_when_unset():
+    provider, events = _run(_collect_simple())
+    assert provider.kwargs_list[0]["max_tokens"] is None
 
 
 class _SlowProvider:

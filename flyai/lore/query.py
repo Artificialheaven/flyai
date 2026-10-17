@@ -14,6 +14,7 @@ from ..providers.embedding import dot, normalize
 from .attributes import resolve_attribute_defs
 from .budget import fit_blocks, fit_budget
 from .models import Character, LoreEntry, World
+from . import trigger as _trigger
 
 KIND_CHARACTER = "character"
 KIND_WORLD = "world"
@@ -56,6 +57,7 @@ class LoreQuerier:
         for idx, e in enumerate(table):
             title_l = (e.title or "").lower()
             content_l = (e.content or "").lower()
+            keys_l = [str(k).lower() for k in (e.keys or [])]
             score = 0
             for term in terms:
                 if title_l == term:
@@ -63,6 +65,12 @@ class LoreQuerier:
                 c = title_l.count(term)
                 if c:
                     score += 10 * c
+                # 触发词精确相等权重仅次于标题，子串命中与正文同级偏上
+                for kl in keys_l:
+                    if kl == term:
+                        score += 50
+                    elif term in kl:
+                        score += 5
                 score += content_l.count(term)
             if score > 0:
                 scored.append((score, idx, e))
@@ -90,7 +98,8 @@ class LoreQuerier:
     @staticmethod
     def _table_signature(entries: List[LoreEntry]) -> str:
         blob = json.dumps(
-            [{"title": e.title, "content": e.content, "pinned": e.pinned} for e in entries],
+            [{"title": e.title, "content": e.content, "pinned": e.pinned,
+              "keys": list(e.keys or [])} for e in entries],
             ensure_ascii=False,
         )
         return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
@@ -111,7 +120,11 @@ class LoreQuerier:
             if cached and cached.get("sig") == sig:
                 return cached["entries"], cached["texts"], cached["vecs"]
 
-            texts = [((e.title or "") + "\n" + (e.content or ""))[:_EMBED_TEXT] for e in entries]
+            texts = [
+                ((e.title or "") + "\n" + " ".join(e.keys or [])
+                 + "\n" + (e.content or ""))[:_EMBED_TEXT]
+                for e in entries
+            ]
             raw_vecs = await embedder.embed(texts)
             vecs = [normalize(v) for v in raw_vecs]
             self._vec_cache[kind] = {"sig": sig, "entries": entries, "texts": texts, "vecs": vecs}
@@ -138,20 +151,77 @@ class LoreQuerier:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[: int(top_k or 4)]
 
+    async def trigger_block(self, text: str, embedder=None) -> str:
+        """扫描本轮用户消息，返回自动注入的【相关设定】块（无命中返回 ""）。
 
-# ---- 对话范例 ----
+        关键词/模糊命中优先；配了 embedder 时再用语义检索补足至多
+        SEMANTIC_TOP_UP 条关键词未命中的相关条目。pinned 条目不参与
+        （已由常驻块注入）。
+        """
+        text = (text or "").strip()
+        if not text:
+            return ""
+        tables = [
+            (KIND_CHARACTER, self.character.table if self.character else []),
+            (KIND_WORLD, self.world.table if self.world else []),
+        ]
+        picked = _trigger.keyword_hits(tables, text)
+        if embedder is not None and len(picked) < _trigger.MAX_TRIGGER_ENTRIES:
+            picked.extend(
+                await self._semantic_triggers(tables, text, embedder, picked)
+            )
+        return _trigger.render_trigger_block(_trigger.dedupe(picked))
+
+    async def _semantic_triggers(self, tables, text, embedder,
+                                 already) -> List[Tuple[str, LoreEntry]]:
+        """关键词未命中条目里，按向量余弦补足至多 SEMANTIC_TOP_UP 条。"""
+        try:
+            qv = normalize((await embedder.embed([text]))[0])
+        except Exception:
+            return []
+        threshold = float(getattr(embedder.cfg, "score_threshold", 0.55) or 0.0)
+        hit_ids = {id(e) for _k, e in already}
+        out: List[Tuple[str, LoreEntry]] = []
+        budget = _trigger.SEMANTIC_TOP_UP
+        for kind, _table in tables:
+            if budget <= 0:
+                break
+            try:
+                entries, _texts, vecs = await self.entry_vectors(kind, embedder)
+            except Exception:
+                continue
+            scored = []
+            for e, v in zip(entries, vecs):
+                if e.pinned or id(e) in hit_ids:
+                    continue
+                scored.append((dot(qv, v), e))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for score, e in scored[:_trigger._SEMANTIC_FILL_LIMIT]:
+                if threshold and score < threshold:
+                    break
+                out.append((kind, e))
+                hit_ids.add(id(e))
+                budget -= 1
+                if budget <= 0:
+                    break
+        return out
+
+
+# ---- 对话范例 / 开场白 ----
+
+def substitute_chat_macros(text: str, char_name: str, user_name: str = "用户") -> str:
+    """替换 {{char}}/{{user}} 宏（忽略大小写与花括号内空白）。开场白与范例共用。"""
+    cn = char_name or "角色"
+    un = user_name or "用户"
+    text = re.sub(r"\{\{\s*char\s*\}\}", cn, text or "", flags=re.IGNORECASE)
+    text = re.sub(r"\{\{\s*user\s*\}\}", un, text, flags=re.IGNORECASE)
+    return text
+
 
 def parse_mes_example(raw: str, char_name: str, user_name: str = "用户") -> List[str]:
     """把 <START> 分隔的范例原文拆成轮次，并替换 {{char}}/{{user}}。"""
     rounds = [p.strip() for p in re.split(r"<START>", raw or "", flags=re.IGNORECASE) if p.strip()]
-    cn = char_name or "角色"
-    un = user_name or "用户"
-    out: List[str] = []
-    for r in rounds:
-        r = re.sub(r"\{\{\s*char\s*\}\}", cn, r, flags=re.IGNORECASE)
-        r = re.sub(r"\{\{\s*user\s*\}\}", un, r, flags=re.IGNORECASE)
-        out.append(r)
-    return out
+    return [substitute_chat_macros(r, char_name, user_name) for r in rounds]
 
 
 _MES_EXAMPLE_HEADER = (
@@ -221,6 +291,8 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
             f"【在场】你正与{names}以及用户在一个聊天窗口里自由群聊。"
             "这是多人轮流发言的场合，每个在场者都要参与进来，请以你的角色自然、主动地回应当前话题与用户的发言。"
             "不要替别人说话，也不要复读或机械重复别人已经说过的话。"
+            "历史记录里，其他在场者说的话会以「名字：内容」的形式出现，那些不是你说的，"
+            "不要把它们当成自己的台词或经历；你自己回复时直接输出正文，不要加自己的名字前缀。"
         )
         parts.append(
             "【回应要求】轮到你的回合，请务必以自己的角色开口说点什么——哪怕只是一句简短的感想、"

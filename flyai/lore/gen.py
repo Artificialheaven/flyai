@@ -119,6 +119,76 @@ async def suggest_attributes(
     return out
 
 
+_DEFAULT_TEXT_PARSE_SYS = (
+    "你是一名角色扮演卡制作师。用户会给你一段任意文本（角色档案、百科片段、小说节选、同人设定等），"
+    "请从中提取并合理组织成一张角色扮演角色卡，只输出一个 JSON 对象，不要任何解释或 Markdown：\n"
+    '{"name": "角色名", '
+    '"intro": "角色简介：外貌、身份、性格概述，第二人称设定文本", '
+    '"background": "角色经历/当前处境", '
+    '"first_mes": "开场白：以该角色身份对用户说的第一段话（可带动作神态描写），用 {{char}} 代指自己、{{user}} 代指用户", '
+    '"mes_example": "2~4 轮范例对白，轮与轮之间单独一行写 <START>，用 {{char}}/{{user}} 标记说话者", '
+    '"post_history_instructions": "仅当原文明确包含扮演要求/文风红线时提炼为每轮自检指令，否则空字符串", '
+    '"table": [{"title": "条目标题", "content": "不适合放进简介/经历的重要设定（能力、关系、物品等）"}], '
+    '"attributes": [{"key": "英文标识", "label": "中文显示名", "initial": 初始值, "min": 下限, "max": 上限}]}\n'
+    "要求：严格依据原文，不要编造原文没有的设定；信息不足的字段给空字符串或空数组；"
+    "table 控制在 12 条以内、只放真正重要的设定；attributes 给 0~6 个适合剧情推进的数值属性，没有合适的就空数组；"
+    "first_mes 要能自然开启一场对话，不要写成旁白梗概。"
+)
+
+MAX_CHAR_SOURCE_CHARS = 20000
+
+_TEXT_STR_FIELDS = (
+    "name", "intro", "background", "first_mes", "mes_example",
+    "post_history_instructions",
+)
+
+
+def _norm_text_table(items: Any) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "") or "").strip()
+        content = str(item.get("content", "") or "").strip()
+        if content:
+            out.append({"title": title or "(无标题)", "content": content})
+    return out[:30]
+
+
+async def parse_character_from_text(state, source: str) -> Dict[str, Any]:
+    """让 AI 从任意文本解析角色卡字段，返回未保存的卡 dict（无 id，供编辑器预填）。"""
+    provider = state.get_provider()
+    if provider is None:
+        raise RuntimeError("未配置可用提供商，请先在设置中添加")
+    user = (
+        "请根据以下文本制作角色卡，仅输出 JSON 对象。\n\n"
+        "【原文开始】\n" + source + "\n【原文结束】"
+    )
+    text = await complete(
+        provider, [Message(role="user", content=user)],
+        system_prompt=_DEFAULT_TEXT_PARSE_SYS,
+    )
+    data = _extract_json(text)
+    if not isinstance(data, dict):
+        raise ValueError("AI 输出不是 JSON 对象")
+
+    card: Dict[str, Any] = {f: str(data.get(f, "") or "").strip() for f in _TEXT_STR_FIELDS}
+    if not card["name"]:
+        raise ValueError("AI 未能从文本中识别出角色名称，请补充更明确的角色资料后重试")
+    card["table"] = _norm_text_table(data.get("table"))
+    attrs: List[Dict[str, Any]] = []
+    if isinstance(data.get("attributes"), list):
+        for item in data["attributes"]:
+            if isinstance(item, dict):
+                norm = _norm_attr(item)
+                if norm:
+                    attrs.append(norm)
+    card["attributes"] = attrs[:8]
+    return card
+
+
 def _message_lines(m, with_names: bool) -> List[str]:
     """把一条消息展开为文本行：包含 content、工具调用与工具结果。"""
     prefix = f"[{m.name}] " if (with_names and (m.name or "")) else ""
@@ -233,10 +303,13 @@ _DEFAULT_ROOM_COMPRESS_SYS = (
     "你是一名剧情整理员。阅读一个多 AI 聊天房间中各窗口的对话历史，"
     "把其中沉淀下来的信息分别归纳进每个 AI 角色的资料，以及房间共享的世界设定。"
     '只输出一个 JSON 对象：{"members": [{"member_id": "AI 参与者ID", '
-    '"character": {"intro": "角色简介", "background": "角色经历/记忆变化", '
+    '"character": {"name": "该参与者当前角色名", "intro": "角色简介", '
+    '"background": "角色经历/记忆变化", '
     '"table": [{"title": "...", "content": "..."}]}}], '
     '"world": {"content": "世界观", "table": [{"title": "...", "content": "..."}]}}。'
-    "对话行的 [名字] 前缀标明发言者；member_id 必须取自给出的参与者清单。"
+    "对话行的 [名字] 前缀标明发言者；member_id 必须取自给出的参与者清单，"
+    "character.name 必须与该 member_id 括号内给出的参与者名字一致，"
+    "严禁把 A 参与者的资料写到 B 的 member_id 下。"
     "没有变化的字段或成员省略即可；不要编造对话中没出现过的信息。"
     "内容表 table 按标题合并：已存在的标题只给需要更新的 content；新设定用新标题追加；"
     "不要列出、不要改写你没提到的标题（未提到的条目会原样保留）；不要输出 pinned 字段；"

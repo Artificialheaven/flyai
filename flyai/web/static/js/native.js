@@ -117,3 +117,114 @@ var NativeBar = (function () {
     sync: sync,
   };
 })();
+
+/*
+ * APK 文件保存：Android WebView 不接管 blob: 链接的下载（a[download] 点击静默丢弃），
+ * 经自研 FlySaver 原生插件把文件写入系统「下载」目录（MediaStore，免权限）。
+ * 浏览器环境 isNative() 为 false，调用方走原来的 a.click() 回退。
+ */
+var NativeSaver = (function () {
+  function cap() {
+    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === "function"
+        && window.Capacitor.isNativePlatform()) {
+      return window.Capacitor;
+    }
+    return null;
+  }
+
+  function isNative() { return !!cap(); }
+
+  /* Blob → dataURL → 原生 MediaStore；非原生平台返回 null（调用方自行回退） */
+  function saveBlob(blob, filename) {
+    var c = cap();
+    if (!c || typeof c.nativePromise !== "function") return Promise.resolve(null);
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        var dataUrl = String(fr.result || "");
+        var comma = dataUrl.indexOf(",");
+        var data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+        c.nativePromise("FlySaver", "save", {
+          name: filename,
+          mime: blob.type || "application/octet-stream",
+          data: data,
+        }).then(function (r) {
+          resolve((r && r.name) || filename);
+        }, function (e) {
+          reject(new Error(typeof e === "string" ? e : (e && e.message) || "原生保存失败"));
+        });
+      };
+      fr.onerror = function () { reject(new Error("读取 Blob 失败")); };
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  return { isNative: isNative, saveBlob: saveBlob };
+})();
+
+/*
+ * APK 本地通知：AI 在后台回答完毕时提醒用户（纯本地通知，不经过服务端推送）。
+ * 通知由自研 FlyNotify 原生插件发出（支持角色头像大图标）；Android 13+ 的
+ * 运行时权限弹窗借用 @capacitor/local-notifications 插件触发（授权对全应用生效）。
+ * 浏览器环境为空操作。经注入桥的 nativePromise 调用，无需打包器。
+ */
+var NativeNotify = (function () {
+  function cap() {
+    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === "function"
+        && window.Capacitor.isNativePlatform()
+        && typeof window.Capacitor.nativePromise === "function") {
+      return window.Capacitor;
+    }
+    return null;
+  }
+
+  var asked = false;  // 本次运行期只主动弹一次授权框，被拒后不反复打扰
+
+  /* 首次发消息时请求通知权限；已授权/已拒绝/非原生均静默 */
+  function ensurePermission() {
+    var c = cap();
+    if (!c || asked) return;
+    asked = true;
+    c.nativePromise("LocalNotifications", "checkPermissions", {}).then(function (r) {
+      if (r && r.display === "prompt") {
+        return c.nativePromise("LocalNotifications", "requestPermissions", {});
+      }
+    }).catch(function () {});
+  }
+
+  /* 发一条立刻展示的通知；iconUrl 为角色头像绝对地址，留空用默认图标；
+   * 点击通知由系统默认行为拉回 App */
+  function notify(title, body, iconUrl) {
+    var c = cap();
+    if (!c) return Promise.resolve(false);
+    return c.nativePromise("FlyNotify", "notify", {
+      id: (Date.now() % 2147483647),
+      title: String(title || "FlyAI"),
+      body: String(body || ""),
+      iconUrl: iconUrl || "",
+    }).then(function (r) { return !!(r && r.ok); })
+      .catch(function () { return false; });
+  }
+
+  /* 后台兜底：原生线程轮询 run 状态，完成即推送（socket 在后台被回收时靠它） */
+  function watchRun(o) {
+    var c = cap();
+    if (!c) return Promise.resolve(false);
+    return c.nativePromise("FlyNotify", "watchRun", {
+      runId: String(o.runId || ""),
+      statusUrl: String(o.statusUrl || ""),
+      token: String(o.token || ""),
+      title: String(o.title || "FlyAI"),
+      body: String(o.body || "回答已完成，点击查看"),
+      iconUrl: o.iconUrl || "",
+      id: (Date.now() % 2147483647),
+    }).then(function () { return true; }).catch(function () { return false; });
+  }
+
+  function cancelWatch() {
+    var c = cap();
+    if (c) c.nativePromise("FlyNotify", "cancelWatch", {}).catch(function () {});
+  }
+
+  return { ensurePermission: ensurePermission, notify: notify, watchRun: watchRun, cancelWatch: cancelWatch };
+})();

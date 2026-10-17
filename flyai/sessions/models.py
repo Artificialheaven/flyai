@@ -128,6 +128,10 @@ class Session:
     galgame: Dict[str, Any] = field(default_factory=dict)
     # Galgame 已合成 TTS 清单：对白文本 -> 音频 url（刷新后直接复用，不再重新合成）
     galgame_tts: Dict[str, str] = field(default_factory=dict)
+    # 单窗口回复最大 token 覆盖；0=跟随用户全局设置/提供商配置
+    max_tokens: int = 0
+    # 本窗口禁用的工具注册名（与请求级 disabled_tools 取并集，服务端强制）
+    disabled_tools: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.id:
