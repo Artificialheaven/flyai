@@ -1,4 +1,4 @@
-"""公共市场：发布 / 浏览 / 安装角色卡、世界观与历史对话快照。
+"""公共市场：发布 / 浏览 / 安装角色卡、世界观、模型预设与历史对话快照。
 
 - 免审：发布立即可见，admin 可事后删除任意条目。
 - 复制式使用：安装即复制为安装者的私有副本 / 新会话，与发布者不再关联。
@@ -17,6 +17,8 @@ from pydantic import BaseModel
 
 from .. import transfer
 from ..lore.models import Character, World
+from ..preset.models import Preset
+from ..preset.tavern import preset_to_envelope
 from ..market.models import KINDS, MarketEntry
 from ..market.store import now_stamp
 from ..user import ADMIN_UID
@@ -90,6 +92,15 @@ def _snapshot_payload(state, sc, kind: str, source_id: str):
                    "name": w.name, "data": w.to_dict()}
         return payload, None, w.avatar
 
+    if kind == "preset":
+        p = getattr(sc, "presets", None)
+        if p is None:
+            raise HTTPException(400, "预设库不可用")
+        preset = p.get(source_id)
+        if preset is None:
+            raise HTTPException(400, "预设不存在，无法发布")
+        return preset_to_envelope(preset), None, ""
+
     # session
     s = sc.store.get(source_id)
     if s is None:
@@ -118,7 +129,7 @@ def publish(body: PublishBody, request: Request):
     state = _state(request)
     sc = state.user(request)
     if body.kind not in KINDS:
-        raise HTTPException(400, "类型必须是 character / world / session")
+        raise HTTPException(400, "类型必须是 character / world / preset / session")
     source_id = (body.source_id or "").strip()
     if not source_id:
         raise HTTPException(400, "缺少要发布的对象 id")
@@ -157,7 +168,7 @@ def list_entries(request: Request, kind: Optional[str] = None,
     state = _state(request)
     sc = state.user(request)
     if kind and kind not in KINDS:
-        raise HTTPException(400, "类型必须是 character / world / session")
+        raise HTTPException(400, "类型必须是 character / world / preset / session")
     if mine:
         entries = state.market.list(kind=kind or None, q=q or None, author_uid=sc.uid)
     else:
@@ -243,6 +254,14 @@ def install_entry(mid: str, request: Request):
         w.id = uuid.uuid4().hex
         sc.lore.save_world(w)
         result = {"world": w.to_dict()}
+
+    elif e.kind == "preset":
+        if getattr(sc, "presets", None) is None:
+            raise HTTPException(400, "预设库不可用")
+        preset = Preset.from_dict(payload.get("data") or {})
+        preset.id = uuid.uuid4().hex   # 安装为自己的私有副本
+        sc.presets.save(preset)
+        result = {"preset": preset.to_dict()}
 
     else:
         raw_zip = state.market.read_payload_bytes(mid, "zip")

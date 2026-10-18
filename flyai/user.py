@@ -211,6 +211,8 @@ class UserSettings:
     lore_auto_inject: bool = True
     # 单次回复最大 token（None/0=跟随提供商配置）
     max_tokens: Optional[int] = None
+    # 当前启用的模型预设 id（data/{uid}/presets/{id}.json）；空=不使用预设
+    active_preset_id: str = ""
 
     # ---- 功能开关覆盖（None=跟随管理员全局默认；见 flyai/feature_prefs.py）----
     # 工具与迭代
@@ -262,6 +264,7 @@ class UserSettings:
             "extract_every_turns": int(self.extract_every_turns or 0),
             "lore_auto_inject": bool(self.lore_auto_inject),
             "max_tokens": self.max_tokens if self.max_tokens else None,
+            "active_preset_id": self.active_preset_id or "",
         }
         for key in self.OVERRIDE_FIELDS:
             out[key] = getattr(self, key)  # None 原样落盘 = 跟随默认
@@ -290,6 +293,8 @@ class UserSettings:
             kwargs["max_tokens"] = int(mt) if mt else None
         except (TypeError, ValueError):
             kwargs["max_tokens"] = None
+        pid = d.get("active_preset_id", "")
+        kwargs["active_preset_id"] = str(pid).strip() if pid else ""
         # 可空覆盖：仅接受 bool/int；None 与缺键都表示跟随默认（0/False 是合法覆盖值）
         for key, kind in cls.OVERRIDE_FIELDS.items():
             if key not in d or d[key] is None:
@@ -359,6 +364,7 @@ class UserScope:
     lore: LoreStore
     upload_dir: Path
     char_memory: Any = None      # CharacterMemoryStore：角色级跨会话记忆簿
+    presets: Any = None          # PresetStore：该用户的模型预设库
     level: int = 0
     user_settings: Any = None    # UserSettings：该用户的个人设置（keep_turns 等）
     settings_path: Any = None    # Path：data/{uid}/settings.json
@@ -399,8 +405,10 @@ class UserScope:
         upload_dir.mkdir(parents=True, exist_ok=True)
         lore = LoreStore(user_dir, shared_base=data_dir / "shared")
         from .lore.character_memory import CharacterMemoryStore
+        from .preset.store import PresetStore
 
         char_memory = CharacterMemoryStore(user_dir)
+        presets = PresetStore(user_dir / "presets")
         settings_path = user_dir / "settings.json"
         user_settings = load_user_settings(settings_path)
         if uid == ADMIN_UID:
@@ -411,5 +419,5 @@ class UserScope:
         else:
             level = 0
         return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir,
-                   char_memory=char_memory, level=level,
+                   char_memory=char_memory, presets=presets, level=level,
                    user_settings=user_settings, settings_path=settings_path)

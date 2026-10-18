@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict
 
-KINDS = ("character", "world", "session")
+KINDS = ("character", "world", "preset", "session")
 
 
 @dataclass

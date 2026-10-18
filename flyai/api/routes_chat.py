@@ -330,13 +330,31 @@ class ChatRequest(BaseModel):
     disabled_tools: List[str] = []
 
 
-def _effective_max_tokens(session, user_settings) -> Optional[int]:
-    """本轮回复 token 上限：单窗口覆盖 > 用户全局 > None（跟随提供商配置）。"""
+def _effective_max_tokens(session, user_settings, preset_max: int = 0) -> Optional[int]:
+    """本轮回复 token 上限：单窗口覆盖 > 用户全局 > 预设 > None（跟随提供商配置）。"""
     room_mt = int(getattr(session, "max_tokens", 0) or 0)
     if room_mt > 0:
         return room_mt
     global_mt = int(getattr(user_settings, "max_tokens", 0) or 0)
-    return global_mt or None
+    if global_mt > 0:
+        return global_mt
+    return int(preset_max or 0) or None
+
+
+def _load_active_preset(sc):
+    """读取该用户当前启用的预设；未启用/已删除/损坏一律返回 None（等于不使用）。"""
+    store = getattr(sc, "presets", None)
+    us = getattr(sc, "user_settings", None)
+    if store is None or us is None:
+        return None
+    pid = getattr(us, "active_preset_id", "") or ""
+    if not pid:
+        return None
+    try:
+        return store.get(pid)
+    except Exception:
+        logger.exception("启用预设读取失败")
+        return None
 
 
 def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
@@ -652,13 +670,32 @@ async def chat(req: ChatRequest, request: Request):
             depth_specs = _lore_depth_specs(
                 services.get("lore"), character, user_char, req.message or "",
             )
+            # 当前启用的模型预设：main 块并入系统提示词，tail 与角色 PHI 同位，
+            # depth 块与世界书深度块合并；采样参数/jailbreak 前缀透传给 loop
+            from ..preset.apply import render_preset
+
+            rendered_preset = render_preset(
+                _load_active_preset(sc),
+                char_name=getattr(character, "name", "") or "角色",
+                user_name=getattr(user_char, "name", "") if user_char else "",
+                group_names=[],
+                last_message=req.message or "",
+            )
+            system_extra = injected
+            if rendered_preset.main_text:
+                system_extra += "\n\n" + rendered_preset.main_text
+            phi_parts = [
+                getattr(character, "post_history_instructions", "") or "",
+                rendered_preset.tail_text,
+            ]
+            phi = "\n\n".join(p for p in phi_parts if p.strip())
             recall_head = len(session.messages)
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
                 provider=provider,
                 registry=state.registry,
                 settings=eff_tools,
-                system_prompt=system_prompt + injected,
+                system_prompt=system_prompt + system_extra,
                 session_id=session.id,
                 services=services,
                 web_max_iterations=getattr(
@@ -669,11 +706,13 @@ async def chat(req: ChatRequest, request: Request):
                 ) or 0,
                 allowed_tools=allowed_tools,
                 deep_thinking=getattr(req, "deep_thinking", False),
-                post_history_instructions=getattr(
-                    character, "post_history_instructions", ""
-                ) or "",
-                max_tokens=_effective_max_tokens(session, _us),
-                depth_blocks=depth_specs,
+                post_history_instructions=phi,
+                max_tokens=_effective_max_tokens(
+                    session, _us, rendered_preset.max_tokens
+                ),
+                depth_blocks=depth_specs + rendered_preset.depth_blocks,
+                extra_params=rendered_preset.params or None,
+                assistant_prefill=rendered_preset.prefill,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -846,8 +885,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
         )
         if hasattr(_registry, "all") else None
     )
-    # 本窗口 max_tokens 覆盖（房间 > 用户全局 > 提供商配置）
-    eff_max_tokens = _effective_max_tokens(session, _us)
+    # 当前启用的模型预设（按用户；每座位按自己的角色名渲染宏）
+    active_preset = _load_active_preset(sc)
+    # 本窗口 max_tokens 覆盖（房间 > 用户全局 > 预设 > 提供商配置）
+    eff_max_tokens = _effective_max_tokens(
+        session, _us, getattr(active_preset, "max_tokens", 0) or 0
+    )
 
     # 用户扮演的自设（persona）：用户座位的角色卡；未设则 None（保持原「你」行为）
     user_char = member_character(user_seat(session), sc.lore)
@@ -1163,6 +1206,28 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     services.get("lore"), char, user_char,
                     req.message or "", group_names=others,
                 )
+                # 启用中的预设：按本座位角色渲染（main 入系统提示词、
+                # tail 与该角色 PHI 同位、depth 与世界书块合并、jailbreak 前缀）
+                from ..preset.apply import render_preset
+
+                rendered_preset = render_preset(
+                    active_preset,
+                    char_name=getattr(char, "name", "") or spk.name,
+                    user_name=getattr(user_char, "name", "") if user_char else "",
+                    group_names=others,
+                    last_message=req.message or "",
+                )
+                preset_sys = (
+                    "\n\n" + rendered_preset.main_text
+                    if rendered_preset.main_text else ""
+                )
+                preset_phi_parts = [
+                    getattr(char, "post_history_instructions", "") or "",
+                    rendered_preset.tail_text,
+                ]
+                preset_phi = "\n\n".join(
+                    p for p in preset_phi_parts if p.strip()
+                )
                 # 该 AI 的完整发言回合。
                 # 群聊里若模型一次给「空回复」（0 个字、且没通过工具得到内容），视为没开口成功：
                 # 不要当跳过，用一句系统提醒重试几次，避免『第二个 AI 不说话』。
@@ -1193,7 +1258,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         registry=state.registry,
                         settings=loop_settings,
                         system_prompt=(
-                            sys_prompt + injected_parts + retry_nudge
+                            sys_prompt + injected_parts + preset_sys + retry_nudge
                         ),
                         session_id=session.id,
                         run_id=run.id,
@@ -1209,11 +1274,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         ) or 0,
                         allowed_tools=allowed_tools,
                         deep_thinking=getattr(req, "deep_thinking", False),
-                        post_history_instructions=getattr(
-                            char, "post_history_instructions", ""
-                        ) or "",
+                        post_history_instructions=preset_phi,
                         max_tokens=eff_max_tokens,
-                        depth_blocks=depth_specs,
+                        depth_blocks=depth_specs + rendered_preset.depth_blocks,
+                        extra_params=rendered_preset.params or None,
+                        assistant_prefill=rendered_preset.prefill,
                     ):
                         if ev == "done":
                             done_data = data

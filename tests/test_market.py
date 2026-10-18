@@ -35,8 +35,11 @@ def _scope(data_dir, uid, level):
     store = JsonSessionStore(user_dir / "sessions")
     upload_dir = data_dir / "uploads" / uid
     upload_dir.mkdir(parents=True, exist_ok=True)
+    from flyai.preset.store import PresetStore
+
+    presets = PresetStore(user_dir / "presets")
     return SimpleNamespace(uid=uid, level=level, lore=lore, store=store,
-                           upload_dir=upload_dir)
+                           upload_dir=upload_dir, presets=presets)
 
 
 @pytest.fixture
@@ -268,3 +271,60 @@ def test_mine_list_only_own(env):
 
     env.use("bob")
     assert list_entries(env.request, mine=1)["entries"] == []
+
+
+# ---- 预设 ----
+
+def _publish_preset(env, uid, min_level=0):
+    env.use(uid)
+    from flyai.preset.models import Preset, PresetBlock
+
+    p = Preset(name="喵喵预设", params={"temperature": 1.2},
+               max_tokens=30000, assistant_prefill="（",
+               blocks=[PresetBlock(name="主", content="按 {{char}} 演出",
+                                   position="main")])
+    env.sc[uid].presets.save(p)
+    out = publish(PublishBody(kind="preset", source_id=p.id,
+                              title="共享预设", min_level=min_level),
+                  env.request)
+    return out, p
+
+
+def test_preset_publish_and_payload(env):
+    out, p = _publish_preset(env, "alice")
+    assert out["kind"] == "preset"
+    assert out["title"] == "共享预设"
+    payload = env.state.market.read_payload_json(out["id"])
+    assert payload["type"] == "flyai-preset"
+    assert payload["data"]["params"]["temperature"] == 1.2
+
+
+def test_preset_publish_missing_400(env):
+    env.use("alice")
+    with pytest.raises(HTTPException) as ei:
+        publish(PublishBody(kind="preset", source_id="nope"), env.request)
+    assert ei.value.status_code == 400
+
+
+def test_preset_install_copies_private(env):
+    out, p = _publish_preset(env, "alice")
+    env.use("bob")
+    res = install_entry(out["id"], env.request)
+    new_id = res["preset"]["id"]
+    assert new_id != p.id
+    installed = env.sc["bob"].presets.get(new_id)
+    assert installed is not None
+    assert installed.name == "喵喵预设"
+    assert installed.params["temperature"] == 1.2
+    # 安装计数 +1；发布者源预设未受影响
+    assert env.state.market.get(out["id"]).installs == 1
+    assert env.sc["alice"].presets.get(p.id) is not None
+
+
+def test_preset_min_level_hidden(env):
+    out, _p = _publish_preset(env, "alice", min_level=8)
+    env.use("bob")  # level 5
+    assert list_entries(env.request, kind="preset")["entries"] == []
+    with pytest.raises(HTTPException) as ei:
+        install_entry(out["id"], env.request)
+    assert ei.value.status_code == 404

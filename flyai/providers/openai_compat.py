@@ -88,6 +88,7 @@ class OpenAICompatProvider(BaseProvider):
         tool_specs: List[dict],
         deep_thinking: bool = False,
         max_tokens: Optional[int] = None,
+        extra_params: Optional[Dict] = None,
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
@@ -100,6 +101,11 @@ class OpenAICompatProvider(BaseProvider):
             body["tools"] = tool_specs
             body["tool_choice"] = "auto"
         body.update(self.cfg.params)
+        # 预设采样参数：高于模型配置、低于窗口/用户级 max_tokens 覆盖；
+        # max_tokens 不从此通道进入（白名单本身不含，此处再防御一次）
+        for k, v in (extra_params or {}).items():
+            if k != "max_tokens" and v is not None:
+                body[k] = v
         # 窗口/用户级 max_tokens 覆盖：在模型配置 params 之后，优先级最高；
         # None/0 不覆盖（跟随模型配置）
         if max_tokens:

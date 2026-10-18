@@ -250,6 +250,8 @@ async def run_agent_loop(
     post_history_instructions: str = "",
     max_tokens: Optional[int] = None,
     depth_blocks: Optional[List[Dict[str, Any]]] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
+    assistant_prefill: str = "",
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -273,6 +275,10 @@ async def run_agent_loop(
     None/0 时不传，由提供商按自身配置处理。
     depth_blocks：酒馆 @depth 常驻块（世界书条目/预设 prompt），每轮在
     系统提示词之后、PHI 之前按各自 depth 插到历史深处。
+    extra_params：预设采样参数（temperature/top_p/… 白名单），合并进请求体，
+    优先级高于模型自身 cfg.params、低于 max_tokens 覆盖。
+    assistant_prefill：预设 jailbreak 的 assistant 强制前缀，每轮作为最后一条
+    assistant 消息发送（不入库），空串不追加。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -312,6 +318,10 @@ async def run_agent_loop(
             request_messages.append(
                 Message(role="system", content=_POST_TOOL_NUDGE)
             )
+        # 预设 jailbreak：assistant 强制前缀必须是最后一条
+        prefill = (assistant_prefill or "").strip()
+        if prefill:
+            request_messages.append(Message(role="assistant", content=prefill))
 
         thinking_parts: List[str] = []
         thinking_blocks: Optional[List[Dict[str, Any]]] = None
@@ -321,6 +331,7 @@ async def run_agent_loop(
             async for ev in provider.stream_chat(
                 request_messages, tool_specs,
                 deep_thinking=deep_thinking, max_tokens=max_tokens,
+                extra_params=extra_params,
             ):
                 if ev.type == StreamEventType.THINKING_DELTA:
                     thinking_parts.append(ev.text)

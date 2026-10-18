@@ -385,6 +385,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_market import router as market_router
     from .api.routes_memory import router as memory_router
     from .api.routes_plugins import router as plugins_router
+    from .api.routes_preset import router as preset_router
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
 
@@ -397,6 +398,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(market_router)
     app.include_router(memory_router)
     app.include_router(plugins_router)
+    app.include_router(preset_router)
     app.include_router(room_router)
     app.include_router(session_router)
 
