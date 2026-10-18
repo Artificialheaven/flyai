@@ -10,7 +10,7 @@ var Market = (function () {
   var detailId = null;
   var searchTimer = null;
 
-  var KIND_LABEL = { character: "角色卡", world: "世界观", session: "对话" };
+  var KIND_LABEL = { character: "角色卡", world: "世界观", preset: "预设", session: "对话" };
 
   function cache() {
     el.view = document.getElementById("market-view");
@@ -93,7 +93,7 @@ var Market = (function () {
       return '<img class="mk-card-cover" src="' + escapeHtml(assetUrl(e.cover)) +
         '" alt="" loading="lazy" onerror="this.classList.add(\'mk-cover-broken\')"/>';
     }
-    var glyph = { character: "🧙", world: "🌍", session: "💬" }[e.kind] || "📦";
+    var glyph = { character: "🧙", world: "🌍", preset: "🎛️", session: "💬" }[e.kind] || "📦";
     return '<div class="mk-card-cover mk-cover-fallback">' + glyph + "</div>";
   }
 
@@ -184,7 +184,8 @@ var Market = (function () {
       e.installs + " 次 · 更新于 " + escapeHtml(e.updated_at || "") + "</p>");
     if (e.intro) h.push('<p class="mk-detail-intro">' + escapeHtml(e.intro).replace(/\n/g, "<br/>") + "</p>");
     h.push('<div class="mk-detail-actions">');
-    var installLabel = e.kind === "session" ? "导入为新会话" : "复制到我的库";
+    var installLabel = e.kind === "session" ? "导入为新会话"
+      : e.kind === "preset" ? "复制到我的预设" : "复制到我的库";
     h.push('<button type="button" id="mk-install-btn" class="btn primary">' + installLabel + "</button>");
     if (mine) {
       h.push('<button type="button" class="btn" id="mk-detail-edit">编辑信息</button>');
@@ -214,7 +215,9 @@ var Market = (function () {
     btn.disabled = true;
     fetchJSON("/api/market/entries/" + e.id + "/install", { method: "POST" })
       .then(function () {
-        showToast(e.kind === "session" ? "已导入为新会话" : "已复制到你的库", "ok");
+        var msg = e.kind === "session" ? "已导入为新会话"
+          : e.kind === "preset" ? "已复制到你的预设库" : "已复制到你的库";
+        showToast(msg, "ok");
         closeDetail();
         loadList();
       })
@@ -286,7 +289,7 @@ var Market = (function () {
 
   function renderKindStep() {
     var h = ['<p class="sub">选择要发布的类型</p><div class="mk-pub-kinds">'];
-    [["character", "🧙 角色卡"], ["world", "🌍 世界观"], ["session", "💬 历史对话"]]
+    [["character", "🧙 角色卡"], ["world", "🌍 世界观"], ["preset", "🎛️ 模型预设"], ["session", "💬 历史对话"]]
       .forEach(function (k) {
         h.push('<button type="button" class="btn mk-pub-kind" data-kind="' + k[0] + '">' + k[1] + "</button>");
       });
@@ -303,10 +306,12 @@ var Market = (function () {
   function renderObjectStep(kind) {
     el.pubBody.innerHTML = '<p class="sub">加载中…</p>';
     var url = kind === "character" ? "/api/characters"
-      : kind === "world" ? "/api/worlds" : "/api/sessions";
+      : kind === "world" ? "/api/worlds"
+      : kind === "preset" ? "/api/presets" : "/api/sessions";
     fetchJSON(url).then(function (data) {
       var list = kind === "character" ? data.characters
-        : kind === "world" ? data.worlds : data.sessions;
+        : kind === "world" ? data.worlds
+        : kind === "preset" ? data.presets : data.sessions;
       list = list || [];
       if (!list.length) {
         el.pubBody.innerHTML = '<p class="sub">你还没有可发布的' + KIND_LABEL[kind] + "</p>";
@@ -320,7 +325,8 @@ var Market = (function () {
         if (avatar) {
           h.push('<img src="' + escapeHtml(assetUrl(avatar)) + '" alt="" onerror="this.style.display=\'none\'"/>');
         } else {
-          h.push('<span class="mk-pub-item-glyph">📦</span>');
+          h.push('<span class="mk-pub-item-glyph">' +
+            (kind === "preset" ? "🎛️" : "📦") + "</span>");
         }
         h.push("<span>" + escapeHtml(o.name || o.title || "未命名") + "</span>");
         h.push("</button>");
@@ -340,10 +346,12 @@ var Market = (function () {
 
   function findObject(kind, id, cb) {
     var url = kind === "character" ? "/api/characters"
-      : kind === "world" ? "/api/worlds" : "/api/sessions";
+      : kind === "world" ? "/api/worlds"
+      : kind === "preset" ? "/api/presets" : "/api/sessions";
     fetchJSON(url).then(function (data) {
       var list = kind === "character" ? data.characters
-        : kind === "world" ? data.worlds : data.sessions;
+        : kind === "world" ? data.worlds
+        : kind === "preset" ? data.presets : data.sessions;
       var found = null;
       for (var i = 0; i < (list || []).length; i++) {
         if (list[i].id === id) { found = list[i]; break; }
@@ -363,7 +371,7 @@ var Market = (function () {
     });
   }
 
-  function formHtml(prefill) {
+  function formHtml(prefill, kind) {
     var h = [];
     h.push('<label class="mk-field"><span>标题</span>');
     h.push('<input type="text" id="mk-f-title" maxlength="60" value="' +
@@ -371,9 +379,11 @@ var Market = (function () {
     h.push('<label class="mk-field"><span>简介</span>');
     h.push('<textarea id="mk-f-intro" rows="4" maxlength="500" placeholder="介绍一下它吧（可选）">' +
       escapeHtml(prefill.intro) + "</textarea></label>");
-    h.push('<label class="mk-field"><span>封面图地址（可选）</span>');
-    h.push('<input type="text" id="mk-f-cover" value="' + escapeHtml(prefill.cover) +
-      '" placeholder="/uploads/... 或完整 URL"/></label>');
+    if (kind !== "preset") {
+      h.push('<label class="mk-field"><span>封面图地址（可选）</span>');
+      h.push('<input type="text" id="mk-f-cover" value="' + escapeHtml(prefill.cover) +
+        '" placeholder="/uploads/... 或完整 URL"/></label>');
+    }
     h.push('<label class="mk-field"><span>最低等级（0 = 所有人可见）</span>');
     h.push('<input type="number" id="mk-f-level" min="0" max="256" step="1" value="' +
       prefill.min_level + '"/></label>');
@@ -388,7 +398,7 @@ var Market = (function () {
       min_level: 0
     };
     el.pubTitle.textContent = editing ? "编辑发布信息" : "发布「" + (o.name || o.title) + "」";
-    var h = [formHtml(prefill)];
+    var h = [formHtml(prefill, kind)];
     h.push('<div class="dialog-actions">');
     h.push('<button type="button" class="btn" id="mk-f-cancel">' + (editing ? "取消" : "返回") + "</button>");
     h.push('<button type="button" class="btn primary" id="mk-f-submit">' +
@@ -401,10 +411,11 @@ var Market = (function () {
       renderObjectStep(kind);
     });
     document.getElementById("mk-f-submit").addEventListener("click", function () {
+      var coverEl = document.getElementById("mk-f-cover");
       var body = {
         title: document.getElementById("mk-f-title").value,
         intro: document.getElementById("mk-f-intro").value,
-        cover: document.getElementById("mk-f-cover").value,
+        cover: coverEl ? coverEl.value : "",
         min_level: document.getElementById("mk-f-level").value
       };
       if (editing) submitEdit(editing._id, body);
@@ -447,7 +458,7 @@ var Market = (function () {
       cover: e.cover,
       min_level: e.min_level
     };
-    var h = [formHtml(prefill)];
+    var h = [formHtml(prefill, e.kind)];
     h.push('<div class="dialog-actions">');
     h.push('<button type="button" class="btn" id="mk-f-cancel">取消</button>');
     h.push('<button type="button" class="btn primary" id="mk-f-submit">保存</button>');
@@ -459,10 +470,11 @@ var Market = (function () {
       el.pubDialog.close();
     });
     document.getElementById("mk-f-submit").addEventListener("click", function () {
+      var coverEl2 = document.getElementById("mk-f-cover");
       submitEdit(e.id, {
         title: document.getElementById("mk-f-title").value,
         intro: document.getElementById("mk-f-intro").value,
-        cover: document.getElementById("mk-f-cover").value,
+        cover: coverEl2 ? coverEl2.value : "",
         min_level: document.getElementById("mk-f-level").value
       }, this);
     });

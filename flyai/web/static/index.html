@@ -312,6 +312,7 @@
               <input type="number" id="set-max-tokens" value="0" min="0" max="100000" />
             </label>
             <button type="button" id="btn-open-memory-manager" class="btn small">记忆管理</button>
+            <button type="button" id="btn-open-preset-manager" class="btn small">模型预设</button>
 
             <h4>聊天背景</h4>
             <p class="sub">选择一张图片作为聊天背景，并拖动滑块调节背景不透明度。背景仅保存在本设备/本浏览器。</p>
@@ -921,6 +922,66 @@
     </div>
   </dialog>
 
+  <!-- 模型预设弹窗 -->
+  <dialog id="preset-mgr-dialog">
+    <div class="dialog-body preset-mgr">
+      <h3>🎛️ 模型预设</h3>
+
+      <div id="ps-list-view">
+        <div class="ps-toolbar">
+          <button type="button" id="btn-ps-new" class="btn small">＋ 新建预设</button>
+          <button type="button" id="btn-ps-import" class="btn small">导入酒馆预设</button>
+          <input type="file" id="ps-import-file" accept=".json,.txt,application/json,text/plain" class="hidden" />
+        </div>
+        <p class="sub">当前启用：<strong id="ps-active-name">无</strong>。预设的采样参数与 prompt 块（并入系统提示词 / 历史深度 @depth / 历史后 system / assistant 前缀）会注入此后的每轮对话。</p>
+        <div id="ps-list" class="ps-list"></div>
+      </div>
+
+      <div id="ps-edit-view" class="hidden">
+        <label class="f-label">名称<input type="text" id="ps-f-name" maxlength="60" placeholder="预设名称" /></label>
+        <label class="f-label">备注<textarea id="ps-f-note" rows="2" maxlength="500" placeholder="可选"></textarea></label>
+        <h4>采样参数（留空 = 不覆盖模型自身配置）</h4>
+        <div class="ps-param-grid">
+          <label>temperature<input type="number" id="ps-p-temperature" step="0.01" min="0" max="2" placeholder="如 1.2" /></label>
+          <label>top_p<input type="number" id="ps-p-top_p" step="0.01" min="0" max="1" placeholder="如 0.94" /></label>
+          <label>top_k<input type="number" id="ps-p-top_k" step="1" min="0" placeholder="如 64" /></label>
+          <label>top_a<input type="number" id="ps-p-top_a" step="0.01" min="0" max="1" placeholder="0" /></label>
+          <label>min_p<input type="number" id="ps-p-min_p" step="0.01" min="0" max="1" placeholder="0" /></label>
+          <label>frequency_penalty<input type="number" id="ps-p-frequency_penalty" step="0.01" min="-2" max="2" placeholder="0" /></label>
+          <label>presence_penalty<input type="number" id="ps-p-presence_penalty" step="0.01" min="-2" max="2" placeholder="0" /></label>
+          <label>repetition_penalty<input type="number" id="ps-p-repetition_penalty" step="0.01" min="0" placeholder="1" /></label>
+          <label>seed（-1=随机）<input type="number" id="ps-p-seed" step="1" placeholder="-1" /></label>
+          <label>reasoning_effort
+            <select id="ps-p-reasoning_effort">
+              <option value="">不指定</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+        </div>
+        <label class="f-label">单次回复最大 token（0 = 不覆盖；窗口/用户全局设置仍优先于它）
+          <input type="number" id="ps-f-max-tokens" min="0" max="1000000" value="0" />
+        </label>
+        <label class="f-label">assistant 强制前缀（酒馆 jailbreak 标记，留空不使用）
+          <textarea id="ps-f-prefill" rows="2" placeholder='如 "（继续演出）"'></textarea>
+        </label>
+        <h4>Prompt 块</h4>
+        <div id="ps-blocks" class="ps-blocks"></div>
+        <button type="button" id="btn-ps-add-block" class="btn small">＋ 添加块</button>
+        <div class="dialog-actions">
+          <button type="button" id="btn-ps-edit-cancel" class="btn">返回列表</button>
+          <button type="button" id="btn-ps-save" class="btn primary">保 存</button>
+        </div>
+      </div>
+
+      <div id="ps-msg" class="msg-bar"></div>
+      <div class="dialog-actions" id="ps-list-actions">
+        <button type="button" id="btn-ps-mgr-close" class="btn ghost">关 闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 用户管理弹窗（仅管理员） -->
   <dialog id="user-dialog">
     <div class="dialog-body">
@@ -1151,6 +1212,7 @@
       <button type="button" class="mk-tab active" data-kind="">全部</button>
       <button type="button" class="mk-tab" data-kind="character">角色卡</button>
       <button type="button" class="mk-tab" data-kind="world">世界观</button>
+      <button type="button" class="mk-tab" data-kind="preset">预设</button>
       <button type="button" class="mk-tab" data-kind="session">对话</button>
       <button type="button" class="mk-tab" data-kind="mine">我发布的</button>
     </div>
@@ -1193,7 +1255,8 @@
   <script src="/static/vendor/js-synthesizer.min.js"></script>
   <script src="/static/js/midi_player.js"></script>
   <script src="/static/js/galgame.js?v=20261009k"></script>
-  <script src="/static/js/market.js?v=20261009k"></script>
+  <script src="/static/js/market.js?v=20261018a"></script>
+  <script src="/static/js/presets.js?v=20261018a"></script>
   <script src="/static/js/memory-manager.js?v=20261010a"></script>
   <script src="/static/js/settings.js?v=20261011c"></script>
 </body>
