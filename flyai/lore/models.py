@@ -19,6 +19,13 @@ class LoreEntry:
     # 触发词（世界书 selective/keys）：用户消息命中任一词（含模糊匹配）时
     # 该条目自动注入系统提示词；为空时以标题作为触发词
     keys: List[str] = field(default_factory=list)
+    # 常驻条目注入位置（酒馆世界书 position）：
+    # "system"=并入系统提示词常驻块；"depth"=按 at-depth 插到聊天历史深处
+    position: str = "system"
+    depth: int = 4           # position="depth" 时距历史末尾的消息数
+    insert_order: int = 100  # 同一深度多条时的排序（小的在前）
+    role: str = "system"     # depth 注入时的消息角色：system/user/assistant
+    probability: int = 100   # 触发概率 0-100（酒馆 useProbability/probability）
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -26,6 +33,11 @@ class LoreEntry:
             "content": self.content,
             "pinned": self.pinned,
             "keys": list(self.keys or []),
+            "position": self.position if self.position == "depth" else "system",
+            "depth": int(self.depth or 4),
+            "insert_order": int(self.insert_order or 100),
+            "role": self.role if self.role in ("user", "assistant") else "system",
+            "probability": max(1, min(100, int(self.probability or 100))),
         }
 
     @classmethod
@@ -34,11 +46,23 @@ class LoreEntry:
         if isinstance(raw_keys, str):
             raw_keys = [raw_keys]
         keys = [str(k).strip() for k in raw_keys if str(k or "").strip()]
+
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(d.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
         return cls(
             title=d.get("title", ""),
             content=d.get("content", ""),
             pinned=bool(d.get("pinned", False)),
             keys=keys,
+            position="depth" if d.get("position") == "depth" else "system",
+            depth=_int("depth", 4),
+            insert_order=_int("insert_order", 100),
+            role=d.get("role") if d.get("role") in ("user", "assistant") else "system",
+            probability=max(1, min(100, _int("probability", 100))),
         )
 
 

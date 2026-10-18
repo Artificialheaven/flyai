@@ -202,6 +202,36 @@ def _keep_recent_turns(messages: List[Message],
     return messages[start:]
 
 
+def _inject_depth_blocks(messages: List[Message],
+                         blocks: Optional[List[Dict[str, Any]]]) -> None:
+    """把酒馆 @depth 块按距末尾的深度原地插入消息列表（system 已在 0 位）。
+
+    blocks: [{role, content, depth, order}]。depth 大的组先插，同深度按
+    order 升序；index=len-depth（最小 1，不越过系统提示词）。
+    """
+    if not blocks:
+        return
+    groups: Dict[int, List[Dict[str, Any]]] = {}
+    for i, b in enumerate(blocks):
+        content = (b.get("content") or "").strip()
+        if not content:
+            continue
+        depth = max(0, int(b.get("depth") or 0))
+        groups.setdefault(depth, []).append((int(b.get("order") or 100), i, b))
+    for depth in sorted(groups, reverse=True):
+        group = sorted(groups[depth], key=lambda x: (x[0], x[1]))
+        new_msgs = [
+            Message(
+                role=str(b.get("role") or "system")
+                if str(b.get("role")) in ("user", "assistant") else "system",
+                content=(b.get("content") or "").strip(),
+            )
+            for _o, _i, b in group
+        ]
+        idx = max(1, len(messages) - depth)
+        messages[idx:idx] = new_msgs
+
+
 async def run_agent_loop(
     history: List[Message],
     provider: Any,
@@ -219,6 +249,7 @@ async def run_agent_loop(
     deep_thinking: bool = False,
     post_history_instructions: str = "",
     max_tokens: Optional[int] = None,
+    depth_blocks: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -240,6 +271,8 @@ async def run_agent_loop(
     nudge 之前），不写入 history；空串不追加。
     max_tokens：本轮回复 token 上限覆盖（窗口 > 用户全局 > 提供商配置），
     None/0 时不传，由提供商按自身配置处理。
+    depth_blocks：酒馆 @depth 常驻块（世界书条目/预设 prompt），每轮在
+    系统提示词之后、PHI 之前按各自 depth 插到历史深处。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -268,6 +301,8 @@ async def run_agent_loop(
         request_messages = _keep_recent_turns(request_messages, keep_turns)
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
+        # 酒馆 @depth 常驻块（世界书条目/预设 prompt）：插到历史深处、PHI 之前
+        _inject_depth_blocks(request_messages, depth_blocks)
         # PHI（角色卡历史后指令）：紧贴历史尾部；工具轮时续写 nudge 放在它之后，
         # 让"继续完成回复"保持为模型看到的最后一句
         phi = (post_history_instructions or "").strip()

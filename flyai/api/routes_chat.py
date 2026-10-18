@@ -53,6 +53,32 @@ def _get_querier(sc, character, world):
     return LoreQuerier(character, world)
 
 
+def _lore_depth_specs(querier, character, user_char, last_message,
+                      group_names=None) -> List[dict]:
+    """世界书/角色表的 @depth 常驻条目：掷概率 + 宏替换后返回注入规格。"""
+    if querier is None:
+        return []
+    try:
+        specs = querier.depth_block_specs()
+    except Exception:
+        logger.exception("深度常驻条目收集失败")
+        return []
+    if not specs:
+        return []
+    from ..tavern import render_tavern_macros
+
+    char_name = getattr(character, "name", "") or "角色"
+    user_name = getattr(user_char, "name", "") if user_char else ""
+    out = []
+    for s in specs:
+        out.append(dict(s, content=render_tavern_macros(
+            s.get("content") or "",
+            char_name=char_name, user_name=user_name or "用户",
+            group_names=group_names or [], last_message=last_message or "",
+        )))
+    return out
+
+
 # ---- P3：发消息前自动召回（keep_turns 的配套）----
 
 _AUTO_RECALL_BUDGET = 1200   # 注入文本合计字符上限
@@ -623,6 +649,9 @@ async def chat(req: ChatRequest, request: Request):
             injected = (("\n\n" + lore_block) if lore_block else "") \
                 + (("\n\n" + ledger_block) if ledger_block else "") \
                 + (("\n\n" + recall_block) if recall_block else "")
+            depth_specs = _lore_depth_specs(
+                services.get("lore"), character, user_char, req.message or "",
+            )
             recall_head = len(session.messages)
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
@@ -644,6 +673,7 @@ async def chat(req: ChatRequest, request: Request):
                     character, "post_history_instructions", ""
                 ) or "",
                 max_tokens=_effective_max_tokens(session, _us),
+                depth_blocks=depth_specs,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -1128,6 +1158,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     injected_parts += "\n\n" + ledger_block
                 if recall_block:
                     injected_parts += "\n\n" + recall_block
+                # 世界书/角色表的 @depth 常驻块（按概率，宏按本座位角色替换）
+                depth_specs = _lore_depth_specs(
+                    services.get("lore"), char, user_char,
+                    req.message or "", group_names=others,
+                )
                 # 该 AI 的完整发言回合。
                 # 群聊里若模型一次给「空回复」（0 个字、且没通过工具得到内容），视为没开口成功：
                 # 不要当跳过，用一句系统提醒重试几次，避免『第二个 AI 不说话』。
@@ -1178,6 +1213,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             char, "post_history_instructions", ""
                         ) or "",
                         max_tokens=eff_max_tokens,
+                        depth_blocks=depth_specs,
                     ):
                         if ev == "done":
                             done_data = data

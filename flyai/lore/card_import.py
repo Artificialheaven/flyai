@@ -15,10 +15,9 @@ import base64
 import json
 import struct
 import zlib
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from .models import Character, LoreEntry
+from .models import Character
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _CARD_KEYS = ("ccv3", "chara")
@@ -120,50 +119,22 @@ def _book_entries(book: Any):
     return []
 
 
-def _entry_title(entry: Dict[str, Any]) -> str:
-    title = (entry.get("comment") or entry.get("name") or "").strip()
-    if title:
-        return title
-    keys = entry.get("keys") or []
-    if keys and isinstance(keys[0], str):
-        return keys[0].strip()
-    return "(无标题)"
-
-
-def _entry_keys(entry: Dict[str, Any]) -> List[str]:
-    """酒馆 keys（字符串数组；元素本身可能是逗号分隔的多词）→ 触发词列表。"""
-    out: List[str] = []
-    raw = entry.get("keys") or []
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return out
-    for item in raw:
-        for part in re.split(r"[\s,，、;；/]+", str(item or "")):
-            part = part.strip()
-            if part and part not in out:
-                out.append(part)
-    return out
-
-
 def _build_table(data: Dict[str, Any]):
+    """character_book 条目复用 lore.tavern 的统一酒馆条目映射
+    （constant→pinned、keys→触发词、position=4→深度注入、概率/角色）。
+
+    enabled=False（或 disable=True）的条目不再丢弃：作为非常驻、无触发词
+    的普通条目导入，用户可在编辑器里手动常驻；空内容仍跳过。
+    """
+    from . import tavern
+
     table = []
     for raw_entry in _book_entries(data.get("character_book")):
         if not isinstance(raw_entry, dict):
             continue
-        if raw_entry.get("enabled") is False:
+        if not (raw_entry.get("content") or "").strip():
             continue
-        content = (raw_entry.get("content") or "").strip()
-        if not content:
-            continue
-        # constant=常驻注入 → pinned；selective/关键词条目的 keys 迁移为
-        # 触发词：用户消息模糊命中时自动注入，query_lore 也能用关键词检索。
-        table.append(LoreEntry(
-            title=_entry_title(raw_entry),
-            content=content,
-            pinned=bool(raw_entry.get("constant")),
-            keys=_entry_keys(raw_entry),
-        ))
+        table.append(tavern.parse_entry(raw_entry))
     return table
 
 

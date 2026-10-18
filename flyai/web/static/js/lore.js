@@ -319,6 +319,41 @@ function importLore(endpoint) {
       return;
     }
 
+    var uploadWorldbook = function () {
+      // 酒馆世界书（可能是脏 JSON）：原始字节上传，服务端容错解析
+      var wfd = new FormData();
+      wfd.append("file", f, f.name || "worldbook.json");
+      fetchJSON("/api/worlds/import-worldbook", { method: "POST", body: wfd })
+        .then(function (r) {
+          var s = r.stats || {};
+          return refreshLore().then(function () {
+            state.loreNav = "";
+            renderLoreSections();
+            renderSessionMeta();
+            showToast("世界书导入成功：" + (s.entries || 0) + " 条" +
+              (s.depth ? "（深度常驻 " + s.depth + "）" : ""));
+          });
+        }).catch(fail);
+    };
+
+    if (!isChar) {
+      // 世界书优先按特征探测：开头出现 "entries" 即酒馆世界书
+      // （FlyAI 世界观导出用 "table"）；脏 JSON 也由服务端容错解析
+      var sniffReader = new FileReader();
+      sniffReader.onload = function () {
+        var text = String(sniffReader.result || "");
+        if (/"entries"\s*:/.test(text) && !/"table"\s*:/.test(text)) {
+          uploadWorldbook();
+        } else {
+          readAndImport();
+        }
+      };
+      sniffReader.readAsText(f.slice(0, 4096));
+      return;
+    }
+    readAndImport();
+
+    function readAndImport() {
     var reader = new FileReader();
     reader.onload = function () {
       var obj;
@@ -338,6 +373,8 @@ function importLore(endpoint) {
       }).then(afterImport).catch(fail);
     };
     reader.readAsText(f);
+    }
+  };
   };
   input.click();
 }

@@ -172,6 +172,38 @@ class LoreQuerier:
             )
         return _trigger.render_trigger_block(_trigger.dedupe(picked))
 
+    def depth_block_specs(self, rng=None) -> List[Dict[str, Any]]:
+        """收集 pinned + position="depth" 的角色/世界条目（酒馆 @depth 注入）。
+
+        每条按 probability 掷骰（0-100）；返回注入规格
+        ``{title, content, role, depth, order}``，宏替换与真正插入由
+        调用方完成（需要角色/用户名与会话消息）。
+        """
+        import random as _random
+
+        r = rng or _random
+        tables = [
+            self.character.table if self.character else [],
+            self.world.table if self.world else [],
+        ]
+        specs: List[Dict[str, Any]] = []
+        for table in tables:
+            for e in table:
+                if not e.pinned or e.position != "depth":
+                    continue
+                if not (e.content or "").strip():
+                    continue
+                if r.random() * 100 >= e.probability:
+                    continue
+                specs.append({
+                    "title": e.title,
+                    "content": e.content,
+                    "role": e.role if e.role in ("user", "assistant") else "system",
+                    "depth": max(0, int(e.depth or 0)),
+                    "order": int(e.insert_order or 100),
+                })
+        return specs
+
     async def _semantic_triggers(self, tables, text, embedder,
                                  already) -> List[Tuple[str, LoreEntry]]:
         """关键词未命中条目里，按向量余弦补足至多 SEMANTIC_TOP_UP 条。"""

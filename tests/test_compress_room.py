@@ -127,12 +127,15 @@ def test_apply_room_compression_writes_member_overrides_and_world():
     # base（库卡）与 patch 合并：名称保留、简介更新、条目按标题合并写入
     assert ai.override["name"] == "初"
     assert ai.override["intro"] == "更新的简介"
+    _entry_full = {"pinned": False, "keys": [], "position": "system",
+                   "depth": 4, "insert_order": 100, "role": "system",
+                   "probability": 100}
     assert ai.override["table"] == [
-        {"title": "关键设定", "content": "内容值", "pinned": False, "keys": []}
+        {"title": "关键设定", "content": "内容值", **_entry_full}
     ]
     assert s.world_override["content"] == "世界变化"
     assert s.world_override["table"] == [
-        {"title": "规则", "content": "一条", "pinned": False, "keys": []}
+        {"title": "规则", "content": "一条", **_entry_full}
     ]
 
     assert out["members"][ai.id] is ai.override

@@ -340,26 +340,50 @@ function bindEditorCommon(kind, id, saveFn, opts) {
   }
 }
 
-function entryRowHtml(title, content, pinned, keys) {
+function entryRowHtml(title, content, pinned, keys, opts) {
   keys = (keys || []).join(", ");
+  opts = opts || {};
+  var pos = opts.position === "depth" ? "depth" : "system";
+  var depth = opts.depth || 4;
+  var role = ["user", "assistant"].indexOf(opts.role) >= 0 ? opts.role : "system";
+  var prob = opts.probability || 100;
   return (
     '<div class="entry-row">' +
     '<input type="text" class="ed-title" placeholder="标题" value="' + escapeAttr(title) + '" />' +
     '<textarea class="ed-content" rows="2" placeholder="内容">' + escapeHtml(content) + "</textarea>" +
-    '<label class="ed-pin" title="常驻：无条件注入系统提示词，等同世界书 Constant"><input type="checkbox" class="ed-pinned"'
+    '<div class="ed-entry-bar">' +
+    '<label class="ed-pin" title="常驻：无条件注入，等同世界书 Constant"><input type="checkbox" class="ed-pinned"'
       + (pinned ? " checked" : "") + " />常驻</label>" +
+    '<label class="ed-pos">位置' +
+    '<select class="ed-position"><option value="system"' + (pos === "system" ? " selected" : "") + ">系统提示词</option>" +
+    '<option value="depth"' + (pos === "depth" ? " selected" : "") + ">历史深度@</option></select></label>" +
+    '<input type="number" class="ed-depth" min="0" max="50" value="' + escapeAttr(String(depth)) + '" title="距历史末尾的消息数（酒馆 @depth）" />' +
+    '<label class="ed-role">角色<select class="ed-role-select">' +
+    '<option value="system"' + (role === "system" ? " selected" : "") + ">system</option>" +
+    '<option value="user"' + (role === "user" ? " selected" : "") + ">user</option>" +
+    '<option value="assistant"' + (role === "assistant" ? " selected" : "") + ">assistant</option>" +
+    "</select></label>" +
+    '<label class="ed-prob" title="每轮注入概率（酒馆 probability）">概率<input type="number" class="ed-probability" min="1" max="100" value="' + escapeAttr(String(prob)) + '" /></label>' +
     '<button class="btn small ed-del">✕</button>' +
+    "</div>" +
     '<input type="text" class="ed-keys" placeholder="触发词（可选，逗号/顿号分隔；用户消息模糊命中时自动注入，留空则用标题匹配）" value="' + escapeAttr(keys) + '" />' +
     "</div>"
   );
 }
 function addEntryRow(container, entry) {
   var row = document.createElement("div");
+  entry = entry || {};
   row.innerHTML = entryRowHtml(
-    entry ? entry.title || "" : "",
-    entry ? entry.content || "" : "",
-    entry ? !!entry.pinned : false,
-    entry ? entry.keys || [] : []
+    entry.title || "",
+    entry.content || "",
+    !!entry.pinned,
+    entry.keys || [],
+    {
+      position: entry.position,
+      depth: entry.depth,
+      role: entry.role,
+      probability: entry.probability,
+    }
   );
   row.querySelector(".ed-del").addEventListener("click", function () { row.remove(); });
   container.appendChild(row);
@@ -411,7 +435,21 @@ function readEntries(container) {
         if (k && keys.indexOf(k) < 0) keys.push(k);
       });
     }
-    out.push({ title: title, content: content, pinned: pinnedEl ? pinnedEl.checked : false, keys: keys });
+    var entry = { title: title, content: content, pinned: pinnedEl ? pinnedEl.checked : false, keys: keys };
+    var posEl = row.querySelector(".ed-position");
+    if (posEl) {
+      entry.position = posEl.value === "depth" ? "depth" : "system";
+      var depthEl = row.querySelector(".ed-depth");
+      var depth = depthEl ? parseInt(depthEl.value, 10) : 4;
+      entry.depth = isNaN(depth) ? 4 : Math.max(0, Math.min(50, depth));
+      var roleEl = row.querySelector(".ed-role-select");
+      entry.role = roleEl && roleEl.value === "user" ? "user"
+        : roleEl && roleEl.value === "assistant" ? "assistant" : "system";
+      var probEl = row.querySelector(".ed-probability");
+      var prob = probEl ? parseInt(probEl.value, 10) : 100;
+      entry.probability = isNaN(prob) ? 100 : Math.max(1, Math.min(100, prob));
+    }
+    out.push(entry);
   });
   return out;
 }

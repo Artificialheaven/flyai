@@ -123,15 +123,18 @@ def test_v3_full_mapping():
     assert c.post_history_instructions == "保持角色语气。"
     assert c.system_prompt == "你是鲁迪。"
 
-    # 世界书：constant → pinned；selective 普通条目；禁用/空内容丢弃
-    assert len(c.table) == 2
+    # 世界书：constant → pinned；selective 普通条目迁移 keys；
+    # 禁用条目不再丢弃，作为非常驻普通条目保留（用户可手动常驻）
+    assert len(c.table) == 3
     pinned = [e for e in c.table if e.pinned]
     assert len(pinned) == 1 and pinned[0].title == "常驻设定"
-    other = [e for e in c.table if not e.pinned][0]
-    assert other.title == "魔术" and other.content == "擅长无吟唱魔术"
+    other = next(e for e in c.table if e.title == "魔术")
+    assert other.content == "擅长无吟唱魔术"
     # selective 条目的 keys 迁移为触发词；常驻条目没有 keys
     assert other.keys == ["魔术"]
     assert pinned[0].keys == []
+    dormant = next(e for e in c.table if e.title == "被禁用")
+    assert dormant.pinned is False
 
 
 def test_book_entry_keys_split_string_and_separators():

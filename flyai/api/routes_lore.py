@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
-from ..lore.models import Character, World
+from ..lore.models import Character, LoreEntry, World
 from ..user import ADMIN_UID
 
 router = APIRouter(prefix="/api", tags=["lore"])
@@ -36,6 +36,26 @@ class LoreEntryPayload(BaseModel):
     title: str = ""
     content: str = ""
     pinned: bool = False
+    keys: List[str] = []
+    position: str = "system"
+    depth: int = 4
+    insert_order: int = 100
+    role: str = "system"
+    probability: int = 100
+
+
+def _build_entry(e) -> LoreEntry:
+    return LoreEntry(
+        title=e.title,
+        content=e.content,
+        pinned=e.pinned,
+        keys=[str(k).strip() for k in (e.keys or []) if str(k or "").strip()],
+        position="depth" if e.position == "depth" else "system",
+        depth=int(e.depth or 4),
+        insert_order=int(e.insert_order or 100),
+        role=e.role if e.role in ("user", "assistant") else "system",
+        probability=max(1, min(100, int(e.probability or 100))),
+    )
 
 
 class CharacterPayload(BaseModel):
@@ -68,8 +88,6 @@ class WorldPayload(BaseModel):
 
 
 def _build_character(payload) -> Character:
-    from ..lore.models import LoreEntry
-
     return Character(
         id=payload.id,
         name=payload.name,
@@ -77,10 +95,7 @@ def _build_character(payload) -> Character:
         intro=payload.intro,
         background=payload.background,
         mes_example=payload.mes_example or "",
-        table=[
-            LoreEntry(title=e.title, content=e.content, pinned=e.pinned)
-            for e in payload.table
-        ],
+        table=[_build_entry(e) for e in payload.table],
         attributes=[dict(a) for a in (payload.attributes or [])],
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
@@ -94,17 +109,12 @@ def _build_character(payload) -> Character:
 
 
 def _build_world(payload) -> World:
-    from ..lore.models import LoreEntry
-
     return World(
         id=payload.id,
         name=payload.name,
         avatar=payload.avatar,
         content=payload.content,
-        table=[
-            LoreEntry(title=e.title, content=e.content, pinned=e.pinned)
-            for e in payload.table
-        ],
+        table=[_build_entry(e) for e in payload.table],
         prompt_format=payload.prompt_format or "",
         prompt_tools=payload.prompt_tools or "",
     )
@@ -346,6 +356,31 @@ async def import_character_card(request: Request, file: UploadFile = File(...)):
         c.avatar = f"/uploads/{sc.uid}/{fname}"
     sc.lore.save_character(c)
     return c.to_dict()
+
+
+@router.post("/worlds/import-worldbook")
+async def import_worldbook(request: Request, file: UploadFile = File(...)):
+    """导入酒馆世界书 JSON（v2 entries 字典；脏 JSON 容错解析）。"""
+    sc = _state(request)
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(400, "世界书文件过大（>10MB）")
+    from ..lore import tavern
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "文件不是 UTF-8 文本 JSON")
+    fallback = Path(file.filename or "").stem
+    try:
+        w, stats = tavern.worldbook_from_text(text, name=fallback)
+    except (tavern.WorldbookError, ValueError, TypeError) as e:
+        raise HTTPException(400, "世界书解析失败：%s" % e)
+    if not w.table:
+        raise HTTPException(400, "世界书里没有可用的非空条目")
+    w.id = uuid.uuid4().hex
+    sc.lore.save_world(w)
+    return {"world": w.to_dict(), "stats": stats}
 
 
 @router.post("/worlds/import")
