@@ -375,7 +375,6 @@ function importLore(endpoint) {
     reader.readAsText(f);
     }
   };
-  };
   input.click();
 }
 

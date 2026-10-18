@@ -39,6 +39,7 @@
 
   function bind() {
     if (bound) return;
+    cache();
     bound = true;
     document.getElementById("btn-open-preset-manager")
       .addEventListener("click", openPresetManager);
@@ -65,6 +66,10 @@
     load();
   }
   window.openPresetManager = openPresetManager;
+
+  // bind() 不能只放在 openPresetManager 里——打开弹窗的入口按钮本身要靠 bind 挂监听
+  if (document.getElementById("btn-open-preset-manager")) bind();
+  else document.addEventListener("DOMContentLoaded", bind);
 
   /* ---- 列表 ---- */
 
