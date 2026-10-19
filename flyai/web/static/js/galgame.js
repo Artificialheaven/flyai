@@ -521,6 +521,7 @@ function renderBacklog(messages) {
   var gv = state.galgame;
   var html = ['<button type="button" class="gv-bl-replay-all">🔁 从头开始回放整个故事</button>'];
   messages.forEach(function (m, mi) {
+    if (m.tombstone) return;  // 撤回墓碑永不进 backlog
     if (m.role === "user") {
       var playerText = (m.content || "").trim();
       if (playerText) {
@@ -615,7 +616,7 @@ function gvAssistantChoiceCall(m) {
 // pending=仍在等待（只可能是最新一条）
 function gvChoiceOutcome(msgs, assistantIdx, callId) {
   for (var k = assistantIdx + 1; k < msgs.length; k++) {
-    if (msgs[k].role === "assistant" || msgs[k].role === "user") break;
+    if (msgs[k].role === "assistant" || msgs[k].role === "user" || msgs[k].tombstone) break;
     if (msgs[k].role === "tool" && msgs[k].tool_call_id === callId) {
       var content = msgs[k].content || "";
       var mm = /用户选择了：「([^」]*)」/.exec(content);
@@ -642,7 +643,7 @@ function gvTimeline(msgs, afterIdx) {
   var out = [];
   for (var k = 0; k < msgs.length; k++) {
     if (k <= afterIdx) continue;
-    if (msgs[k].role === "assistant" || msgs[k].role === "user") {
+    if ((msgs[k].role === "assistant" || msgs[k].role === "user") && !msgs[k].tombstone) {
       out.push(k);
     }
   }
@@ -657,6 +658,7 @@ function gvReplayTurns(msgs, startIdx) {
 // 由历史消息构建演出段落（语音地址取已保存映射，缺失则播放时按需补合成）
 function buildHistorySegments(m) {
   var gv = state.galgame;
+  if (m.tombstone) return [];  // 撤回墓碑不参与演出
   if (m.role === "user") {
     // 玩家主动输入（开场剧情、时间跳跃）：作为玩家叙述行展示，不发语音
     var t = (m.content || "").trim();
@@ -704,7 +706,7 @@ function replaySceneUpTo(msgs, beforeIdx) {
 // 应用某个时间线节点之后工具结果中的场景标记（到下一个时间线节点为止）
 function replayApplyTurnScene(msgs, idx, scene) {
   for (var k = idx + 1; k < msgs.length; k++) {
-    if (msgs[k].role === "assistant" || msgs[k].role === "user") break;
+    if (msgs[k].role === "assistant" || msgs[k].role === "user" || msgs[k].tombstone) break;
     if (msgs[k].role === "tool") {
       scene = parseSceneMarker(msgs[k].content || "", scene);
     }

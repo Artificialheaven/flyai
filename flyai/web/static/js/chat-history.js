@@ -106,18 +106,21 @@ function renderHistory(messages, edits) {
   // 搜索卡 → 后续精选结果的配对（按候选编号取原图 URL）
   var pixivReveal = buildPixivReveal(messages);
   var i = 0;
-  // 开头游离消息（正常不会有）
+  // 开头游离消息（正常不会有）；撤回墓碑单独成行（如撤回首轮、前面还有开场白）
   while (i < messages.length && messages[i].role !== "user") {
+    if (messages[i].tombstone) { appendTombstone(messages[i]); i++; continue; }
     renderFlatNonUser(messages[i], null);
     i++;
   }
   while (i < messages.length) {
     var user = messages[i];
-    var anchor = user.id;
     var end = messages.length;
     for (var j = i + 1; j < messages.length; j++) {
-      if (messages[j].role === "user") { end = j; break; }
+      // 墓碑也是轮边界：被撤回轮的回复槽位不渲染
+      if (messages[j].role === "user" || messages[j].tombstone) { end = j; break; }
     }
+    if (user.tombstone) { appendTombstone(user); i = end; continue; }
+    var anchor = user.id;
     var userEl = makeUserBubble(user.content || "", user.images, anchor);
     el.messages.appendChild(userEl);
     state.turnNodes[anchor] = { userEl: userEl, editing: false };
@@ -154,6 +157,7 @@ function renderHistory(messages, edits) {
       k = p;
     }
     if (canEdit) addTurnControls(anchor, (edits || {})[anchor]);
+    else addGroupRecallControl(anchor, userEl);
     i = end;
   }
   scrollToBottom();
@@ -215,7 +219,89 @@ function addTurnControls(anchor, entry) {
   regen.textContent = "🔄 重新生成";
   regen.addEventListener("click", function () { openUserEditor(anchor); });
   actions.appendChild(regen);
+  var recallBtn = document.createElement("button");
+  recallBtn.type = "button";
+  recallBtn.className = "btn small ghost";
+  recallBtn.textContent = "🧹 撤回";
+  recallBtn.addEventListener("click", function () { requestRecall(anchor); });
+  actions.appendChild(recallBtn);
   el.messages.appendChild(actions);
+}
+
+// 群聊用户气泡内的撤回按钮（桌面 hover / 触屏点气泡亮出，复用 .edit-on 模式）
+function addGroupRecallControl(anchor, userEl) {
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "turn-recall-btn";
+  btn.title = "撤回这一轮";
+  btn.textContent = "🧹";
+  btn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    requestRecall(anchor);
+  });
+  userEl.appendChild(btn);
+  userEl.addEventListener("click", function (e) {
+    if (e.target.closest &&
+        e.target.closest(".turn-recall-btn,.chat-img,a")) return;
+    activateEditEntry(userEl);
+  });
+}
+
+/* ==== 撤回整轮消息 ==== */
+function requestRecall(anchor) {
+  if (state.busy) return;
+  askConfirm({
+    title: "撤回这条消息？",
+    text: "将删除这条消息及其之后的全部角色回复（群聊中多个角色的回复会一并删除）。\n\n撤回后原文不回输入框，可在原位置点「重新编辑」找回文字与图片。",
+    okLabel: "撤回",
+    onOk: function () { doRecall(anchor); },
+  });
+}
+
+function doRecall(anchor) {
+  fetchJSON("/api/sessions/" + state.currentSessionId
+            + "/messages/" + encodeURIComponent(anchor),
+            { method: "DELETE" })
+    .then(function () {
+      showToast("已撤回", "ok", 2000);
+      if (state.currentThreadId) return loadThread(state.currentThreadId);
+      // 理论不可达的旧形态兜底：重拉会话重画
+      return fetchJSON("/api/sessions/" + state.currentSessionId).then(function (s) {
+        state.roomThreads = s.threads || [];
+        renderHistory(s.messages || []);
+      });
+    })
+    .catch(function (e) { addErrorBar("撤回失败: " + e.message); });
+}
+
+// 撤回墓碑行："您撤回了一条消息，点击 重新编辑"
+function appendTombstone(m) {
+  var row = document.createElement("div");
+  row.className = "recall-tombstone";
+  if (m.id) row.dataset.anchor = m.id;
+  var pre = document.createElement("span");
+  pre.textContent = "您撤回了一条消息，点击 ";
+  var link = document.createElement("a");
+  link.className = "rt-redo";
+  link.href = "javascript:void(0)";
+  link.textContent = "重新编辑";
+  link.addEventListener("click", function () { restoreRecalledDraft(m.tombstone); });
+  row.appendChild(pre);
+  row.appendChild(link);
+  el.messages.appendChild(row);
+}
+
+// 点"重新编辑"：把撤回的原文与图片回填输入框（不自动重发）
+function restoreRecalledDraft(t) {
+  if (state.busy || !t) return;
+  el.input.value = t.content || "";
+  state.pendingImages = (t.images || []).slice();
+  renderPendingImages();
+  saveDraftNow();
+  autosizeInput();
+  el.input.focus();
+  var n = el.input.value.length;
+  try { el.input.setSelectionRange(n, n); } catch (e) { /* 老 WebView 忽略 */ }
 }
 
 // 同时只允许一条用户消息亮出编辑键

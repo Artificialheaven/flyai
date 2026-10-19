@@ -558,6 +558,29 @@ body {
 .msg.user.edit-on .turn-edit-btn { opacity: 1; }
 .turn-edit-btn:hover { color: var(--accent); border-color: var(--accent); }
 
+/* 群聊撤回按钮（气泡内，hover/触屏亮出；样式同 ✏️）*/
+.turn-recall-btn {
+  position: absolute; top: 0; right: 0;
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-3); color: var(--text-dim);
+  font-size: 12px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s;
+}
+.msg.user:hover .turn-recall-btn { opacity: 1; }
+.msg.user.edit-on .turn-recall-btn { opacity: 1; }
+.turn-recall-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* 撤回墓碑行 */
+.recall-tombstone {
+  max-width: 860px; margin: -2px auto 14px;
+  text-align: center; font-size: 12px; color: var(--text-dim);
+}
+.recall-tombstone .rt-redo {
+  color: var(--accent); text-decoration: underline;
+  cursor: pointer; margin-left: 2px;
+}
+
 /* 内联编辑器 */
 .bubble .inline-edit {
   display: block; width: 100%; min-width: 260px; box-sizing: border-box;
@@ -1158,6 +1181,7 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   .session-item .pin, .session-item .del, .session-item .ren { display: inline; }
   .session-item .pin:not(.on) { opacity: .55; }
   .turn-edit-btn { width: 30px; height: 30px; font-size: 13px; }
+  .turn-recall-btn { width: 30px; height: 30px; font-size: 13px; }
   .px-link { opacity: .9; }
 }
 
