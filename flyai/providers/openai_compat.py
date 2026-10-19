@@ -228,6 +228,8 @@ class OpenAICompatProvider(BaseProvider):
     def _encode_request(self, messages: List[Message]) -> List[Dict]:
         out: List[Dict] = []
         for msg in messages:
+            if getattr(msg, "tombstone", None):
+                continue  # 撤回墓碑：兜底过滤（未知 role 本也不会被编码）
             if msg.role == "system":
                 out.append({"role": "system", "content": msg.content or ""})
             elif msg.role == "user":

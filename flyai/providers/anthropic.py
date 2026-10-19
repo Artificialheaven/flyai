@@ -224,6 +224,8 @@ class AnthropicProvider(BaseProvider):
         system_parts: List[str] = []
         non_system: List[Message] = []
         for msg in messages:
+            if getattr(msg, "tombstone", None):
+                continue  # 撤回墓碑：必须在 system / 对话分流之前过滤
             if msg.role == "system":
                 if msg.content:
                     system_parts.append(msg.content)

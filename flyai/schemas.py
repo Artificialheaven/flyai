@@ -83,6 +83,9 @@ class Message:
     recall: Optional[List[Dict[str, Any]]] = None
     # user 消息附带的图片（视觉模型）
     images: Optional[List[ImageAttachment]] = None
+    # 撤回墓碑：非 None 时此消息是一条"已撤回轮"占位（role 固定为 "tombstone"），
+    # 载荷仅用于前端"重新编辑"回填；任何模型视图/脚本化消费都必须过滤
+    tombstone: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -103,6 +106,7 @@ class Message:
             "actor_id": self.actor_id,
             "recall": self.recall,
             "images": [i.to_dict() for i in self.images] if self.images else None,
+            "tombstone": self.tombstone,
         }
 
     @classmethod
@@ -127,4 +131,5 @@ class Message:
                 if data.get("images")
                 else None
             ),
+            tombstone=data.get("tombstone"),
         )

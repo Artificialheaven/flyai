@@ -173,6 +173,40 @@ def clear_session(sid: str, request: Request):
     return {"ok": True}
 
 
+@router.delete("/sessions/{sid}/messages/{mid}")
+def delete_message_turn(sid: str, mid: str, request: Request):
+    """撤回 mid 用户消息所在的一整轮（dm/group 通用），原位留墓碑。"""
+    state = request.app.state.flyai
+    sc = state.user(request)
+    _safe_sid(sid)
+    s = sc.store.get(sid)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    # routes_room 反向依赖本模块的 _session_dict，函数内导入避免环
+    from .routes_room import _active_run_409
+    _active_run_409(state, sc, s.id)
+
+    from ..sessions.recall import find_target, recall_turn
+
+    thread, messages = find_target(s, mid)
+    if messages is None:
+        raise HTTPException(404, "消息不存在或已被撤回")
+    try:
+        payload = recall_turn(
+            messages, mid,
+            edits=thread.edits if thread is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, "只能撤回自己发送的消息") from exc
+    sc.store.save(s)
+    return {
+        "ok": True,
+        "thread_id": thread.id if thread is not None else None,
+        "anchor": mid,
+        "tombstone": payload,
+    }
+
+
 # ---- R7：会话专属角色副本 ----
 
 class CharacterBody(BaseModel):

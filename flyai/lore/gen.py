@@ -220,6 +220,8 @@ def messages_to_script(messages, with_names: bool = False) -> str:
     """消息列表 → 纯文本脚本（含工具调用/结果；跳过 hidden）。"""
     lines: List[str] = []
     for m in messages:
+        if getattr(m, "tombstone", None):
+            continue  # 撤回墓碑：压缩/记忆抽取脚本里不得出现已撤回内容
         if getattr(m, "hidden", False):
             continue
         lines.extend(_message_lines(m, with_names))

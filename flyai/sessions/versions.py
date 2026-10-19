@@ -45,7 +45,8 @@ def locate_turn(messages: List[Message], anchor: str) -> Tuple[int, int]:
         raise ValueError(f"锚点不是用户消息: {anchor}")
     end = len(messages)
     for j in range(idx + 1, len(messages)):
-        if messages[j].role == "user":
+        # 撤回墓碑也是轮边界：否则编辑更早轮时切片会把墓碑吞掉
+        if messages[j].role == "user" or getattr(messages[j], "tombstone", None):
             end = j
             break
     return idx, end

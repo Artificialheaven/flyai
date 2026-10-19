@@ -305,6 +305,8 @@ async def run_agent_loop(
         tool_specs = registry.specs(allowed_tools) if settings.enabled else []
         request_messages = _actor_view(history, actor, actor_name)
         request_messages = _keep_recent_turns(request_messages, keep_turns)
+        # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
+        request_messages = [m for m in request_messages if not getattr(m, "tombstone", None)]
         if system_prompt:
             request_messages.insert(0, Message(role="system", content=system_prompt))
         # 酒馆 @depth 常驻块（世界书条目/预设 prompt）：插到历史深处、PHI 之前
