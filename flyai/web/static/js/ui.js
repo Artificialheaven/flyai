@@ -137,6 +137,16 @@ function cacheElements() {
   el.setTtsProxy = document.getElementById("set-tts-proxy");
   el.setGalgameLoops = document.getElementById("set-galgame-loops");
   el.setGalgameEnabled = document.getElementById("set-galgame-enabled");
+  // 沙箱与调度设置
+  el.setSandboxEnabled = document.getElementById("set-sandbox-enabled");
+  el.setSandboxMaxFileKb = document.getElementById("set-sandbox-max-file-kb");
+  el.setSandboxQuotaMb = document.getElementById("set-sandbox-quota-mb");
+  el.setSandboxPublicMaxFileKb = document.getElementById("set-sandbox-public-max-file-kb");
+  el.setSandboxPublicQuotaMb = document.getElementById("set-sandbox-public-quota-mb");
+  el.setSchedulerEnabled = document.getElementById("set-scheduler-enabled");
+  el.setSchedulerTimezone = document.getElementById("set-scheduler-timezone");
+  el.setSchedulerTick = document.getElementById("set-scheduler-tick");
+  el.setSchedulerReminder = document.getElementById("set-scheduler-reminder");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");

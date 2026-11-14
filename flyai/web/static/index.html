@@ -417,6 +417,7 @@
             <button type="button" class="m-row" data-goto="websearch"><span class="m-label">联网搜索</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
             <button type="button" class="m-row" data-goto="browser"><span class="m-label">AI 浏览器</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
             <button type="button" class="m-row" data-goto="galgame"><span class="m-label">Galgame 模式</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
+            <button type="button" class="m-row" data-goto="sandbox"><span class="m-label">沙箱与调度</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
           </div>
         </div>
       </section>
@@ -738,6 +739,46 @@
           <label class="f-label toggle"><input type="checkbox" id="set-galgame-enabled" /> 启用 Galgame 模式（默认开放；关闭后普通用户不能新建 Galgame 房间，已存在的房间保留；普通用户仍可在自己的功能开关里单独覆盖）</label>
           <label class="f-label">Galgame 最大工具轮数（1–200）
             <input type="number" id="set-galgame-loops" value="40" min="1" max="200" />
+          </label>
+          <div class="m-page-actions">
+            <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 沙箱与调度（管理员） ============ -->
+      <section class="m-page admin-only" data-page="sandbox">
+        <header class="m-page-head m-mobile-head">
+          <button type="button" class="m-back" title="返回"><svg><use href="#i-back"/></svg></button>
+          <span class="m-page-title">沙箱与调度</span>
+        </header>
+        <div class="m-page-content">
+          <h4>会话工作区沙箱</h4>
+          <p class="sub">启用后注册 fs_list / fs_read / fs_write / fs_append / fs_delete 工具，AI 可在每会话隔离目录与 public 公共目录内管理文件。写入 / 追加 / 删除为风险操作，默认仅管理员可执行；public 区域的写权限也仅对管理员开放。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-sandbox-enabled" /> 启用文件沙箱工具</label>
+          <label class="f-label">会话单文件上限（KiB）
+            <input type="number" id="set-sandbox-max-file-kb" value="512" min="1" />
+          </label>
+          <label class="f-label">会话工作区总配额（MiB）
+            <input type="number" id="set-sandbox-quota-mb" value="10" min="1" />
+          </label>
+          <label class="f-label">public 单文件上限（KiB）
+            <input type="number" id="set-sandbox-public-max-file-kb" value="4096" min="1" />
+          </label>
+          <label class="f-label">public 总配额（MiB）
+            <input type="number" id="set-sandbox-public-quota-mb" value="50" min="1" />
+          </label>
+          <h4>后台调度器</h4>
+          <p class="sub">当前为调度骨架（周期 tick + 领导锁），后续阶段将承载主动行为、定时任务与到期提醒。多 worker 部署时自动只有一个实例执行 tick，保存后立即生效。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-scheduler-enabled" /> 启用后台调度器</label>
+          <label class="f-label">时区（IANA 名称，如 Asia/Shanghai）
+            <input type="text" id="set-scheduler-timezone" value="Asia/Shanghai" />
+          </label>
+          <label class="f-label">tick 周期（秒，最小 5）
+            <input type="number" id="set-scheduler-tick" value="30" min="5" />
+          </label>
+          <label class="f-label">提醒检查周期（秒，最小 5）
+            <input type="number" id="set-scheduler-reminder" value="60" min="5" />
           </label>
           <div class="m-page-actions">
             <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>

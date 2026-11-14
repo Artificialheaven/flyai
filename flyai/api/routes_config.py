@@ -27,6 +27,8 @@ from ..config import (
     BrowserSettings,
     TtsSettings,
     RoleplaySettings,
+    SandboxSettings,
+    SchedulerSettings,
     mask_api_key,
     save_config,
 )
@@ -88,6 +90,8 @@ class ConfigPayload(BaseModel):
     browser: Optional[dict] = None
     tts: Optional[dict] = None
     galgame: Optional[dict] = None
+    sandbox: Optional[dict] = None
+    scheduler: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -177,6 +181,9 @@ def _masked_config(state, uid: Optional[str] = None):
         "browser": cfg.browser.dict(),
         "galgame": cfg.galgame.dict(),
         "tts": _masked_tts(cfg),
+        # 沙箱/调度器段不含密钥，对所有登录用户可见（同 SD 段）
+        "sandbox": cfg.sandbox.dict(),
+        "scheduler": cfg.scheduler.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -308,7 +315,17 @@ def put_config(payload: ConfigPayload, request: Request):
     if payload.galgame is not None:
         cfg.galgame = type(cfg.galgame).parse_obj(dict(payload.galgame))
 
+    if payload.sandbox is not None:
+        cfg.sandbox = SandboxSettings.parse_obj(dict(payload.sandbox))
+
+    scheduler_changed = payload.scheduler is not None
+    if scheduler_changed:
+        cfg.scheduler = SchedulerSettings.parse_obj(dict(payload.scheduler))
+
     _persist(state)
+    if scheduler_changed:
+        # 调度器开关/周期/时区热生效：在运行循环内安排重启
+        state.reconfigure_scheduler()
     return _masked_config(state, ADMIN_UID)
 
 

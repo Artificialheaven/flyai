@@ -137,5 +137,18 @@
   "galgame": {
     "enabled": true,
     "max_loops": 40
+  },
+  "sandbox": {
+    "enabled": false,
+    "max_file_kb": 512,
+    "quota_mb": 10,
+    "public_max_file_kb": 4096,
+    "public_quota_mb": 50
+  },
+  "scheduler": {
+    "enabled": false,
+    "timezone": "Asia/Shanghai",
+    "tick_seconds": 30,
+    "reminder_check_seconds": 60
   }
 }

@@ -47,6 +47,19 @@ class ToolRegistry:
         if tool is None:
             return ToolResult(ok=False, output=f"[工具错误] 未知工具: {call.name}")
 
+        # P0 执行期授权：risk 工具按等级/管理员身份拦截（specs 只控制可见性）。
+        # min_level<=0 表示仅管理员；>0 时等级达标或管理员放行。
+        if tool.risk and not ctx.is_admin:
+            if tool.min_level <= 0 or ctx.level < tool.min_level:
+                need = f"等级 {tool.min_level}" if tool.min_level > 0 else "管理员权限"
+                return ToolResult(
+                    ok=False,
+                    output=(
+                        f"[权限不足] 工具 {call.name} 需要{need}，"
+                        f"当前等级 {ctx.level}；请联系管理员。"
+                    ),
+                )
+
         timeout = self._timeouts_seconds
         if ctx.tool_settings is not None:
             timeout = getattr(ctx.tool_settings, "timeout_seconds", timeout)

@@ -252,6 +252,9 @@ async def run_agent_loop(
     depth_blocks: Optional[List[Dict[str, Any]]] = None,
     extra_params: Optional[Dict[str, Any]] = None,
     assistant_prefill: str = "",
+    uid: str = "",
+    level: int = 0,
+    is_admin: bool = False,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -288,6 +291,9 @@ async def run_agent_loop(
         session_id=session_id,
         run_id=run_id,
         services=services or {},
+        uid=uid,
+        level=level,
+        is_admin=is_admin,
     )
 
     # 整轮（可能含多次 LLM 调用）实际计费 token：各次调用累加

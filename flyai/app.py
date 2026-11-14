@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -39,6 +40,7 @@ from .tools.registry import ToolRegistry
 from .agent.runs import ChatRunManager
 from .galgame.choices import GalgameChoiceManager
 from .market.store import MarketStore
+from .proactor import SchedulerService
 from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 
 logger = logging.getLogger("flyai")
@@ -82,6 +84,8 @@ class AppState:
     galgame_choices: GalgameChoiceManager = field(default_factory=GalgameChoiceManager)
     # sid -> {对白文本: 音频 url}：TTS 端点产出但 drive 尚未合并落盘的映射
     galgame_tts_overlay: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # 后台调度服务（P0 骨架；scheduler.enabled=false 时只待命不 tick）
+    scheduler: Optional[SchedulerService] = None
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -173,6 +177,16 @@ class AppState:
         with self._tools_lock:
             self._reload_tools()
 
+    def reconfigure_scheduler(self) -> None:
+        """配置接口（线程池内同步执行）热更新调度器：在运行中的循环里安排重启。"""
+        if self.scheduler is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.scheduler.restart())
+
     def _reload_tools(self) -> None:
         self.registry = ToolRegistry()
         # 内置工具：角色/世界观内容表查询
@@ -260,6 +274,24 @@ class AppState:
                 logger.warning(
                     "语音合成已启用但未安装 websockets，请 pip install websockets"
                 )
+        # 会话工作区沙箱工具：默认不注册（sandbox.enabled=false 时与旧版一致）
+        if self.config.sandbox.enabled:
+            from .tools.fs_tools import (
+                FsAppendTool,
+                FsDeleteTool,
+                FsListTool,
+                FsReadTool,
+                FsWriteTool,
+            )
+
+            for fs_tool in (
+                FsListTool(),
+                FsReadTool(),
+                FsWriteTool(),
+                FsAppendTool(),
+                FsDeleteTool(),
+            ):
+                self.registry.register(fs_tool)
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -326,6 +358,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         state.market = MarketStore(data_dir / "market")
         # AI 浏览器管理器已在 reload_tools 内按启用状态懒创建
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        # 后台调度服务：enabled=false 时内部直接待命，领导锁保证多 worker 单实例
+        state.scheduler = SchedulerService(state)
+        await state.scheduler.start()
         app.state.flyai = state
         logger.info(
             "FlyAI 启动完成: active_provider=%s tools=%d plugins=%d users=%d",
@@ -335,6 +370,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             len(state.user_store.list()),
         )
         yield
+        if state.scheduler is not None:
+            await state.scheduler.aclose()
         await state.run_manager.aclose()
         if state.browser is not None:
             await state.browser.aclose()

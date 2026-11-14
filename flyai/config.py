@@ -462,6 +462,53 @@ class GalgameSettings(BaseModel):
         return max(1, min(v, 200))
 
 
+class SandboxSettings(BaseModel):
+    """AI 文件沙箱（P0）：双根目录、单文件大小与配额。
+
+    会话根 data/{uid}/workspace/sessions/{sid}/ 用会话配额，
+    公共根 data/{uid}/workspace/public/ 用独立的 public 配额。
+    enabled=False 时 fs_* 工具不注册，行为与旧版本完全一致。
+    """
+
+    enabled: bool = False
+    max_file_kb: int = 512
+    quota_mb: int = 10
+    public_max_file_kb: int = 4096
+    public_quota_mb: int = 50
+
+    @validator("max_file_kb", "quota_mb", "public_max_file_kb", "public_quota_mb")
+    def _clamp_positive(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 512
+        return max(1, v)
+
+
+class SchedulerSettings(BaseModel):
+    """后台调度器（P0 骨架，P3 起承载主动行为/定时任务/提醒）。
+
+    多进程部署时靠 data/.scheduler.lock 领导锁保证只有一个实例在 tick。
+    """
+
+    enabled: bool = False
+    timezone: str = "Asia/Shanghai"
+    tick_seconds: int = 30
+    reminder_check_seconds: int = 60
+
+    @validator("timezone")
+    def _strip_tz(cls, v):  # noqa: N805
+        return (v or "").strip() or "Asia/Shanghai"
+
+    @validator("tick_seconds", "reminder_check_seconds")
+    def _clamp_tick(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 30
+        return max(5, v)
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -479,6 +526,8 @@ class AppConfig(BaseModel):
     browser: BrowserSettings = BrowserSettings()
     tts: TtsSettings = TtsSettings()
     galgame: GalgameSettings = GalgameSettings()
+    sandbox: SandboxSettings = SandboxSettings()
+    scheduler: SchedulerSettings = SchedulerSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

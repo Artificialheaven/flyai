@@ -32,6 +32,7 @@ from ..schemas import ImageAttachment, Message
 from ..sessions import versions
 from ..sessions.models import bootstrap_room
 from ..sse import sse_event
+from ..user import ADMIN_UID
 
 logger = logging.getLogger("flyai.chat")
 
@@ -553,6 +554,11 @@ async def chat(req: ChatRequest, request: Request):
         user_character=user_char,
     )
     services = {}
+    # 沙箱工具依赖（fs_* 仅在 sandbox.enabled 时注册，缺省不影响其他工具）
+    services["data_dir"] = getattr(state, "data_dir", None)
+    services["sandbox_settings"] = getattr(
+        getattr(state, "config", None), "sandbox", None
+    )
     # 召回日志（主动召回记录）
     services["recall_logs"] = getattr(state, "recall_logs", None)
     # TTS：角色卡绑定音色 + 当前用户等级（工具内解析/鉴权）
@@ -713,6 +719,9 @@ async def chat(req: ChatRequest, request: Request):
                 depth_blocks=depth_specs + rendered_preset.depth_blocks,
                 extra_params=rendered_preset.params or None,
                 assistant_prefill=rendered_preset.prefill,
+                uid=sc.uid,
+                level=sc.level,
+                is_admin=(sc.uid == ADMIN_UID),
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -1096,6 +1105,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 召回日志（主动召回记录）
                 services["recall_logs"] = getattr(state, "recall_logs", None)
                 # TTS：该座位角色卡绑定音色 + 当前用户等级
+                services["data_dir"] = getattr(state, "data_dir", None)
+                services["sandbox_settings"] = getattr(
+                    getattr(state, "config", None), "sandbox", None
+                )
                 services["tts_voice"] = getattr(char, "voice", "") or ""
                 services["user_level"] = getattr(sc, "level", 0)
                 if char or world:
@@ -1279,6 +1292,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         depth_blocks=depth_specs + rendered_preset.depth_blocks,
                         extra_params=rendered_preset.params or None,
                         assistant_prefill=rendered_preset.prefill,
+                        uid=sc.uid,
+                        level=sc.level,
+                        is_admin=(sc.uid == ADMIN_UID),
                     ):
                         if ev == "done":
                             done_data = data
@@ -1544,6 +1560,10 @@ async def memory_snapshot(rid: str, request: Request,
             services["member"] = spk
             services["memory_vec_cache"] = getattr(state, "memory_vec_cache", None)
             services["char_memory"] = getattr(sc, "char_memory", None)
+            services["data_dir"] = getattr(state, "data_dir", None)
+            services["sandbox_settings"] = getattr(
+                getattr(state, "config", None), "sandbox", None
+            )
             # 存档动作：即使座位未挂载/只读，也强制写进角色记忆簿
             services["book_force_write"] = True
             services["llm_provider"] = spk_provider
@@ -1565,6 +1585,9 @@ async def memory_snapshot(rid: str, request: Request,
                 post_history_instructions=getattr(
                     char, "post_history_instructions", ""
                 ) or "",
+                uid=sc.uid,
+                level=sc.level,
+                is_admin=(sc.uid == ADMIN_UID),
             ):
                 if ev == "done":
                     done_data = data

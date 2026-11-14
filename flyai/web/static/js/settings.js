@@ -449,6 +449,18 @@ function fillAdminForm() {
   var galgame = state.config.galgame || {};
   if (el.setGalgameEnabled) el.setGalgameEnabled.checked = galgame.enabled !== false;
   el.setGalgameLoops.value = galgame.max_loops != null ? galgame.max_loops : 40;
+  // 沙箱与调度（旧配置/精简配置缺段时回退后端默认值）
+  var sb = state.config.sandbox || {};
+  if (el.setSandboxEnabled) el.setSandboxEnabled.checked = sb.enabled === true;
+  if (el.setSandboxMaxFileKb) el.setSandboxMaxFileKb.value = sb.max_file_kb != null ? sb.max_file_kb : 512;
+  if (el.setSandboxQuotaMb) el.setSandboxQuotaMb.value = sb.quota_mb != null ? sb.quota_mb : 10;
+  if (el.setSandboxPublicMaxFileKb) el.setSandboxPublicMaxFileKb.value = sb.public_max_file_kb != null ? sb.public_max_file_kb : 4096;
+  if (el.setSandboxPublicQuotaMb) el.setSandboxPublicQuotaMb.value = sb.public_quota_mb != null ? sb.public_quota_mb : 50;
+  var sch = state.config.scheduler || {};
+  if (el.setSchedulerEnabled) el.setSchedulerEnabled.checked = sch.enabled === true;
+  if (el.setSchedulerTimezone) el.setSchedulerTimezone.value = sch.timezone || "Asia/Shanghai";
+  if (el.setSchedulerTick) el.setSchedulerTick.value = sch.tick_seconds != null ? sch.tick_seconds : 30;
+  if (el.setSchedulerReminder) el.setSchedulerReminder.value = sch.reminder_check_seconds != null ? sch.reminder_check_seconds : 60;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -826,6 +838,19 @@ function saveConfig() {
     enabled: el.setGalgameEnabled ? !!el.setGalgameEnabled.checked : true,
     max_loops: galLoops,
   });
+  var sandbox = {
+    enabled: el.setSandboxEnabled ? !!el.setSandboxEnabled.checked : false,
+    max_file_kb: parseInt(el.setSandboxMaxFileKb && el.setSandboxMaxFileKb.value, 10) || 512,
+    quota_mb: parseInt(el.setSandboxQuotaMb && el.setSandboxQuotaMb.value, 10) || 10,
+    public_max_file_kb: parseInt(el.setSandboxPublicMaxFileKb && el.setSandboxPublicMaxFileKb.value, 10) || 4096,
+    public_quota_mb: parseInt(el.setSandboxPublicQuotaMb && el.setSandboxPublicQuotaMb.value, 10) || 50,
+  };
+  var scheduler = {
+    enabled: el.setSchedulerEnabled ? !!el.setSchedulerEnabled.checked : false,
+    timezone: (el.setSchedulerTimezone && el.setSchedulerTimezone.value.trim()) || "Asia/Shanghai",
+    tick_seconds: Math.max(5, parseInt(el.setSchedulerTick && el.setSchedulerTick.value, 10) || 30),
+    reminder_check_seconds: Math.max(5, parseInt(el.setSchedulerReminder && el.setSchedulerReminder.value, 10) || 60),
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -834,7 +859,7 @@ function saveConfig() {
       embeddings: embeddings, image_generation: imageGeneration,
       image_models: imageModels, stable_diffusion: stableDiffusion,
       pixiv: pixiv, web_search: webSearch, browser: browser, tts: tts,
-      galgame: galgame,
+      galgame: galgame, sandbox: sandbox, scheduler: scheduler,
     }),
   }).then(function (cfg) {
     state.config = cfg;

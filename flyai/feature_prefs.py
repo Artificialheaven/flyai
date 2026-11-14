@@ -37,6 +37,12 @@ TOOL_CATEGORIES = {
     "galgame_choice": "galgame",
     # 语音合成（仅全局，不在用户覆盖列表里，但过滤时要识别）
     "text_to_speech": "tts",
+    # 会话工作区沙箱（开关即 config.sandbox.enabled，仅全局）
+    "fs_list": "sandbox",
+    "fs_read": "sandbox",
+    "fs_write": "sandbox",
+    "fs_append": "sandbox",
+    "fs_delete": "sandbox",
 }
 
 # 类别 → (配置段名, 缺段/缺字段时的默认值)；默认值与各 Settings 类一致
@@ -47,6 +53,7 @@ _GLOBAL_FLAGS = {
     "image": ("image_generation", True),
     "galgame": ("galgame", True),
     "tts": ("tts", True),
+    "sandbox": ("sandbox", False),
 }
 
 # 类别 → UserSettings 上的覆盖字段名
@@ -164,7 +171,7 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None) -> Optional[
         return set()
 
     on_categories = {"base"}
-    for category in ("web", "browser", "pixiv", "image", "galgame", "tts"):
+    for category in ("web", "browser", "pixiv", "image", "galgame", "tts", "sandbox"):
         if feature_enabled(category, cfg, user_settings):
             on_categories.add(category)
 

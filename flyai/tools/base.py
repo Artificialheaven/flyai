@@ -35,6 +35,10 @@ class ToolContext:
     # 按请求注入的服务，如 {'lore': LoreQuerier}
     services: Dict[str, Any] = field(default_factory=dict)
     logger: Any = field(default_factory=lambda: logging.getLogger("flyai.tool"))
+    # 调用者身份（P0）：uid / 权限等级 / 是否管理员，注册表据此做执行期授权
+    uid: str = ""
+    level: int = 0
+    is_admin: bool = False
 
 
 class Tool(ABC):
@@ -45,6 +49,10 @@ class Tool(ABC):
     parameters: Dict[str, Any] = {"type": "object", "properties": {}}
     # 交互式工具（如等待用户选择）可能阻塞数分钟，注册表不对其施加超时
     interactive: bool = False
+    # 风险工具：注册表在执行期做权限校验（specs 只控制模型可见性，不负责授权）。
+    # risk=True 且 min_level<=0 时仅管理员可用；min_level=N>0 时等级≥N 或管理员可用。
+    risk: bool = False
+    min_level: int = 0
 
     @abstractmethod
     async def run(self, arguments: Dict[str, Any], ctx: ToolContext) -> ToolResult:
