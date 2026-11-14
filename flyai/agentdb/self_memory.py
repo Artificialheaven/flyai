@@ -31,6 +31,8 @@ class SelfMemoryStore:
         self.data_dir = Path(data_dir)
         self.settings = settings
         self.tzname = tzname
+        # P4：可选提示词注册表，None 时标题行用内置默认
+        self.prompts = None
         # 进程内索引缓存：uid -> (dirty_version, rows)；任何写操作 bump 版本
         self._index_ver: Dict[str, int] = {}
 
@@ -230,7 +232,11 @@ class SelfMemoryStore:
         if not hits:
             return ""
         budget = max(50, int(self.settings.recall_budget))
-        lines = ["【我的自我记忆】"]
+        if self.prompts is None:
+            header = "【我的自我记忆】"
+        else:
+            header = self.prompts.render("self_memory_header")
+        lines = [header]
         used = len(lines[0])
         for r in hits:
             line = "- " + r["statement"]

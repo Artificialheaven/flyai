@@ -444,6 +444,13 @@ async def run_agent_loop(
                             "name": it.get("name") or "",
                         })
                     loop_notice = render_interrupt_notice(items)
+                    # P4：提示词注册表可覆盖打断通知包装（默认恒等模板）
+                    continue_wrap = loop_services.get("loop_continue_wrap")
+                    if continue_wrap is not None:
+                        try:
+                            loop_notice = continue_wrap(loop_notice)
+                        except Exception:
+                            pass
             if loop_settings is not None and should_compact(
                 history, loop_ctx, loop_settings
             ):

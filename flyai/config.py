@@ -688,6 +688,72 @@ class ProactorSettings(BaseModel):
             return 12.0
 
 
+class McpSettings(BaseModel):
+    """MCP stdio 生态接入（P4）：自研精简 JSON-RPC 客户端，不依赖官方 SDK。
+
+    默认关闭。所有 mcp__ 工具 risk=True：call_min_level=0 时仅管理员可调用，
+    >0 时等级达标或管理员可调用。server 配置与工具 schema 缓存在 admin 的
+    agent.db，停机也能查看缓存。
+    """
+
+    enabled: bool = False
+    timeout: float = 30.0
+    call_min_level: int = 0
+
+    @validator("timeout")
+    def _clamp_timeout(cls, v):  # noqa: N805
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 30.0
+        return min(300.0, max(1.0, v))
+
+    @validator("call_min_level")
+    def _clamp_level(cls, v):  # noqa: N805
+        try:
+            return min(255, max(0, int(v)))
+        except (TypeError, ValueError):
+            return 0
+
+
+class ExtTriggerSettings(BaseModel):
+    """外部事件触发（P4）：独立 Bearer 令牌的 /api/ext/trigger 入口。
+
+    token 为空或 enabled=False 时端点直接禁用；令牌独立于用户登录令牌，
+    不下发给普通用户配置视图。
+    """
+
+    enabled: bool = False
+    token: str = ""
+    cooldown_seconds: int = 30
+    # watcher 回调地址前缀；空则按 server.host/port 拼本机回环
+    base_url: str = ""
+
+    @validator("cooldown_seconds")
+    def _clamp_cooldown(cls, v):  # noqa: N805
+        try:
+            return min(3600, max(1, int(v)))
+        except (TypeError, ValueError):
+            return 30
+
+    @validator("token", "base_url")
+    def _strip(cls, v):  # noqa: N805
+        return (v or "").strip()
+
+
+class WatcherSettings(BaseModel):
+    """监测进程（P4）：AI 写脚本、detached 子进程跑、经触发端点回调。"""
+
+    max_per_session: int = 5
+
+    @validator("max_per_session")
+    def _clamp_cap(cls, v):  # noqa: N805
+        try:
+            return min(20, max(1, int(v)))
+        except (TypeError, ValueError):
+            return 5
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -712,6 +778,9 @@ class AppConfig(BaseModel):
     mood: MoodSettings = MoodSettings()
     self_memory: SelfMemorySettings = SelfMemorySettings()
     proactor: ProactorSettings = ProactorSettings()
+    mcp: McpSettings = McpSettings()
+    ext_trigger: ExtTriggerSettings = ExtTriggerSettings()
+    watchers: WatcherSettings = WatcherSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

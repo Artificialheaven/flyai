@@ -31,9 +31,12 @@ from ..config import (
     SchedulerSettings,
     CustomToolSettings,
     LoopSettings,
+    McpSettings,
     MoodSettings,
+    ExtTriggerSettings,
     ProactorSettings,
     SelfMemorySettings,
+    WatcherSettings,
     mask_api_key,
     save_config,
 )
@@ -103,6 +106,10 @@ class ConfigPayload(BaseModel):
     mood: Optional[dict] = None
     self_memory: Optional[dict] = None
     proactor: Optional[dict] = None
+    # P4 生态扩展：mcp/watchers 无密钥；ext_trigger 含令牌，单独脱敏
+    mcp: Optional[dict] = None
+    ext_trigger: Optional[dict] = None
+    watchers: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -201,12 +208,20 @@ def _masked_config(state, uid: Optional[str] = None):
         "mood": cfg.mood.dict(),
         "self_memory": cfg.self_memory.dict(),
         "proactor": cfg.proactor.dict(),
+        # P4：mcp/watchers 不含密钥，同策略对所有登录用户可见
+        "mcp": cfg.mcp.dict(),
+        "watchers": cfg.watchers.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
         emb = cfg.embeddings.dict()
         emb["api_key"] = mask_api_key(cfg.embeddings.api_key) if cfg.embeddings.api_key else ""
         out["embeddings"] = emb
+        # 外部触发令牌绝不下发明文，只给「是否已配置」标志位
+        ext = cfg.ext_trigger.dict()
+        ext["token_set"] = bool(ext.get("token"))
+        ext["token"] = ""
+        out["ext_trigger"] = ext
     return out
 
 
@@ -357,6 +372,30 @@ def put_config(payload: ConfigPayload, request: Request):
     if payload.proactor is not None:
         # ticker 每 tick 读 store.settings，保存后自然热生效
         cfg.proactor = ProactorSettings.parse_obj(dict(payload.proactor))
+
+    if payload.mcp is not None:
+        # _reload_tools 会把新设置同步给 mcp_manager
+        cfg.mcp = McpSettings.parse_obj(dict(payload.mcp))
+
+    if payload.watchers is not None:
+        cfg.watchers = WatcherSettings.parse_obj(dict(payload.watchers))
+        watcher_mgr = getattr(state, "watcher_manager", None)
+        if watcher_mgr is not None:
+            watcher_mgr.settings = cfg.watchers
+
+    if payload.ext_trigger is not None:
+        # 空令牌=不改原令牌（前端只拿得到 token_set 标志位）
+        data = dict(payload.ext_trigger)
+        incoming = (data.get("token") or "").strip()
+        if not incoming:
+            data["token"] = cfg.ext_trigger.token
+        cfg.ext_trigger = ExtTriggerSettings.parse_obj(data)
+        cooldown = getattr(state, "trigger_cooldown", None)
+        if cooldown is not None:
+            cooldown.cooldown_seconds = cfg.ext_trigger.cooldown_seconds
+        watcher_mgr = getattr(state, "watcher_manager", None)
+        if watcher_mgr is not None:
+            watcher_mgr.ext_settings = cfg.ext_trigger
 
     _persist(state)
     if scheduler_changed:

@@ -102,6 +102,11 @@ class AppState:
     commitment_store: Optional[Any] = None
     # 判定模型派生 provider 缓存：(provider_id, model) -> provider
     _judge_providers: Dict[str, Any] = field(default_factory=dict)
+    # P4 生态扩展：MCP 连接管理 / watcher / 提示词注册表 / 外部触发冷却
+    mcp_manager: Optional[Any] = None
+    watcher_manager: Optional[Any] = None
+    prompt_registry: Optional[Any] = None
+    trigger_cooldown: Optional[Any] = None
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -349,6 +354,20 @@ class AppState:
 
         for proactor_tool_cls in PROACTOR_TOOLS:
             self.registry.register(proactor_tool_cls())
+        # P4：MCP 设置热同步给管理器；watcher 管理三件套随 mcp 生态总闸注册
+        # （桥接工具 mcp__* 是请求级 extras，不进全局表）
+        if self.mcp_manager is not None:
+            self.mcp_manager.settings = self.config.mcp
+        if self.watcher_manager is not None:
+            self.watcher_manager.settings = self.config.watchers
+            self.watcher_manager.ext_settings = self.config.ext_trigger
+        if self.config.mcp.enabled and self.watcher_manager is not None:
+            from .tools.watcher_tools import WATCHER_TOOLS
+
+            for watcher_tool_cls in WATCHER_TOOLS:
+                # 重名时跳过（reload 会重建注册表，正常不会撞上）
+                if self.registry.get(watcher_tool_cls.name) is None:
+                    self.registry.register(watcher_tool_cls())
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -437,17 +456,55 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         )
         state.job_store = JobStore(data_dir, tzname)
         state.commitment_store = CommitmentStore(data_dir)
+        # P4：提示词注册表/外部触发冷却/MCP 管理器（admin agent.db + 懒连接）
+        from .mcp_client.manager import McpManager
+        from .proactor.prompt_registry import PromptRegistry
+        from .proactor.trigger import TriggerCooldown
+
+        state.prompt_registry = PromptRegistry(data_dir)
+        state.trigger_cooldown = TriggerCooldown(
+            int(state.config.ext_trigger.cooldown_seconds)
+        )
+        state.mcp_manager = McpManager(data_dir, state.config.mcp)
+        # P3 存储可选挂载注册表：未挂载时各自退回内置默认文本
+        state.mood_store.prompts = state.prompt_registry
+        state.self_memory_store.prompts = state.prompt_registry
         state.reload_tools()
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
         # 公共市场（跨用户）：条目元数据 + 快照载荷，目录由 store 自建
         state.market = MarketStore(data_dir / "market")
+        # P4 watcher：依赖用户库做全量 reconcile，故在 user_store 就绪后创建
+        from .proactor.watchers import WatcherManager
+
+        state.watcher_manager = WatcherManager(
+            data_dir, state.config.watchers, state.config.ext_trigger,
+            state.user_store,
+        )
+        try:
+            watcher_stopped = state.watcher_manager.reconcile_all()
+            if watcher_stopped:
+                logger.warning(
+                    "watcher reconcile：%d 个遗留进程标记 stopped",
+                    watcher_stopped,
+                )
+        except Exception:
+            logger.exception("watcher reconcile 失败，不阻断启动")
+        # MCP 媒体 6h TTL 启动清扫
+        try:
+            swept = state.mcp_manager.sweep_media()
+            if swept:
+                logger.info("MCP 媒体清扫：删除 %d 个过期文件", swept)
+        except Exception:
+            logger.exception("MCP 媒体清扫失败，不阻断启动")
         # AI 浏览器管理器已在 reload_tools 内按启用状态懒创建
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         # 后台调度服务：enabled=false 时内部直接待命，领导锁保证多 worker 单实例
         state.scheduler = SchedulerService(state)
-        state.scheduler.add_ticker(ProactorTicker(state, state.proactor_store))
+        proactor_ticker = ProactorTicker(state, state.proactor_store)
+        proactor_ticker.prompts = state.prompt_registry
+        state.scheduler.add_ticker(proactor_ticker)
         state.scheduler.add_ticker(JobTicker(state, state.job_store))
         state.scheduler.add_ticker(ReminderTicker(
             state, state.commitment_store, state.proactor_store,
@@ -465,6 +522,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         yield
         if state.scheduler is not None:
             await state.scheduler.aclose()
+        if state.mcp_manager is not None:
+            await state.mcp_manager.aclose()
         await state.run_manager.aclose()
         if state.browser is not None:
             await state.browser.aclose()
@@ -506,7 +565,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         return resp
 
     # 路由
+    from .api.routes_agentdb import router as agentdb_router
     from .api.routes_auth import router as auth_router
+    from .api.routes_ext import router as ext_router
     from .api.routes_chat import router as chat_router
     from .api.routes_config import router as config_router
     from .api.routes_galgame import router as galgame_router
@@ -521,9 +582,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
 
+    app.include_router(agentdb_router)
     app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(config_router)
+    app.include_router(ext_router)
     app.include_router(galgame_router)
     app.include_router(gen_router)
     app.include_router(lore_router)

@@ -183,6 +183,16 @@ function cacheElements() {
   el.setProCooldown = document.getElementById("set-pro-cooldown");
   el.setProQuiet = document.getElementById("set-pro-quiet");
   el.setProPollsMax = document.getElementById("set-pro-polls-max");
+  // P4 MCP 生态 / 外部触发 / watcher
+  el.setMcpEnabled = document.getElementById("set-mcp-enabled");
+  el.setMcpTimeout = document.getElementById("set-mcp-timeout");
+  el.setMcpMinlevel = document.getElementById("set-mcp-minlevel");
+  el.setExtEnabled = document.getElementById("set-ext-enabled");
+  el.setExtToken = document.getElementById("set-ext-token");
+  el.extTokenHint = document.getElementById("ext-token-hint");
+  el.setExtCooldown = document.getElementById("set-ext-cooldown");
+  el.setExtBaseUrl = document.getElementById("set-ext-base-url");
+  el.setWatchersMax = document.getElementById("set-watchers-max");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");

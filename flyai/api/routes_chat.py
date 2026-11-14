@@ -92,6 +92,24 @@ def _custom_extras(state, sc, session_id: str) -> list:
         return []
 
 
+def _mcp_extras(state) -> list:
+    """P4：从 admin 的 MCP 工具缓存生成请求级 mcp__ 桥接工具。
+
+    桥接工具对全体登录用户可见（risk 门禁在注册表层执行），连接本身懒建立，
+    因此这里只读缓存不拉起子进程；任何异常都降级为空列表。
+    """
+    manager = getattr(state, "mcp_manager", None)
+    if manager is None or not getattr(
+        getattr(manager, "settings", None), "enabled", False
+    ):
+        return []
+    try:
+        return manager.bridge_tools()
+    except Exception:
+        logger.exception("MCP 桥接工具加载失败，本轮跳过")
+        return []
+
+
 # ---- P2 长跑：服务钩子构建 / 压缩摘要 / 收尾 / 免审批启动 ----
 
 _COMPACT_DIRECTIVE = (
@@ -101,10 +119,11 @@ _COMPACT_DIRECTIVE = (
 )
 
 
-async def _summarize_for_compact(provider, head_text: str) -> str:
+async def _summarize_for_compact(provider, head_text: str,
+                                 directive: Optional[str] = None) -> str:
     """用当前提供商做一次无工具便宜调用归纳头部历史；失败不阻断长跑。"""
     msgs = [
-        Message(role="system", content=_COMPACT_DIRECTIVE),
+        Message(role="system", content=directive or _COMPACT_DIRECTIVE),
         Message(role="user", content=head_text or "（无历史）"),
     ]
     parts: List[str] = []
@@ -181,11 +200,24 @@ def _install_loop_services(services: dict, state, sc, loop_ctx: Optional[LoopCon
         await asyncio.to_thread(mgr.refresh, sc.uid, ctx)
 
     async def _compact_hook(head_text: str) -> str:
-        return await _summarize_for_compact(provider, head_text)
+        registry = getattr(state, "prompt_registry", None)
+        directive = (
+            registry.render("compact") if registry is not None
+            else _COMPACT_DIRECTIVE
+        )
+        return await _summarize_for_compact(provider, head_text, directive)
 
     services["loop_state"] = _state_hook
     services["loop_compact"] = _compact_hook
     services["interrupt_hub"] = getattr(state, "interrupt_hub", None)
+
+    def _continue_wrap(notice: str) -> str:
+        registry = getattr(state, "prompt_registry", None)
+        if registry is None:
+            return notice
+        return registry.render("loop_continue", notice=notice)
+
+    services["loop_continue_wrap"] = _continue_wrap
     if loop_starter is not None:
         services["loop_starter"] = loop_starter
 
@@ -761,6 +793,13 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         )
         if existing is not None:
             raise HTTPException(409, "该会话已有运行中的长跑任务")
+        # P4：长跑首条消息走提示词注册表 loop_start 包装（默认恒等模板，
+        # 行为不变）；loop_task 局部变量保留原文供状态机记录
+        registry = getattr(state, "prompt_registry", None)
+        if registry is not None:
+            req.message = registry.render(
+                "loop_start", task=req.message or loop_task
+            )
 
     # 会话级互斥快速预检（权威 check-and-set 在各路径落消息前完成）：
     # 同一房间任意窗口有运行中的回答 → 普通会话拒绝；长跑会话改道打断队列
@@ -811,8 +850,10 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     _registry = getattr(state, "registry", None)
     # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
     custom_extras = _custom_extras(state, sc, session.id)
+    # P4 请求级 MCP 桥接工具（admin 库缓存，mcp__ 前缀按类别放行）
+    mcp_extras = _mcp_extras(state)
     # P2 长跑：追加仅长跑可见的 loop_finish
-    loop_extras = _loop_extras(custom_extras, loop_ctx)
+    loop_extras = _loop_extras(custom_extras + mcp_extras, loop_ctx)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -836,6 +877,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     )
     # P1 自定义工具管理五件套据此打开调用者自己的 agent.db
     services["custom_runtime"] = getattr(state, "custom_runtime", None)
+    # P4：MCP 桥接工具与 watcher 管理工具的运行时（工具内自行做启用/门禁判断）
+    services["mcp_manager"] = getattr(state, "mcp_manager", None)
+    services["watcher_manager"] = getattr(state, "watcher_manager", None)
     # 召回日志（主动召回记录）
     services["recall_logs"] = getattr(state, "recall_logs", None)
     # TTS：角色卡绑定音色 + 当前用户等级（工具内解析/鉴权）
@@ -1208,8 +1252,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     _registry = getattr(state, "registry", None)
     # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
     custom_extras = _custom_extras(state, sc, session.id)
+    # P4 请求级 MCP 桥接工具（admin 库缓存，mcp__ 前缀按类别放行）
+    mcp_extras = _mcp_extras(state)
     # P2 长跑：追加仅长跑可见的 loop_finish
-    loop_extras = _loop_extras(custom_extras, loop_ctx)
+    loop_extras = _loop_extras(custom_extras + mcp_extras, loop_ctx)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -1442,6 +1488,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     getattr(state, "config", None), "sandbox", None
                 )
                 services["custom_runtime"] = getattr(state, "custom_runtime", None)
+                # P4：MCP 桥接与 watcher 管理运行时
+                services["mcp_manager"] = getattr(state, "mcp_manager", None)
+                services["watcher_manager"] = getattr(state, "watcher_manager", None)
                 services["tts_voice"] = getattr(char, "voice", "") or ""
                 services["user_level"] = getattr(sc, "level", 0)
                 if char or world:

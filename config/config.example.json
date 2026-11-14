@@ -191,9 +191,22 @@
     "wake_every_n": 20,
     "active_hours": 12.0,
     "speakup_peak_percent": 20,
-    "speakup_valley_percent": 60,
     "self_cooldown_minutes": 20,
     "quiet_hours": "01:00-08:00",
     "polls_max_per_session": 10
+  },
+  "mcp": {
+    "enabled": false,
+    "timeout": 30.0,
+    "call_min_level": 0
+  },
+  "ext_trigger": {
+    "enabled": false,
+    "token": "",
+    "cooldown_seconds": 30,
+    "base_url": ""
+  },
+  "watchers": {
+    "max_per_session": 5
   }
 }

@@ -248,6 +248,15 @@ class ProactorTicker:
         self.now_provider = now_provider
         self._last_tick = 0.0
         self._fire = fire  # 测试可 monkeypatch
+        # P4：可选提示词注册表，None 时用内置默认 brief（行为与 P3 一致）
+        self.prompts = None
+
+    def _notice(self, key: str) -> str:
+        if self.prompts is None:
+            from .prompt_registry import PROMPT_PARTITIONS
+
+            return PROMPT_PARTITIONS[key].default
+        return self.prompts.render(key)
 
     async def initialize(self) -> None:
         self._last_tick = 0.0
@@ -305,10 +314,7 @@ class ProactorTicker:
                 res = await self._fire(
                     self.state, uid, sid,
                     kind="wake-notice",
-                    brief=(
-                        "【系统唤醒】现在是你主动开启话题的时机：基于最近的对话，"
-                        "用一句口语化的话联系对方；如果确实没什么可说，回复 [静默]。"
-                    ),
+                    brief=self._notice("wake_notice"),
                     allow_silent=True, with_history=True,
                 )
                 if res.get("ok"):
@@ -333,10 +339,7 @@ class ProactorTicker:
                 res = await self._fire(
                     self.state, uid, sid,
                     kind="speakup-notice",
-                    brief=(
-                        "【主动搭话】挑一个轻松自然的话题主动说点什么，"
-                        "贴合人设与最近的对话；不想发言就回复 [静默]。"
-                    ),
+                    brief=self._notice("speakup_notice"),
                     allow_silent=True, with_history=True,
                 )
                 if res.get("ok"):

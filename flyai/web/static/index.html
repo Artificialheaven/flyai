@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FlyAI</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261114a" />
+  <link rel="stylesheet" href="/static/style.css?v=20261114b" />
 </head>
 <body class="theme-dark">
   <!-- 自定义聊天背景层（个性化页设置；无背景图时不渲染图片） -->
@@ -421,6 +421,7 @@
             <button type="button" class="m-row" data-goto="browser"><span class="m-label">AI 浏览器</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
             <button type="button" class="m-row" data-goto="galgame"><span class="m-label">Galgame 模式</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
             <button type="button" class="m-row" data-goto="sandbox"><span class="m-label">沙箱与调度</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
+            <button type="button" class="m-row" data-goto="mcp"><span class="m-label">MCP 生态与外部触发</span><svg class="m-arrow"><use href="#i-chevron-right"/></svg></button>
           </div>
         </div>
       </section>
@@ -895,6 +896,68 @@
         </div>
       </section>
 
+      <!-- ============ MCP 生态与外部触发（管理员，P4） ============ -->
+      <section class="m-page admin-only" data-page="mcp">
+        <header class="m-page-head m-mobile-head">
+          <button type="button" class="m-back" title="返回"><svg><use href="#i-back"/></svg></button>
+          <span class="m-page-title">MCP 生态与外部触发</span>
+        </header>
+        <div class="m-page-content">
+          <h4>MCP 生态</h4>
+          <p class="sub">启用后可登记 stdio MCP server，外部工具以 mcp__server__tool 命名按请求注入，全部为风险工具，执行期按等级/管理员门禁拦截。连接懒建立，遇 EOF/超时自动重连一次；图片/音频结果落盘到会话工作区 workspace/mcp/。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-mcp-enabled" /> 启用 MCP 生态（同时放开 watcher_* 管理工具）</label>
+          <label class="f-label">连接超时（秒，1–300）
+            <input type="number" id="set-mcp-timeout" value="30" min="1" max="300" step="0.5" />
+          </label>
+          <label class="f-label">MCP 工具调用最低等级（0=仅管理员；管理员恒可用）
+            <input type="number" id="set-mcp-minlevel" value="0" min="0" max="255" />
+          </label>
+
+          <h4>外部触发端点</h4>
+          <p class="sub">独立于登录态的 Bearer 令牌：POST /api/ext/trigger，供 watcher 脚本或外部系统回调，事件入队为后台 ChatRun。未启用时端点对外表现为 404；同一（会话, 来源）有冷却窗口。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-ext-enabled" /> 启用外部触发端点</label>
+          <label class="f-label">访问令牌（只写：<span id="ext-token-hint">未配置</span>；留空保存不修改原令牌）
+            <input type="password" id="set-ext-token" value="" placeholder="填入新令牌后随保存生效" autocomplete="new-password" />
+          </label>
+          <label class="f-label">冷却时间（秒，1–3600）
+            <input type="number" id="set-ext-cooldown" value="30" min="1" max="3600" />
+          </label>
+          <label class="f-label">对外 Base URL（watcher 回调地址前缀，留空则 watcher 无法拼 URL）
+            <input type="text" id="set-ext-base-url" placeholder="https://你的域名" />
+          </label>
+
+          <h4>Watcher 监测进程</h4>
+          <p class="sub">AI 经沙箱写入会话工作区的 .py 脚本可作为 detached 进程常驻，通过 TRIGGER_* 环境变量回调触发端点。每会话有数量上限；主进程重启后只探活标记，不自动重启。</p>
+          <label class="f-label">每会话运行中 watcher 上限（1–20）
+            <input type="number" id="set-watchers-max" value="5" min="1" max="20" />
+          </label>
+          <div class="m-page-actions">
+            <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>
+          </div>
+
+          <h4>MCP Server 登记</h4>
+          <p class="sub">server_id 匹配 ^[a-z][a-z0-9_]{0,31}$；args 为 JSON 数组、env 为 JSON 对象。保存后点「测试连接」拉取工具清单，状态 failed 时旧清单保留但可能过期。</p>
+          <div class="mcp-bar">
+            <button type="button" class="btn small" id="btn-mcp-add">＋ 新增 server</button>
+            <span id="mcp-msg" class="mcp-msg"></span>
+          </div>
+          <div id="mcp-server-list" class="mcp-list"></div>
+
+          <h4>提示词分区</h4>
+          <p class="sub">七处内置提示词可覆盖；白名单占位符（如 {task}）运行时替换，未知 {'{...}' 原样保留。留空保存等于恢复默认。</p>
+          <div id="prompt-msg" class="mcp-msg"></div>
+          <div id="prompt-list" class="prompt-list"></div>
+
+          <h4>Watcher 进程列表</h4>
+          <div class="mcp-bar">
+            <button type="button" class="btn small" id="btn-watcher-refresh">刷新</button>
+            <button type="button" class="btn small" id="btn-watcher-reconcile">重新探活</button>
+            <span id="watcher-msg" class="mcp-msg"></span>
+          </div>
+          <div id="watcher-list" class="mcp-list"></div>
+        </div>
+      </section>
+
       <!-- ============ 服务协议 ============ -->
       <section class="m-page m-menu-only" data-page="agreement">
         <header class="m-page-head">
@@ -949,6 +1012,32 @@
       </div>
     </div>
   </dialog>
+  <!-- MCP server 新增/编辑弹窗（P4） -->
+  <dialog id="mcp-server-dialog">
+    <div class="dialog-body">
+      <h3 id="mcp-dlg-title">新增 MCP server</h3>
+      <p class="sub">stdio 传输：主进程以该命令拉起子进程，换行分帧 JSON-RPC。子进程环境会剥离密钥变量，仅显式配置的 env 叠加注入。</p>
+      <label class="f-label">server_id（小写字母开头，仅小写字母数字下划线，≤32 字符）
+        <input type="text" id="mcp-dlg-id" placeholder="demo_server" />
+      </label>
+      <label class="f-label">启动命令
+        <input type="text" id="mcp-dlg-command" placeholder="python" />
+      </label>
+      <label class="f-label">参数（JSON 数组，每行一个或写单行均可）
+        <textarea id="mcp-dlg-args" rows="3" placeholder='["server.py", "--port", "9000"]'></textarea>
+      </label>
+      <label class="f-label">环境变量（JSON 对象；密钥类变量名会被剥离逻辑拦截提示）
+        <textarea id="mcp-dlg-env" rows="3" placeholder='{"WORKDIR": "/tmp"}'></textarea>
+      </label>
+      <label class="f-label toggle"><input type="checkbox" id="mcp-dlg-enabled" checked /> 启用（停用后桥接工具不注入、调用直接拒绝）</label>
+      <div id="mcp-dlg-msg" class="mcp-msg"></div>
+      <div class="dialog-actions">
+        <button id="btn-mcp-dlg-cancel" class="btn">取 消</button>
+        <button id="btn-mcp-dlg-save" class="btn primary">保 存</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 内容管理弹窗 -->
   <dialog id="lore-dialog">
     <div class="dialog-body" id="lore-body"></div>
@@ -1529,7 +1618,7 @@
   <script src="/static/js/native.js?v=20261011a"></script>
   <script src="/static/js/app.js?v=20261011b"></script>
   <script src="/static/js/auth.js?v=20261011b"></script>
-  <script src="/static/js/ui.js?v=20261011b"></script>
+  <script src="/static/js/ui.js?v=20261114a"></script>
   <script src="/static/js/sessions.js?v=20261009k"></script>
   <script src="/static/js/rooms.js?v=20261011f"></script>
   <script src="/static/js/compress.js?v=20261011a"></script>
@@ -1550,6 +1639,7 @@
   <script src="/static/js/memory-manager.js?v=20261010a"></script>
   <script src="/static/js/loop.js?v=20261114a"></script>
   <script src="/static/js/proactor.js?v=20261114a"></script>
-  <script src="/static/js/settings.js?v=20261114b"></script>
+  <script src="/static/js/mcp.js?v=20261114a"></script>
+  <script src="/static/js/settings.js?v=20261114c"></script>
 </body>
 </html>

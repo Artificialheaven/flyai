@@ -2733,3 +2733,38 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   margin-top: 6px; padding: 6px 10px; border-radius: 8px;
   border-left: 3px solid var(--warn); font-size: 12px;
 }
+
+/* ===== P4：MCP 生态 / 外部触发 / watcher / 提示词分区 ===== */
+.mcp-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.mcp-msg { font-size: 12px; color: var(--text-dim); }
+.mcp-msg.ok { color: var(--ok); }
+.mcp-msg.err { color: var(--err); }
+.mcp-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 14px; }
+.mcp-row { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.mcp-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border-strong); color: var(--text-dim);
+  white-space: nowrap;
+}
+.mcp-badge.ok { color: var(--ok); border-color: var(--ok); }
+.mcp-badge.err { color: var(--err); border-color: var(--err); }
+.mcp-badge.dim { color: var(--text-dim); }
+.mcp-err {
+  margin-top: 4px; font-size: 12px; color: var(--err);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mcp-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.mcp-chips { margin: 6px 0; font-size: 12px; color: var(--text-dim); }
+.mcp-chip {
+  display: inline-block; padding: 1px 7px; margin: 2px 2px 0 0;
+  border: 1px solid var(--border); border-radius: 999px;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+}
+.prompt-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 14px; }
+.prompt-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.prompt-card .prompt-text {
+  width: 100%; box-sizing: border-box; margin-top: 6px;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+}
+.prompt-default { margin-top: 6px; font-size: 12px; }
+.prompt-default summary { color: var(--text-dim); cursor: pointer; }

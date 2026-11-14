@@ -58,7 +58,12 @@ TOOL_CATEGORIES = {
     # P3 承诺/提醒（随主动行为总闸，默认关）
     "remember_commitment": "proactor",
     "close_commitment": "proactor",
-    # 已上线的自定义函数工具名是动态的（custom__<name>），按前缀识别
+    # P4 监测进程管理三件套（risk=admin，可见性随 mcp 生态总闸）
+    "watcher_start": "mcp",
+    "watcher_stop": "mcp",
+    "watcher_list": "mcp",
+    # 已上线的自定义函数工具名是动态的（custom__<name>），按前缀识别；
+    # mcp__<server>__<tool> 同为请求级动态工具，也不进这张静态表
 }
 
 # 类别 → (配置段名, 缺段/缺字段时的默认值)；默认值与各 Settings 类一致
@@ -74,6 +79,7 @@ _GLOBAL_FLAGS = {
     "loop": ("loop", False),
     "self_memory": ("self_memory", True),
     "proactor": ("proactor", False),
+    "mcp": ("mcp", False),
 }
 
 # 类别 → UserSettings 上的覆盖字段名
@@ -196,7 +202,7 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
     on_categories = {"base"}
     for category in ("web", "browser", "pixiv", "image", "galgame", "tts",
                      "sandbox", "custom_tools", "loop", "self_memory",
-                     "proactor"):
+                     "proactor", "mcp"):
         if feature_enabled(category, cfg, user_settings):
             on_categories.add(category)
 
@@ -207,12 +213,16 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
             allowed.add(tool.name)
     if extra_names:
         # 请求级工具白名单：自定义函数只放行合法前缀；
-        # loop_finish 仅在 loop 类别开启时按精确名放行
+        # loop_finish 仅在 loop 类别开启时按精确名放行；
+        # mcp__ 桥接工具仅在 mcp 类别开启时按前缀放行
         if "custom_tools" in on_categories:
             allowed |= {n for n in extra_names
                         if isinstance(n, str) and n.startswith("custom__")}
         if "loop" in on_categories:
             allowed |= {n for n in extra_names if n == "loop_finish"}
+        if "mcp" in on_categories:
+            allowed |= {n for n in extra_names
+                        if isinstance(n, str) and n.startswith("mcp__")}
     if disabled:
         allowed -= {str(n) for n in disabled if isinstance(n, str)}
     return allowed

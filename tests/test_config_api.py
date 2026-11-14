@@ -573,3 +573,57 @@ def test_tts_min_level_clamped(tmp_path):
         "min_level": -5,
     }), _req(state))
     assert state.config.tts.min_level == 0
+
+
+# ---- P4 外部触发令牌：只允许 token_set 标志位下发，明文绝不离开服务端 ----
+
+def test_ext_trigger_token_never_leaked(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(ext_trigger={
+        "enabled": True,
+        "token": "top-secret-token",
+        "cooldown_seconds": 45,
+        "base_url": "https://h.example",
+    }), _req(state))
+    view = get_config(_req(state))
+    ext = view["ext_trigger"]
+    assert ext["token"] == ""
+    assert ext["token_set"] is True
+    assert ext["cooldown_seconds"] == 45
+    assert "top-secret-token" not in str(view)
+
+    # 空令牌保存 = 不改原令牌（前端只有 token_set 标志位）
+    put_config(ConfigPayload(ext_trigger={
+        "enabled": True,
+        "token": "",
+        "cooldown_seconds": 60,
+        "base_url": "https://h.example",
+    }), _req(state))
+    assert state.config.ext_trigger.token == "top-secret-token"
+
+    # 新令牌正常覆盖
+    put_config(ConfigPayload(ext_trigger={
+        "enabled": True,
+        "token": "rotated-token",
+        "cooldown_seconds": 60,
+        "base_url": "https://h.example",
+    }), _req(state))
+    assert state.config.ext_trigger.token == "rotated-token"
+
+
+def test_ext_trigger_section_hidden_from_non_admin(tmp_path):
+    state = _mkstate(tmp_path)
+    state.user_store.add("u10", level=10)
+    put_config(ConfigPayload(ext_trigger={
+        "enabled": True,
+        "token": "top-secret-token",
+        "cooldown_seconds": 30,
+        "base_url": "https://h.example",
+    }), _req(state))
+    view = get_config(_req(state, "u10"))
+    # 普通用户视图完全没有 ext_trigger 段，令牌与 token_set 都不可见
+    assert "ext_trigger" not in view
+    assert "top-secret-token" not in str(view)
+    # 无密钥的 mcp/watchers 段仍对所有登录用户下发
+    assert view["mcp"]["enabled"] is False
+    assert view["watchers"]["max_per_session"] == 5

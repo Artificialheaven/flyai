@@ -502,6 +502,19 @@ function fillAdminForm() {
   if (el.setProCooldown) el.setProCooldown.value = pro.self_cooldown_minutes != null ? pro.self_cooldown_minutes : 20;
   if (el.setProQuiet) el.setProQuiet.value = pro.quiet_hours || "01:00-08:00";
   if (el.setProPollsMax) el.setProPollsMax.value = pro.polls_max_per_session != null ? pro.polls_max_per_session : 10;
+  // P4 MCP / 外部触发 / watcher（旧配置缺段回退后端默认值；令牌只写不回显）
+  var mcp = state.config.mcp || {};
+  if (el.setMcpEnabled) el.setMcpEnabled.checked = mcp.enabled === true;
+  if (el.setMcpTimeout) el.setMcpTimeout.value = mcp.timeout != null ? mcp.timeout : 30;
+  if (el.setMcpMinlevel) el.setMcpMinlevel.value = mcp.call_min_level != null ? mcp.call_min_level : 0;
+  var ext = state.config.ext_trigger || {};
+  if (el.setExtEnabled) el.setExtEnabled.checked = ext.enabled === true;
+  if (el.setExtToken) el.setExtToken.value = "";
+  if (el.extTokenHint) el.extTokenHint.textContent = ext.token_set ? "已配置" : "未配置";
+  if (el.setExtCooldown) el.setExtCooldown.value = ext.cooldown_seconds != null ? ext.cooldown_seconds : 30;
+  if (el.setExtBaseUrl) el.setExtBaseUrl.value = ext.base_url || "";
+  var wt = state.config.watchers || {};
+  if (el.setWatchersMax) el.setWatchersMax.value = wt.max_per_session != null ? wt.max_per_session : 5;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -938,6 +951,21 @@ function saveConfig() {
     quiet_hours: (el.setProQuiet && el.setProQuiet.value || "").trim() || "01:00-08:00",
     polls_max_per_session: Math.max(1, parseInt(el.setProPollsMax && el.setProPollsMax.value, 10) || 10),
   };
+  // P4 三段：钳制范围与后端 pydantic 校验保持一致；令牌留空=后端保留原值
+  var mcpSettings = {
+    enabled: el.setMcpEnabled ? !!el.setMcpEnabled.checked : false,
+    timeout: Math.max(1, Math.min(300, parseFloat(el.setMcpTimeout && el.setMcpTimeout.value) || 30)),
+    call_min_level: Math.max(0, Math.min(255, parseInt(el.setMcpMinlevel && el.setMcpMinlevel.value, 10) || 0)),
+  };
+  var extSettings = {
+    enabled: el.setExtEnabled ? !!el.setExtEnabled.checked : false,
+    token: el.setExtToken ? el.setExtToken.value : "",
+    cooldown_seconds: Math.max(1, Math.min(3600, parseInt(el.setExtCooldown && el.setExtCooldown.value, 10) || 30)),
+    base_url: (el.setExtBaseUrl && el.setExtBaseUrl.value || "").trim(),
+  };
+  var watcherSettings = {
+    max_per_session: Math.max(1, Math.min(20, parseInt(el.setWatchersMax && el.setWatchersMax.value, 10) || 5)),
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -949,14 +977,20 @@ function saveConfig() {
       galgame: galgame, sandbox: sandbox, scheduler: scheduler,
       custom_tools: customTools, loop: loopSettings,
       mood: moodSettings, self_memory: selfMemorySettings, proactor: proactorSettings,
+      mcp: mcpSettings, ext_trigger: extSettings, watchers: watcherSettings,
     }),
   }).then(function (cfg) {
     state.config = cfg;
     el.configMsg.textContent = "已保存并即时生效"; el.configMsg.className = "msg-bar ok";
+    if (el.extTokenHint && cfg.ext_trigger) {
+      el.extTokenHint.textContent = cfg.ext_trigger.token_set ? "已配置" : "未配置";
+    }
+    if (el.setExtToken) el.setExtToken.value = "";
     el.dialog.close();
     renderProviderBar();
     if (window.updateLoopButton) updateLoopButton();
     if (window.updateProactorButtons) updateProactorButtons();
+    if (window.refreshMcpEcosystem) refreshMcpEcosystem();
     return fetchJSON("/api/plugins");
   }).then(function (r) { state.plugins = r.plugins || []; })
     .catch(function (e) {

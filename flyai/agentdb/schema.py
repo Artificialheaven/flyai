@@ -201,6 +201,50 @@ MIGRATIONS: Dict[int, List[str]] = {
         )
         """,
     ],
+    5: [
+        # P4 MCP stdio server 登记：工具 schema 缓存落库，停机仍可查看
+        """
+        CREATE TABLE IF NOT EXISTS mcp_servers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id   TEXT NOT NULL UNIQUE,
+            command     TEXT NOT NULL,
+            args        TEXT NOT NULL DEFAULT '[]',
+            env         TEXT NOT NULL DEFAULT '{}',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            -- new|ready|failed：连接测试后更新；failed 不删除缓存
+            status      TEXT NOT NULL DEFAULT 'new',
+            tools_json  TEXT NOT NULL DEFAULT '[]',
+            last_error  TEXT NOT NULL DEFAULT '',
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_mcp_enabled ON mcp_servers(enabled)",
+        # P4 监测进程：detached 子进程登记，重启 reconcile 的权威依据
+        """
+        CREATE TABLE IF NOT EXISTS watchers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            script_path TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'watcher',
+            pid         INTEGER NOT NULL DEFAULT 0,
+            -- running|stopped：刻意不做崩溃自动重启，死透即 stopped
+            status      TEXT NOT NULL DEFAULT 'running',
+            log_path    TEXT NOT NULL DEFAULT '',
+            created_at  REAL NOT NULL,
+            stopped_at  REAL NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_watchers_status ON watchers(status, session_id)",
+        # P4 提示词注册表覆盖：只存被改过的分区，默认文本在代码里
+        """
+        CREATE TABLE IF NOT EXISTS prompt_overrides (
+            key        TEXT PRIMARY KEY,
+            text       TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """,
+    ],
 }
 
 DB_VERSION = max(MIGRATIONS)

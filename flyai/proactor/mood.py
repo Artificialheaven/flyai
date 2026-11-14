@@ -153,6 +153,16 @@ class MoodStore:
         self.data_dir = Path(data_dir)
         self.settings = settings
         self.tzname = tzname
+        # P4：可选提示词注册表，None 时用内置默认文本（行为与 P3 一致）
+        self.prompts = None
+
+    def _mood_wrap(self, direction: str, reason: str) -> str:
+        if self.prompts is None:
+            return ("（内心独白·只宣布一次）刚刚的互动让你心情%s：%s"
+                    % (direction, reason))
+        return self.prompts.render(
+            "mood_wrap", direction=direction, reason=reason
+        )
 
     def _conn(self, uid: str):
         return open_agent_db(self.data_dir, uid)
@@ -245,10 +255,7 @@ class MoodStore:
                              today_count=today_count, settings=settings):
                 announce_status = ANNOUNCE_PENDING
                 direction = "上扬" if clamped > 0 else "低落"
-                announce_text = (
-                    "（内心独白·只宣布一次）刚刚的互动让你心情%s：%s"
-                    % (direction, reason)
-                )
+                announce_text = self._mood_wrap(direction, reason)
 
             dims_json = json.dumps(anchor_dims, ensure_ascii=False)
             if row is None:
