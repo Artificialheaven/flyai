@@ -42,6 +42,8 @@ from .galgame.choices import GalgameChoiceManager
 from .market.store import MarketStore
 from .proactor import SchedulerService
 from .tools.custom_tool_runtime import CustomToolRuntime
+from .agent.interrupt import InterruptHub
+from .agent.loopmode import LoopManager
 from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 
 logger = logging.getLogger("flyai")
@@ -89,6 +91,9 @@ class AppState:
     scheduler: Optional[SchedulerService] = None
     # AI 自定义工具运行时（P1）：每用户 agent.db + 隔离子进程；未启用时仅待命
     custom_runtime: Optional[CustomToolRuntime] = None
+    # P2 长跑：每用户 agent.db 状态机（申请/运行/重启 reconcile）+ 安全点打断队列
+    loop_manager: Optional[LoopManager] = None
+    interrupt_hub: InterruptHub = field(default_factory=InterruptHub)
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -306,6 +311,18 @@ class AppState:
 
             for manage_tool_cls in MANAGE_TOOLS:
                 self.registry.register(manage_tool_cls())
+        # P2 长跑：设置先同步给状态机；工具仅在启用且管理器就绪时注册
+        # （loop_finish 为请求级 extra，不在全局表注册）
+        if self.loop_manager is not None:
+            self.loop_manager.settings = self.config.loop
+        if self.config.loop.enabled and self.loop_manager is not None:
+            from .tools.loop_tools import LOOP_TOOLS
+
+            for loop_tool_cls in LOOP_TOOLS:
+                tool = loop_tool_cls()
+                if tool.name == "loop_request":
+                    tool.min_level = int(self.config.loop.request_min_level)
+                self.registry.register(tool)
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -368,6 +385,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         state.custom_runtime = CustomToolRuntime(
             data_dir, state.config.custom_tools
         )
+        # P2 长跑状态机：先 reconcile 遗留 running，再开放新任务
+        state.loop_manager = LoopManager(data_dir, state.config.loop)
+        try:
+            reconciled = state.loop_manager.reconcile_all()
+            if reconciled:
+                logger.warning("长跑 reconcile：%d 个遗留运行置为 interrupted",
+                               reconciled)
+        except Exception:
+            logger.exception("长跑 reconcile 失败，不阻断启动")
         state.reload_tools()
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
@@ -437,6 +463,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_galgame import router as galgame_router
     from .api.routes_gen import router as gen_router
     from .api.routes_lore import router as lore_router
+    from .api.routes_loop import router as loop_router
     from .api.routes_market import router as market_router
     from .api.routes_memory import router as memory_router
     from .api.routes_plugins import router as plugins_router
@@ -450,6 +477,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(galgame_router)
     app.include_router(gen_router)
     app.include_router(lore_router)
+    app.include_router(loop_router)
     app.include_router(market_router)
     app.include_router(memory_router)
     app.include_router(plugins_router)

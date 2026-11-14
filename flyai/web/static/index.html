@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FlyAI</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261019a" />
+  <link rel="stylesheet" href="/static/style.css?v=20261114a" />
 </head>
 <body class="theme-dark">
   <!-- 自定义聊天背景层（个性化页设置；无背景图时不渲染图片） -->
@@ -68,6 +68,7 @@
         </div>
         <button id="btn-batch-delete" class="footer-btn">🗑 批量删除</button>
         <button id="btn-users" class="footer-btn hidden">👥 用户管理</button>
+        <button id="btn-loop" class="footer-btn hidden">🔁 长跑任务</button>
         <button id="btn-theme" class="footer-btn">🌗 切换主题</button>
         <p class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">冀ICP备2025098938号-2</a></p>
       </div>
@@ -796,6 +797,30 @@
           <label class="f-label">调用超时（秒，1–300）
             <input type="number" id="set-custom-call-timeout" value="20" min="1" max="300" step="0.5" />
           </label>
+          <h4>长跑模式</h4>
+          <p class="sub">启用后 AI 可调用 loop_request 申请无轮限长跑任务（管理员在「长跑任务」页审批，也可用 loop_start 免审批启动）。长跑跳过普通工具轮数封顶，由四道保护约束：每 5 个工具轮强制口语汇报、连续 3 轮空转自动结束、历史超阈值自动滚动摘要压缩、停止只改 DB 状态由 worker 在安全点退出；运行中用户消息不抢锁，进安全点打断队列。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-loop-enabled" /> 启用长跑模式</label>
+          <label class="f-label">每 N 个工具轮强制汇报
+            <input type="number" id="set-loop-every-rounds" value="5" min="1" />
+          </label>
+          <label class="f-label">连续空转多少轮自动结束
+            <input type="number" id="set-loop-idle-limit" value="3" min="1" />
+          </label>
+          <label class="f-label">压缩字符阈值（≥1000）
+            <input type="number" id="set-loop-char-threshold" value="40000" min="1000" />
+          </label>
+          <label class="f-label">压缩 token 比例（0.1–1.0）
+            <input type="number" id="set-loop-token-ratio" value="0.8" min="0.1" max="1" step="0.05" />
+          </label>
+          <label class="f-label">压缩保留最近工具轮数
+            <input type="number" id="set-loop-keep-rounds" value="4" min="1" />
+          </label>
+          <label class="f-label">模型上下文窗口 token（0=未知，靠报错学习）
+            <input type="number" id="set-loop-context-window" value="0" min="0" />
+          </label>
+          <label class="f-label">loop_request 最低用户等级（0=仅管理员）
+            <input type="number" id="set-loop-request-level" value="0" min="0" />
+          </label>
           <div class="m-page-actions">
             <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>
           </div>
@@ -976,6 +1001,35 @@
         <button type="button" id="btn-memory-mgr-close" class="btn ghost">关 闭</button>
       </div>
       <div id="memory-mgr-msg" class="msg-bar"></div>
+    </div>
+  </dialog>
+
+  <!-- 长跑任务弹窗：申请审批 + 运行态管理（轮数/压缩/打断/停止） -->
+  <dialog id="loop-mgr-dialog">
+    <div class="dialog-body">
+      <h3>🔁 长跑任务</h3>
+      <div class="mem-tabs">
+        <button type="button" data-ltab="requests" class="mem-tab loop-tab active">审批申请</button>
+        <button type="button" data-ltab="sessions" class="mem-tab loop-tab">运行记录</button>
+      </div>
+      <div class="mem-filters">
+        <button type="button" id="btn-loop-refresh" class="btn small">刷新</button>
+        <span id="loop-admin-scope" class="loop-admin-scope hidden">
+          目标 uid
+          <input type="text" id="loop-target-uid" placeholder="留空=自己" />
+        </span>
+        <span class="sub">运行中每 5 秒自动刷新</span>
+      </div>
+      <div id="loop-requests-pane">
+        <div id="loop-request-list" class="mem-list"></div>
+      </div>
+      <div id="loop-sessions-pane" class="hidden">
+        <div id="loop-session-list" class="mem-list"></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-loop-close" class="btn ghost">关 闭</button>
+      </div>
+      <div id="loop-mgr-msg" class="msg-bar"></div>
     </div>
   </dialog>
 
@@ -1315,6 +1369,7 @@
   <script src="/static/js/market.js?v=20261018a"></script>
   <script src="/static/js/presets.js?v=20261018b"></script>
   <script src="/static/js/memory-manager.js?v=20261010a"></script>
+  <script src="/static/js/loop.js?v=20261114a"></script>
   <script src="/static/js/settings.js?v=20261011c"></script>
 </body>
 </html>

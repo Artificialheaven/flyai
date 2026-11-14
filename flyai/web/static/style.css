@@ -2656,3 +2656,46 @@ label.f-label.toggle input[type=checkbox] { width: 16px; height: 16px; accent-co
   .ps-row { flex-direction: column; }
   .ps-row-actions { justify-content: flex-start; }
 }
+
+/* ===== P2 长跑任务弹窗 ===== */
+.loop-admin-scope {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+}
+.loop-admin-scope input {
+  width: 130px; padding: 5px 8px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--input);
+  color: var(--text); font: inherit;
+}
+.loop-row { margin-bottom: 10px; }
+.loop-title { font-weight: 600; }
+.loop-status {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.loop-st-running { color: var(--accent); border-color: var(--accent); }
+.loop-st-pending { color: var(--warn); border-color: var(--warn); }
+.loop-st-done { color: var(--ok); border-color: var(--ok); }
+.loop-st-stopped { color: var(--text-dim); }
+.loop-st-error { color: var(--err); border-color: var(--err); }
+.loop-st-idle { color: var(--warn); }
+.loop-meta { font-size: 12px; color: var(--text-dim); margin: 4px 0; }
+.loop-reason {
+  font-size: 12px; color: var(--text-dim); margin-top: 4px;
+  border-left: 2px solid var(--border); padding-left: 8px;
+}
+.loop-actions { display: flex; gap: 8px; margin-top: 8px; }
+.loop-run-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.loop-interrupt-input {
+  flex: 1 1 200px; min-width: 160px; padding: 6px 10px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--input); color: var(--text); font: inherit;
+}
+.loop-detail { margin-top: 6px; }
+.loop-detail summary { font-size: 12px; color: var(--accent); cursor: pointer; }
+.loop-result, .loop-error {
+  margin-top: 6px; padding: 8px 10px; border-radius: 8px;
+  background: var(--input); font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+}
+.loop-error { color: var(--err); }

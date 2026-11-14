@@ -40,6 +40,42 @@ MIGRATIONS: Dict[int, List[str]] = {
         """,
         "CREATE INDEX IF NOT EXISTS idx_custom_scope ON custom_tools(scope, enabled)",
     ],
+    3: [
+        # P2 长跑：AI 申请-审批表
+        """
+        CREATE TABLE IF NOT EXISTS loop_requests (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL,
+            task         TEXT NOT NULL,
+            reason       TEXT NOT NULL DEFAULT '',
+            requester_uid TEXT NOT NULL DEFAULT '',
+            status       TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
+            decided_by   TEXT NOT NULL DEFAULT '',
+            decided_at   REAL NOT NULL DEFAULT 0,
+            created_at   REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_loop_req_status ON loop_requests(status, created_at)",
+        # P2 长跑：运行状态机（服务重启 reconcile 的权威依据，补纯内存 run 的缺口）
+        """
+        CREATE TABLE IF NOT EXISTS loop_sessions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL,
+            task         TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'running',
+            -- running|done|stopped|interrupted|error|idle
+            request_id   INTEGER NOT NULL DEFAULT 0,
+            rounds       INTEGER NOT NULL DEFAULT 0,
+            compacts     INTEGER NOT NULL DEFAULT 0,
+            compact_note TEXT NOT NULL DEFAULT '',
+            result       TEXT NOT NULL DEFAULT '',
+            error        TEXT NOT NULL DEFAULT '',
+            created_at   REAL NOT NULL,
+            ended_at     REAL NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_loop_sess_status ON loop_sessions(status, session_id)",
+    ],
 }
 
 DB_VERSION = max(MIGRATIONS)

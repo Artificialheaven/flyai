@@ -467,6 +467,15 @@ function fillAdminForm() {
   if (el.setCustomMaxScope) el.setCustomMaxScope.value = ct.max_per_scope != null ? ct.max_per_scope : 20;
   if (el.setCustomValidateTimeout) el.setCustomValidateTimeout.value = ct.validate_timeout != null ? ct.validate_timeout : 10;
   if (el.setCustomCallTimeout) el.setCustomCallTimeout.value = ct.call_timeout != null ? ct.call_timeout : 20;
+  var lp = state.config.loop || {};
+  if (el.setLoopEnabled) el.setLoopEnabled.checked = lp.enabled === true;
+  if (el.setLoopEveryRounds) el.setLoopEveryRounds.value = lp.every_rounds != null ? lp.every_rounds : 5;
+  if (el.setLoopIdleLimit) el.setLoopIdleLimit.value = lp.idle_turn_limit != null ? lp.idle_turn_limit : 3;
+  if (el.setLoopCharThreshold) el.setLoopCharThreshold.value = lp.compact_char_threshold != null ? lp.compact_char_threshold : 40000;
+  if (el.setLoopTokenRatio) el.setLoopTokenRatio.value = lp.compact_token_ratio != null ? lp.compact_token_ratio : 0.8;
+  if (el.setLoopKeepRounds) el.setLoopKeepRounds.value = lp.keep_rounds != null ? lp.keep_rounds : 4;
+  if (el.setLoopContextWindow) el.setLoopContextWindow.value = lp.context_window != null ? lp.context_window : 0;
+  if (el.setLoopRequestLevel) el.setLoopRequestLevel.value = lp.request_min_level != null ? lp.request_min_level : 0;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -864,6 +873,16 @@ function saveConfig() {
     validate_timeout: Math.max(1, Math.min(300, parseFloat(el.setCustomValidateTimeout && el.setCustomValidateTimeout.value) || 10)),
     call_timeout: Math.max(1, Math.min(300, parseFloat(el.setCustomCallTimeout && el.setCustomCallTimeout.value) || 20)),
   };
+  var loopSettings = {
+    enabled: el.setLoopEnabled ? !!el.setLoopEnabled.checked : false,
+    every_rounds: Math.max(1, parseInt(el.setLoopEveryRounds && el.setLoopEveryRounds.value, 10) || 5),
+    idle_turn_limit: Math.max(1, parseInt(el.setLoopIdleLimit && el.setLoopIdleLimit.value, 10) || 3),
+    compact_char_threshold: Math.max(1000, parseInt(el.setLoopCharThreshold && el.setLoopCharThreshold.value, 10) || 40000),
+    compact_token_ratio: Math.max(0.1, Math.min(1, parseFloat(el.setLoopTokenRatio && el.setLoopTokenRatio.value) || 0.8)),
+    keep_rounds: Math.max(1, parseInt(el.setLoopKeepRounds && el.setLoopKeepRounds.value, 10) || 4),
+    context_window: Math.max(0, parseInt(el.setLoopContextWindow && el.setLoopContextWindow.value, 10) || 0),
+    request_min_level: Math.max(0, parseInt(el.setLoopRequestLevel && el.setLoopRequestLevel.value, 10) || 0),
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -873,13 +892,14 @@ function saveConfig() {
       image_models: imageModels, stable_diffusion: stableDiffusion,
       pixiv: pixiv, web_search: webSearch, browser: browser, tts: tts,
       galgame: galgame, sandbox: sandbox, scheduler: scheduler,
-      custom_tools: customTools,
+      custom_tools: customTools, loop: loopSettings,
     }),
   }).then(function (cfg) {
     state.config = cfg;
     el.configMsg.textContent = "已保存并即时生效"; el.configMsg.className = "msg-bar ok";
     el.dialog.close();
     renderProviderBar();
+    if (window.updateLoopButton) updateLoopButton();
     return fetchJSON("/api/plugins");
   }).then(function (r) { state.plugins = r.plugins || []; })
     .catch(function (e) {

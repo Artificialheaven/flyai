@@ -19,6 +19,14 @@ from ..providers.base import StreamEventType
 from ..schemas import ImageAttachment, Message, ToolCall
 from ..tools.base import Tool, ToolContext
 from ..tools.registry import ToolRegistry
+from .loopmode import (
+    LoopContext,
+    compact_cut_point,
+    parse_context_overflow,
+    render_head_for_summary,
+    render_interrupt_notice,
+    should_compact,
+)
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个能通过调用工具自行获取信息的 AI 助手。"
@@ -35,6 +43,21 @@ _POST_TOOL_NUDGE = (
     "把需要用到的结果自然融入；不要表现成用户沉默、没有说话或没有输入，"
     "不要询问用户为什么不开口，也不要等待用户的下一条指令。）"
 )
+
+# P2 长跑：强制汇报轮的临时指令（不入库，汇报完即弃）
+_REPORT_NUDGE = (
+    "（系统提示：现在是长跑任务的例行汇报点。禁止调用任何工具，"
+    "立刻用一两句口语向用户汇报当前进展与下一步打算，不要复述任务原文。）"
+)
+
+# P2 长跑：空转轮的引导（不入库）
+_IDLE_NUDGE = (
+    "（系统提示：你上一轮没有调用任何工具。若任务尚未完成，请立即继续工具操作；"
+    "若任务已经完成，请调用 loop_finish 汇报结果，不要空转。）"
+)
+
+# P2 长跑：空转达到上限时写进结果的固定文案
+_IDLE_FINISH_TEXT = "连续多轮未进行工具操作，判定任务已结束"
 
 # 工具调用状态文案渲染
 _STATUS_RENDERERS = {
@@ -256,6 +279,7 @@ async def run_agent_loop(
     level: int = 0,
     is_admin: bool = False,
     extra_tools: Optional[List["Tool"]] = None,
+    loop_ctx: Optional[LoopContext] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -285,6 +309,9 @@ async def run_agent_loop(
     assistant 消息发送（不入库），空串不追加。
     extra_tools：请求级工具（P1 自定义工具），按调用者身份临时注入，不进全局
     注册表；settings.enabled=False 时与内置工具一起整体停用。
+    loop_ctx：P2 长跑上下文。非 None 时跳过双预算封顶，启用强制汇报/空转
+    自停/滚动压缩/安全点打断与干净停止；依赖 services 中的 loop_state、
+    loop_compact、interrupt_hub、loop_settings 钩子（缺失时相应保护降级）。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -309,84 +336,212 @@ async def run_agent_loop(
     web_used = 0
     iteration = 0
     pending_nudge = False  # 上一轮执行了工具：下轮请求尾部追加续写提示
-    while True:
-        iteration += 1
+    idle_nudge_next = False  # P2 长跑：上一轮空转，本轮请求尾部追加引导
+    loop_services = services or {}
+    loop_settings = loop_services.get("loop_settings")
+    interrupt_hub = loop_services.get("interrupt_hub")
+
+    async def _compact_history(reason: str):
+        """P2 滚动压缩：摘要头部 + 保留最近 keep_rounds 个完整工具轮。
+
+        无可切点或未注入 loop_compact 钩子时不产出事件（调用方据此放弃重试）。
+        """
+        if loop_ctx is None:
+            return
+        compact_cb = loop_services.get("loop_compact")
+        if compact_cb is None:
+            return
+        keep = int(getattr(loop_settings, "keep_rounds", 4) or 4)
+        cut = compact_cut_point(history, keep)
+        if cut <= 0:
+            return
+        note = await compact_cb(render_head_for_summary(history, cut))
+        tail = history[cut:]
+        summary = Message(
+            role="system",
+            content="【长跑工作纪要（自动压缩-%s）】\n%s" % (reason, note or ""),
+        )
+        history[:] = [summary] + tail
+        loop_ctx.compacts += 1
+        loop_ctx.compact_note = note or ""
+        yield ("loop_compact", {
+            "reason": reason, "compacts": loop_ctx.compacts,
+            "note": (note or "")[:300],
+        })
+
+    def build_request(loop_notice: str = "", idle_nudge: bool = False):
+        """组装单轮请求消息与工具 specs（超长重试时按最新历史重建）。"""
         # extra_tools 为请求级自定义工具（每用户独立，不进全局注册表）；
         # 仅在非空时传 extras，保持对精简测试注册表（无该形参）的兼容
         if not settings.enabled:
-            tool_specs = []
+            specs = []
         elif extra_tools:
-            tool_specs = registry.specs(allowed_tools, extras=extra_tools)
+            specs = registry.specs(allowed_tools, extras=extra_tools)
         else:
-            tool_specs = registry.specs(allowed_tools)
-        request_messages = _actor_view(history, actor, actor_name)
-        request_messages = _keep_recent_turns(request_messages, keep_turns)
+            specs = registry.specs(allowed_tools)
+        msgs = _actor_view(history, actor, actor_name)
+        msgs = _keep_recent_turns(msgs, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
-        request_messages = [m for m in request_messages if not getattr(m, "tombstone", None)]
+        msgs = [m for m in msgs if not getattr(m, "tombstone", None)]
         if system_prompt:
-            request_messages.insert(0, Message(role="system", content=system_prompt))
+            msgs.insert(0, Message(role="system", content=system_prompt))
         # 酒馆 @depth 常驻块（世界书条目/预设 prompt）：插到历史深处、PHI 之前
-        _inject_depth_blocks(request_messages, depth_blocks)
+        _inject_depth_blocks(msgs, depth_blocks)
         # PHI（角色卡历史后指令）：紧贴历史尾部；工具轮时续写 nudge 放在它之后，
         # 让"继续完成回复"保持为模型看到的最后一句
         phi = (post_history_instructions or "").strip()
         if phi:
-            request_messages.append(Message(role="system", content=phi))
+            msgs.append(Message(role="system", content=phi))
         if pending_nudge:
-            request_messages.append(
-                Message(role="system", content=_POST_TOOL_NUDGE)
-            )
+            msgs.append(Message(role="system", content=_POST_TOOL_NUDGE))
+        if idle_nudge:
+            msgs.append(Message(role="system", content=_IDLE_NUDGE))
+        # P2 安全点打断的系统通知（用户原话已入 history，这里只加渲染指令）
+        if loop_notice:
+            msgs.append(Message(role="system", content=loop_notice))
         # 预设 jailbreak：assistant 强制前缀必须是最后一条
         prefill = (assistant_prefill or "").strip()
         if prefill:
-            request_messages.append(Message(role="assistant", content=prefill))
+            msgs.append(Message(role="assistant", content=prefill))
+        return msgs, specs
+
+    while True:
+        iteration += 1
+        loop_notice = ""
+
+        # ---------- P2 长跑安全点：停止轮询 / 打断排空 / 阈值压缩 ----------
+        if loop_ctx is not None:
+            state_hook = loop_services.get("loop_state")
+            if state_hook is not None:
+                await state_hook(loop_ctx)
+            if loop_ctx.stop_status:
+                yield ("done", {
+                    "reason": loop_ctx.stop_status, "iterations": iteration,
+                    "usage": _usage_payload(usage_in, usage_out),
+                })
+                return
+            if interrupt_hub is not None:
+                items = interrupt_hub.drain(session_id)
+                if items:
+                    for it in items:
+                        # 真实用户输入入历史；系统通知只在本轮请求里渲染
+                        history.append(Message(
+                            role="user",
+                            content=it.get("text", "") or None,
+                            name=it.get("name") or None,
+                        ))
+                        yield ("loop_interrupt", {
+                            "session_id": session_id,
+                            "text": it.get("text", ""),
+                            "name": it.get("name") or "",
+                        })
+                    loop_notice = render_interrupt_notice(items)
+            if loop_settings is not None and should_compact(
+                history, loop_ctx, loop_settings
+            ):
+                async for _ev in _compact_history("threshold"):
+                    yield _ev
+
+        request_messages, tool_specs = build_request(
+            loop_notice, idle_nudge=idle_nudge_next
+        )
+        idle_nudge_next = False
+
+        # ---------- P2 强制汇报：无工具补问，临时指令不入库 ----------
+        if (
+            loop_ctx is not None
+            and loop_settings is not None
+            and loop_ctx.since_spoke >= int(loop_settings.every_rounds)
+        ):
+            report_msgs, _ = build_request(loop_notice)
+            report_msgs.append(Message(role="system", content=_REPORT_NUDGE))
+            report_parts: List[str] = []
+            async for ev in provider.stream_chat(
+                report_msgs, [],
+                deep_thinking=deep_thinking, max_tokens=max_tokens,
+                extra_params=extra_params,
+            ):
+                if ev.type == StreamEventType.CONTENT_DELTA:
+                    report_parts.append(ev.text)
+                    yield ("content_delta", {"text": ev.text})
+                elif ev.type == StreamEventType.USAGE and ev.usage:
+                    usage_in += int(ev.usage.get("prompt_tokens") or 0)
+                    usage_out += int(ev.usage.get("completion_tokens") or 0)
+            report_text = "".join(report_parts).strip()
+            history.append(_tag_actor(
+                Message(role="assistant",
+                        content=report_text or "（例行进展汇报）"),
+                actor,
+            ))
+            loop_ctx.since_spoke = 0
+            yield ("loop_report", {"text": report_text[:500]})
 
         thinking_parts: List[str] = []
         thinking_blocks: Optional[List[Dict[str, Any]]] = None
         content_parts: List[str] = []
         calls: Optional[List[ToolCall]] = None
-        try:
-            async for ev in provider.stream_chat(
-                request_messages, tool_specs,
-                deep_thinking=deep_thinking, max_tokens=max_tokens,
-                extra_params=extra_params,
-            ):
-                if ev.type == StreamEventType.THINKING_DELTA:
-                    thinking_parts.append(ev.text)
-                    yield ("thinking_delta", {"text": ev.text})
-                elif ev.type == StreamEventType.THINKING_BLOCKS and ev.blocks:
-                    thinking_blocks = ev.blocks
-                elif ev.type == StreamEventType.CONTENT_DELTA:
-                    content_parts.append(ev.text)
-                    yield ("content_delta", {"text": ev.text})
-                elif ev.type == StreamEventType.CONTENT_REPLACE:
-                    # 厂商把工具调用回声进正文：替换已累积/已推送的正文
-                    content_parts[:] = [ev.text]
-                    yield ("content_replace", {"text": ev.text})
-                elif ev.type == StreamEventType.TOOL_CALLS:
-                    calls = ev.tool_calls
-                elif ev.type == StreamEventType.USAGE and ev.usage:
-                    usage_in += int(ev.usage.get("prompt_tokens") or 0)
-                    usage_out += int(ev.usage.get("completion_tokens") or 0)
-        except (asyncio.CancelledError, GeneratorExit):
-            # 用户点停止：把已经流式产出的半截回复补进历史（drive finally 会保存），
-            # 不再像旧版那样中止后答案整段消失
-            partial_text = "".join(content_parts)
-            partial_think = "".join(thinking_parts).strip()
-            if partial_text or partial_think or calls:
-                history.append(
-                    _tag_actor(
-                        Message(
-                            role="assistant",
-                            content=partial_text or None,
-                            thinking=partial_think or None,
-                            thinking_blocks=thinking_blocks,
-                            tool_calls=calls,
-                        ),
-                        actor,
+        overflow_retries = 0
+        while True:
+            try:
+                async for ev in provider.stream_chat(
+                    request_messages, tool_specs,
+                    deep_thinking=deep_thinking, max_tokens=max_tokens,
+                    extra_params=extra_params,
+                ):
+                    if ev.type == StreamEventType.THINKING_DELTA:
+                        thinking_parts.append(ev.text)
+                        yield ("thinking_delta", {"text": ev.text})
+                    elif ev.type == StreamEventType.THINKING_BLOCKS and ev.blocks:
+                        thinking_blocks = ev.blocks
+                    elif ev.type == StreamEventType.CONTENT_DELTA:
+                        content_parts.append(ev.text)
+                        yield ("content_delta", {"text": ev.text})
+                    elif ev.type == StreamEventType.CONTENT_REPLACE:
+                        # 厂商把工具调用回声进正文：替换已累积/已推送的正文
+                        content_parts[:] = [ev.text]
+                        yield ("content_replace", {"text": ev.text})
+                    elif ev.type == StreamEventType.TOOL_CALLS:
+                        calls = ev.tool_calls
+                    elif ev.type == StreamEventType.USAGE and ev.usage:
+                        usage_in += int(ev.usage.get("prompt_tokens") or 0)
+                        usage_out += int(ev.usage.get("completion_tokens") or 0)
+                break
+            except (asyncio.CancelledError, GeneratorExit):
+                # 用户点停止：把已经流式产出的半截回复补进历史（drive finally 会保存），
+                # 不再像旧版那样中止后答案整段消失
+                partial_text = "".join(content_parts)
+                partial_think = "".join(thinking_parts).strip()
+                if partial_text or partial_think or calls:
+                    history.append(
+                        _tag_actor(
+                            Message(
+                                role="assistant",
+                                content=partial_text or None,
+                                thinking=partial_think or None,
+                                thinking_blocks=thinking_blocks,
+                                tool_calls=calls,
+                            ),
+                            actor,
+                        )
                     )
-                )
-            raise
+                raise
+            except Exception as exc:
+                # P2 长跑：上下文超长 → 学习窗口、强制压缩、同请求最多重试 3 次
+                if loop_ctx is None or overflow_retries >= 3:
+                    raise
+                limit = parse_context_overflow(exc)
+                if limit is None:
+                    raise
+                if limit > 0:
+                    loop_ctx.context_limit = limit
+                compacted = False
+                async for _ev in _compact_history("overflow"):
+                    compacted = True
+                    yield _ev
+                overflow_retries += 1
+                if not compacted:
+                    raise  # 没有可压缩的完整工具轮，重试无意义
+                request_messages, _ = build_request(loop_notice)
 
         assistant = Message(
             role="assistant",
@@ -401,9 +556,24 @@ async def run_agent_loop(
         history.append(_tag_actor(assistant, actor))
 
         if not calls:
-            yield ("done", {"reason": "stop", "iterations": iteration,
-                            "usage": _usage_payload(usage_in, usage_out)})
-            return
+            if loop_ctx is None:
+                yield ("done", {"reason": "stop", "iterations": iteration,
+                                "usage": _usage_payload(usage_in, usage_out)})
+                return
+            # P2 长跑：无工具轮计入空转，连续达阈值才判定任务结束；
+            # 未达阈值则下一轮带空转引导继续（最终回复已在 history 中）
+            loop_ctx.idle_turns += 1
+            idle_limit = int(getattr(loop_settings, "idle_turn_limit", 3) or 3)
+            if loop_ctx.idle_turns >= idle_limit:
+                yield ("done", {
+                    "reason": "idle", "iterations": iteration,
+                    "idle_turns": loop_ctx.idle_turns,
+                    "finish_text": _IDLE_FINISH_TEXT,
+                    "usage": _usage_payload(usage_in, usage_out),
+                })
+                return
+            idle_nudge_next = True
+            continue
 
         # 先判定本轮类型：纯联网轮只占 web 预算，纯其他轮只占通用预算
         call_names = {c.name for c in calls}
@@ -415,7 +585,10 @@ async def run_agent_loop(
         # 纯另一类工具的调用也不受影响（两套预算不共享）。
         cap_reason = None
         cap_message = ""
-        if other_round and general_used >= settings.max_iterations:
+        # P2 长跑跳过双预算封顶（由强制汇报/空转自停/滚动压缩兜底）
+        if loop_ctx is not None:
+            pass
+        elif other_round and general_used >= settings.max_iterations:
             cap_reason = "max_iterations"
             cap_message = f"已达到最大工具调用轮数（{settings.max_iterations}），停止执行"
         elif web_round and web_used >= web_limit:
@@ -493,6 +666,34 @@ async def run_agent_loop(
         if web_round:
             web_used += 1
         pending_nudge = True  # 下轮（拿工具结果续写）追加提示，不写进 history
+
+        # ---------- P2 长跑：推进轮次状态、检测 loop_finish ----------
+        if loop_ctx is not None:
+            loop_ctx.idle_turns = 0
+            loop_ctx.since_spoke += 1
+            loop_ctx.total_rounds += 1
+            yield ("loop_progress", {
+                "rounds": loop_ctx.total_rounds,
+                "compacts": loop_ctx.compacts,
+                "since_spoke": loop_ctx.since_spoke,
+            })
+            finish_call = next(
+                (c for c in calls if c.name == "loop_finish"), None
+            )
+            if finish_call is not None:
+                tool_msg = next(
+                    (m for m in reversed(history)
+                     if getattr(m, "role", "") == "tool"
+                     and getattr(m, "tool_call_id", "") == finish_call.id),
+                    None,
+                )
+                loop_ctx.finish_text = getattr(tool_msg, "content", "") or ""
+                loop_ctx.finished = True
+                yield ("done", {
+                    "reason": "loop_finish", "iterations": iteration,
+                    "usage": _usage_payload(usage_in, usage_out),
+                })
+                return
 
 
 def _usage_payload(usage_in: int, usage_out: int) -> Dict[str, int]:

@@ -49,6 +49,9 @@ TOOL_CATEGORIES = {
     "custom_tool_list": "custom_tools",
     "custom_tool_toggle": "custom_tools",
     "custom_tool_remove": "custom_tools",
+    # P2 长跑模式（仅全局；loop_finish 为请求级 extra，不在全局表中）
+    "loop_request": "loop",
+    "loop_start": "loop",
     # 已上线的自定义函数工具名是动态的（custom__<name>），按前缀识别
 }
 
@@ -62,6 +65,7 @@ _GLOBAL_FLAGS = {
     "tts": ("tts", True),
     "sandbox": ("sandbox", False),
     "custom_tools": ("custom_tools", False),
+    "loop": ("loop", False),
 }
 
 # 类别 → UserSettings 上的覆盖字段名
@@ -183,7 +187,7 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
 
     on_categories = {"base"}
     for category in ("web", "browser", "pixiv", "image", "galgame", "tts",
-                     "sandbox", "custom_tools"):
+                     "sandbox", "custom_tools", "loop"):
         if feature_enabled(category, cfg, user_settings):
             on_categories.add(category)
 
@@ -192,10 +196,14 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
         category = TOOL_CATEGORIES.get(tool.name, "base")  # 插件等未知名归 base
         if category in on_categories:
             allowed.add(tool.name)
-    if "custom_tools" in on_categories and extra_names:
-        # 只放行合法前缀，防止调用方把别的名字塞进白名单
-        allowed |= {n for n in extra_names
-                    if isinstance(n, str) and n.startswith("custom__")}
+    if extra_names:
+        # 请求级工具白名单：自定义函数只放行合法前缀；
+        # loop_finish 仅在 loop 类别开启时按精确名放行
+        if "custom_tools" in on_categories:
+            allowed |= {n for n in extra_names
+                        if isinstance(n, str) and n.startswith("custom__")}
+        if "loop" in on_categories:
+            allowed |= {n for n in extra_names if n == "loop_finish"}
     if disabled:
         allowed -= {str(n) for n in disabled if isinstance(n, str)}
     return allowed

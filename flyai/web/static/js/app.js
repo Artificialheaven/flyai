@@ -102,6 +102,7 @@ function init() {
     state.worlds = res[4].worlds || [];
     state.toolsMeta = res[5].tools || [];
     renderProviderBar();
+    if (window.updateLoopButton) updateLoopButton();
     renderSessionList();
     renderSessionMeta();
     updateSdEngineButton();

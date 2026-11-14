@@ -540,6 +540,60 @@ class CustomToolSettings(BaseModel):
         return max(1.0, min(v, 300.0))
 
 
+class LoopSettings(BaseModel):
+    """长跑模式（P2）：无轮限长任务 + 安全点打断 + 滚动压缩。
+
+    默认关闭。开启后 AI 可申请长跑（loop_request，risk 工具，按
+    request_min_level 授权，0=仅管理员），审批通过后在既有 ChatRun 通道里
+    以 LoopContext 运行：跳过双预算封顶，靠四道保护机制约束失控风险。
+    """
+
+    enabled: bool = False
+    # 每 N 个工具轮强制一次无工具口语汇报
+    every_rounds: int = 5
+    # 连续 N 轮零工具操作即判定任务结束
+    idle_turn_limit: int = 3
+    # 历史字符数达到该阈值触发滚动压缩
+    compact_char_threshold: int = 40000
+    # 估算 token 达到（上下文窗口-输出余量）的该比例时触发压缩
+    compact_token_ratio: float = 0.8
+    # 压缩时保留最近多少个完整工具轮
+    keep_rounds: int = 4
+    # 模型上下文窗口 token 数；0=未知，仅靠字符阈值与超长报错学习值
+    context_window: int = 0
+    # loop_request 的最低用户等级；0=仅管理员可申请
+    request_min_level: int = 0
+
+    @validator("every_rounds", "idle_turn_limit", "keep_rounds")
+    def _clamp_rounds(cls, v):  # noqa: N805
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 5
+
+    @validator("compact_char_threshold")
+    def _clamp_chars(cls, v):  # noqa: N805
+        try:
+            return max(1000, int(v))
+        except (TypeError, ValueError):
+            return 40000
+
+    @validator("compact_token_ratio")
+    def _clamp_ratio(cls, v):  # noqa: N805
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 0.8
+        return min(1.0, max(0.1, v))
+
+    @validator("context_window", "request_min_level")
+    def _clamp_nonneg(cls, v):  # noqa: N805
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -560,6 +614,7 @@ class AppConfig(BaseModel):
     sandbox: SandboxSettings = SandboxSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
     custom_tools: CustomToolSettings = CustomToolSettings()
+    loop: LoopSettings = LoopSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

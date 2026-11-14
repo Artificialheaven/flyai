@@ -157,5 +157,15 @@
     "max_per_scope": 20,
     "validate_timeout": 10.0,
     "call_timeout": 20.0
+  },
+  "loop": {
+    "enabled": false,
+    "every_rounds": 5,
+    "idle_turn_limit": 3,
+    "compact_char_threshold": 40000,
+    "compact_token_ratio": 0.8,
+    "keep_rounds": 4,
+    "context_window": 0,
+    "request_min_level": 0
   }
 }

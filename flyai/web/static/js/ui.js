@@ -152,6 +152,14 @@ function cacheElements() {
   el.setCustomMaxScope = document.getElementById("set-custom-max-scope");
   el.setCustomValidateTimeout = document.getElementById("set-custom-validate-timeout");
   el.setCustomCallTimeout = document.getElementById("set-custom-call-timeout");
+  el.setLoopEnabled = document.getElementById("set-loop-enabled");
+  el.setLoopEveryRounds = document.getElementById("set-loop-every-rounds");
+  el.setLoopIdleLimit = document.getElementById("set-loop-idle-limit");
+  el.setLoopCharThreshold = document.getElementById("set-loop-char-threshold");
+  el.setLoopTokenRatio = document.getElementById("set-loop-token-ratio");
+  el.setLoopKeepRounds = document.getElementById("set-loop-keep-rounds");
+  el.setLoopContextWindow = document.getElementById("set-loop-context-window");
+  el.setLoopRequestLevel = document.getElementById("set-loop-request-level");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");
@@ -185,6 +193,7 @@ function cacheElements() {
   el.btnJump = document.getElementById("btn-jump-bottom");
   el.userName = document.getElementById("user-name");
   el.btnUsers = document.getElementById("btn-users");
+  el.btnLoop = document.getElementById("btn-loop");
   el.userDialog = document.getElementById("user-dialog");
   el.userList = document.getElementById("user-list");
   el.userNameInput = document.getElementById("user-new-name");
@@ -422,6 +431,9 @@ function bindEvents() {
   if (el.overlay) el.overlay.addEventListener("click", closeNav);
   if (el.btnLogout) el.btnLogout.addEventListener("click", doLogout);
   if (el.btnUsers) el.btnUsers.addEventListener("click", openUserDialog);
+  if (el.btnLoop) el.btnLoop.addEventListener("click", function () {
+    if (window.openLoopManager) openLoopManager();
+  });
   if (el.btnJump) el.btnJump.addEventListener("click", jumpBottom);
   if (el.messages) el.messages.addEventListener("scroll", onMessagesScroll);
   if (el.btnUserCreate) el.btnUserCreate.addEventListener("click", createUser);

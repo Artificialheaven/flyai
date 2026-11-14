@@ -30,6 +30,7 @@ from ..config import (
     SandboxSettings,
     SchedulerSettings,
     CustomToolSettings,
+    LoopSettings,
     mask_api_key,
     save_config,
 )
@@ -94,6 +95,7 @@ class ConfigPayload(BaseModel):
     sandbox: Optional[dict] = None
     scheduler: Optional[dict] = None
     custom_tools: Optional[dict] = None
+    loop: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -183,10 +185,11 @@ def _masked_config(state, uid: Optional[str] = None):
         "browser": cfg.browser.dict(),
         "galgame": cfg.galgame.dict(),
         "tts": _masked_tts(cfg),
-        # 沙箱/调度器/自定义工具段不含密钥，对所有登录用户可见（同 SD 段）
+        # 沙箱/调度器/自定义工具/长跑段不含密钥，对所有登录用户可见（同 SD 段）
         "sandbox": cfg.sandbox.dict(),
         "scheduler": cfg.scheduler.dict(),
         "custom_tools": cfg.custom_tools.dict(),
+        "loop": cfg.loop.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -328,6 +331,10 @@ def put_config(payload: ConfigPayload, request: Request):
     if payload.custom_tools is not None:
         # 热重建工具表时 _reload_tools 会把新设置同步给 custom_runtime
         cfg.custom_tools = CustomToolSettings.parse_obj(dict(payload.custom_tools))
+
+    if payload.loop is not None:
+        # 热重建工具表时 _reload_tools 会注册/摘除 loop 工具并同步 loop_manager
+        cfg.loop = LoopSettings.parse_obj(dict(payload.loop))
 
     _persist(state)
     if scheduler_changed:

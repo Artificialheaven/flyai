@@ -7,14 +7,29 @@ import base64
 import binascii
 import logging
 import random
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from ..agent.loop import DEFAULT_SYSTEM_PROMPT, run_agent_loop
+from ..agent.loop import (
+    DEFAULT_SYSTEM_PROMPT,
+    _IDLE_FINISH_TEXT,
+    run_agent_loop,
+)
+from ..agent.loopmode import LoopContext
 from ..agent.runs import ChatRun, ChatRunManager
+from ..agentdb.loop_store import (
+    LOOP_DONE,
+    LOOP_ERROR,
+    LOOP_IDLE,
+    LOOP_INTERRUPTED,
+    LOOP_STOPPED,
+)
+from ..providers.base import StreamEventType
+from ..tools.loop_tools import LoopFinishTool
 from .. import billing, feature_prefs
 from ..models_access import visible_image_models, visible_providers
 from ..errors import ProviderError
@@ -69,6 +84,145 @@ def _custom_extras(state, sc, session_id: str) -> list:
     except Exception:
         logger.exception("自定义工具加载失败，本轮跳过")
         return []
+
+
+# ---- P2 长跑：服务钩子构建 / 压缩摘要 / 收尾 / 免审批启动 ----
+
+_COMPACT_DIRECTIVE = (
+    "你是长跑任务的上下文压缩器。把下面的工作历史压写成简短客观的工作纪要："
+    "已完成的动作、关键结论、待办事项与约束，保留数字、文件名、ID 等硬信息，"
+    "不要寒暄、不要臆造未发生的事。"
+)
+
+
+async def _summarize_for_compact(provider, head_text: str) -> str:
+    """用当前提供商做一次无工具便宜调用归纳头部历史；失败不阻断长跑。"""
+    msgs = [
+        Message(role="system", content=_COMPACT_DIRECTIVE),
+        Message(role="user", content=head_text or "（无历史）"),
+    ]
+    parts: List[str] = []
+    try:
+        async for ev in provider.stream_chat(
+            msgs, [], deep_thinking=False, max_tokens=800, extra_params=None
+        ):
+            if ev.type == StreamEventType.CONTENT_DELTA:
+                parts.append(ev.text)
+    except Exception:
+        logger.exception("长跑压缩摘要失败，退回仅保留尾部工作轮")
+        return "（摘要生成失败，已保留最近工作轮次，早期上下文被截断）"
+    note = "".join(parts).strip()
+    return note or "（摘要为空，已保留最近工作轮次）"
+
+
+def _loop_extras(custom_extras: list, loop_ctx: Optional[LoopContext]) -> list:
+    """长跑请求额外注入 loop_finish（全局表不可见，只在 loop_ctx 存在时出现）。"""
+    extras = list(custom_extras or [])
+    if loop_ctx is not None:
+        extras.append(LoopFinishTool())
+    return extras
+
+
+def _install_loop_services(services: dict, state, sc, loop_ctx: Optional[LoopContext],
+                           provider, *, loop_starter=None) -> None:
+    """把长跑工具服务与引擎钩子注入 services（同一 dict 也给 ToolContext）。
+
+    功能开启即注入 loop_manager/settings/starter（普通对话里 AI 也能提交申请）；
+    四个引擎钩子只在 loop_ctx 存在时注入，缺失时引擎保护自动降级。
+    """
+    cfg = getattr(state.config, "loop", None)
+    mgr = getattr(state, "loop_manager", None)
+    if cfg is None or not getattr(cfg, "enabled", False) or mgr is None:
+        return
+    services["loop_settings"] = cfg
+    services["loop_manager"] = mgr
+    if loop_starter is not None:
+        services["loop_starter"] = loop_starter
+    if loop_ctx is None:
+        return
+
+    async def _state_hook(ctx: LoopContext) -> None:
+        await asyncio.to_thread(mgr.refresh, sc.uid, ctx)
+
+    async def _compact_hook(head_text: str) -> str:
+        return await _summarize_for_compact(provider, head_text)
+
+    services["loop_state"] = _state_hook
+    services["loop_compact"] = _compact_hook
+    services["interrupt_hub"] = getattr(state, "interrupt_hub", None)
+    if loop_starter is not None:
+        services["loop_starter"] = loop_starter
+
+
+def _last_assistant_text(history) -> str:
+    for m in reversed(history):
+        if getattr(m, "role", "") == "assistant" and (m.content or "").strip():
+            return (m.content or "").strip()
+    return ""
+
+
+async def _finalize_loop(state, sc, session_id: str, loop_ctx: Optional[LoopContext],
+                         history, *, failed: bool = False) -> None:
+    """drive 收尾：把终态/结果写回 loop_sessions，并清空打断队列。"""
+    if loop_ctx is None:
+        return
+    mgr = getattr(state, "loop_manager", None)
+    if mgr is None:
+        return
+    try:
+        if failed:
+            status = LOOP_ERROR
+        elif loop_ctx.finished:
+            status = LOOP_DONE
+        elif loop_ctx.stop_status:
+            status = loop_ctx.stop_status  # stopped / interrupted（DB 权威状态）
+        elif loop_ctx.idle_turns > 0:
+            status = LOOP_IDLE
+        else:
+            # 引擎自然结束但未显式 loop_finish：按完成兜底
+            status = LOOP_DONE
+        result = loop_ctx.finish_text or _last_assistant_text(history)
+        if status == LOOP_IDLE and not result:
+            result = _IDLE_FINISH_TEXT
+        await asyncio.to_thread(
+            mgr.finish, sc.uid, loop_ctx, status, result=result[:20000]
+        )
+    except Exception:
+        logger.exception("长跑收尾写库失败 loop_id=%s",
+                         getattr(loop_ctx, "loop_db_id", "?"))
+    hub = getattr(state, "interrupt_hub", None)
+    if hub is not None:
+        hub.clear(session_id)
+
+
+def _make_loop_starter(state, sc, run_manager: ChatRunManager):
+    """loop_start 工具用的启动器：等当前 run 释放会话锁后免审批再起长跑。"""
+
+    async def _start(uid: str, session_id: str, task: str,
+                     reason: str = "") -> dict:
+        if uid != sc.uid:
+            return {"ok": False, "error": "只能为自己启动长跑"}
+        # 工具运行在当前 ChatRun 内：轮询等待会话锁释放，最多 60s
+        for _ in range(300):
+            if run_manager.session_locked(session_id) is None:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            return {"ok": False, "error": "会话锁等待超时"}
+        req = ChatRequest(
+            session_id=session_id, message=task,
+            loop_task=task, provider_id=None,
+        )
+        resp = await submit_chat(state, sc, req, run_manager)
+        mgr = getattr(state, "loop_manager", None)
+        row = await asyncio.to_thread(mgr.running_for, uid, session_id)
+        return {
+            "ok": True,
+            "loop_id": row["id"] if row else None,
+            "run_id": resp.headers.get("X-Run-Id"),
+        }
+
+    return _start
 
 
 def _lore_depth_specs(querier, character, user_char, last_message,
@@ -346,6 +500,9 @@ class ChatRequest(BaseModel):
     # 输入框「⋯ → 工具」里手动关闭的工具名：只在功能偏好允许集内做差集，
     # 无法绕过管理员/用户的类别级开关
     disabled_tools: List[str] = []
+    # P2 长跑：非空时本次请求作为长跑任务启动（loop 路由/审批内部使用）
+    loop_task: Optional[str] = None
+    loop_request_id: int = 0
 
 
 def _effective_max_tokens(session, user_settings, preset_max: int = 0) -> Optional[int]:
@@ -498,7 +655,15 @@ def _sse_response(run: ChatRun) -> StreamingResponse:
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state.flyai
     sc = state.user(request)
+    return await submit_chat(state, sc, req)
 
+
+async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
+    """聊天/长跑共用的提交入口（loop 审批路由也调它）。
+
+    长跑请求（req.loop_task 非空）会先建 loop_sessions 行再走常规驱动；
+    长跑进行中的普通消息不抢会话锁，改道 InterruptHub。
+    """
     session = None
     if req.session_id:
         _safe_sid(req.session_id)
@@ -535,14 +700,66 @@ async def chat(req: ChatRequest, request: Request):
     if thread_id:
         req.thread_id = thread_id
 
+    # ---- P2 长跑前置：门禁、单 AI 校验、运行态去重 ----
+    loop_task = (getattr(req, "loop_task", None) or "").strip()
+    loop_ctx = None
+    loop_mgr = getattr(state, "loop_manager", None)
+    if loop_task:
+        loop_cfg = getattr(state.config, "loop", None)
+        if loop_cfg is None or not loop_cfg.enabled:
+            raise HTTPException(400, "长跑模式未启用")
+        if loop_mgr is None:
+            raise HTTPException(400, "长跑状态机未就绪")
+        if thread_id:
+            th = session.thread(thread_id)
+            ai_members = [
+                session.member(mid) for mid in (getattr(th, "member_ids", []) or [])
+            ]
+            ai_count = sum(
+                1 for m in ai_members if m is not None and not m.is_user
+            )
+            if ai_count > 1:
+                raise HTTPException(400, "长跑模式仅支持单 AI 会话")
+        existing = await asyncio.to_thread(
+            loop_mgr.running_for, sc.uid, session.id
+        )
+        if existing is not None:
+            raise HTTPException(409, "该会话已有运行中的长跑任务")
+
     # 会话级互斥快速预检（权威 check-and-set 在各路径落消息前完成）：
-    # 同一房间任意窗口有运行中的回答 → 拒绝重复发起，客户端应走重连
-    run_manager = _get_run_manager(state)
+    # 同一房间任意窗口有运行中的回答 → 普通会话拒绝；长跑会话改道打断队列
+    run_manager = run_manager or _get_run_manager(state)
     if run_manager.active_in_session(sc.uid, session.id) is not None:
+        routed = None
+        if loop_mgr is not None and req.message.strip():
+            routed = await asyncio.to_thread(
+                loop_mgr.running_for, sc.uid, session.id
+            )
+        if routed is not None:
+            hub = getattr(state, "interrupt_hub", None)
+            if hub is not None:
+                hub.push(session.id, {
+                    "text": req.message, "name": "",
+                    "uid": sc.uid, "ts": time.time(),
+                })
+                return JSONResponse({
+                    "queued": True, "loop_id": routed["id"],
+                    "pending": hub.pending(session.id),
+                })
         raise HTTPException(409, "该会话已有进行中的回答，请等待结束或重连续读")
 
+    # 建长跑运行态行（reconcile 权威依据），再进入常规驱动
+    if loop_task:
+        loop_id = await asyncio.to_thread(
+            loop_mgr.session_create, sc.uid, session.id, loop_task,
+            int(getattr(req, "loop_request_id", 0) or 0),
+        )
+        loop_ctx = LoopContext(task=loop_task, loop_db_id=loop_id)
+
     if thread_id:
-        return await _chat_in_thread(state, sc, session, req, None, run_manager)
+        return await _chat_in_thread(
+            state, sc, session, req, None, run_manager, loop_ctx=loop_ctx
+        )
 
     # ---- 旧单 AI 会话路径 ----
     # 请求级 provider 在此解析（房间路径的座位级解析在 _chat_in_thread 内）
@@ -558,6 +775,8 @@ async def chat(req: ChatRequest, request: Request):
     _registry = getattr(state, "registry", None)
     # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
     custom_extras = _custom_extras(state, sc, session.id)
+    # P2 长跑：追加仅长跑可见的 loop_finish
+    loop_extras = _loop_extras(custom_extras, loop_ctx)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -565,7 +784,7 @@ async def chat(req: ChatRequest, request: Request):
                 set(getattr(req, "disabled_tools", None) or [])
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
-            extra_names={t.name for t in custom_extras},
+            extra_names={t.name for t in loop_extras},
         )
         if hasattr(_registry, "all") else None
     )
@@ -621,6 +840,12 @@ async def chat(req: ChatRequest, request: Request):
     attr_defs = resolve_attribute_defs(character, eff_roleplay)
     if attr_defs:
         services["attributes"] = AttributeManager(session, attr_defs)
+    # P2 长跑：功能开启即注入工具服务；loop_ctx 存在时再加引擎四个钩子
+    if getattr(getattr(state.config, "loop", None), "enabled", False):
+        _install_loop_services(
+            services, state, sc, loop_ctx, provider,
+            loop_starter=_make_loop_starter(state, sc, run_manager),
+        )
 
     # 权威 check-and-set：独占会话后再落用户消息；抢锁失败则未做任何变更
     run = run_manager.create(sc.uid, session.id)
@@ -744,7 +969,8 @@ async def chat(req: ChatRequest, request: Request):
                 uid=sc.uid,
                 level=sc.level,
                 is_admin=(sc.uid == ADMIN_UID),
-                extra_tools=custom_extras,
+                extra_tools=loop_extras,
+                loop_ctx=loop_ctx,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -759,16 +985,27 @@ async def chat(req: ChatRequest, request: Request):
                 history=session.messages, member=None,
                 provider=provider,
             )
+            await _finalize_loop(
+                state, sc, session.id, loop_ctx, session.messages
+            )
             return "done"
         except ProviderError as exc:
             logger.warning("provider 错误: %s", exc)
             billing.refund(state, sc.uid, cost)  # 回复未生成：退回本轮费用
             await run.emit("error", {"message": str(exc), "fatal": True})
             sc.store.save(session)
+            await _finalize_loop(
+                state, sc, session.id, loop_ctx, session.messages, failed=True
+            )
             return "error"
         except asyncio.CancelledError:
             # 用户主动停止：模型已实际调用，不退款；已生成部分照样落盘
             sc.store.save(session)
+            if loop_ctx is not None:
+                loop_ctx.stop_status = LOOP_STOPPED
+                await _finalize_loop(
+                    state, sc, session.id, loop_ctx, session.messages
+                )
             raise
         except Exception as exc:
             logger.exception("聊天流异常")
@@ -778,6 +1015,9 @@ async def chat(req: ChatRequest, request: Request):
                 {"message": f"{type(exc).__name__}: {exc}", "fatal": True},
             )
             sc.store.save(session)
+            await _finalize_loop(
+                state, sc, session.id, loop_ctx, session.messages, failed=True
+            )
             return "error"
 
     _spawn_run(run, drive, run_manager)
@@ -856,7 +1096,8 @@ def _merge_galgame_tts_overlay(state, session) -> None:
 
 
 async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
-                          run_manager: Optional[ChatRunManager] = None):
+                          run_manager: Optional[ChatRunManager] = None,
+                          loop_ctx: Optional[LoopContext] = None):
     """beta：把用户消息投进指定窗口，并按窗口内 AI 座位逐一响应（fan-out）。
 
     - dm 窗口：单 AI，等价旧单 AI 会话，但历史/角色取该窗口。
@@ -879,6 +1120,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             speakers.append(m)
     if not speakers:
         raise HTTPException(400, "窗口内没有 AI 参与者")
+    # P2 长跑只承载单 AI 任务（submit_chat 已预校验，这里兜底防内部调用）
+    if loop_ctx is not None and len(speakers) > 1:
+        raise HTTPException(400, "长跑模式仅支持单 AI 会话")
 
     # 发言顺序（仅 group；dm 恒为单座位，不受影响）：
     # 被 @ 的座位按 @ 出现顺序优先（去重），其余座位跟后；
@@ -909,6 +1153,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     _registry = getattr(state, "registry", None)
     # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
     custom_extras = _custom_extras(state, sc, session.id)
+    # P2 长跑：追加仅长跑可见的 loop_finish
+    loop_extras = _loop_extras(custom_extras, loop_ctx)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -916,7 +1162,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 set(getattr(req, "disabled_tools", None) or [])
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
-            extra_names={t.name for t in custom_extras},
+            extra_names={t.name for t in loop_extras},
         )
         if hasattr(_registry, "all") else None
     )
@@ -1078,6 +1324,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
 
     async def drive():
         unspent = total_cost  # 预扣费用中尚未实际发生的部分，跳过/出错/取消时退回
+        # P2 长跑收尾标志：finally 统一写 loop_sessions 终态
+        loop_failed = False
+        loop_cancelled = False
         try:
             await run.emit(
                 "message_start",
@@ -1168,6 +1417,15 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     getattr(req, "image_engine", "") or ""
                 ).strip()
                 services["llm_provider"] = spk_provider
+                # P2 长跑：仅首座位携带 loop_ctx（长跑限定单 AI），其余座位只给工具服务
+                if getattr(getattr(state, "config", None), "loop", None) is not None \
+                        and state.config.loop.enabled:
+                    _install_loop_services(
+                        services, state, sc,
+                        loop_ctx if spk is speakers[0] else None,
+                        spk_provider,
+                        loop_starter=_make_loop_starter(state, sc, run_manager),
+                    )
                 # RAG 语义检索：配了 embeddings 提供商才注入，否则工具回退关键词检索
                 _get_emb = getattr(state, "get_embedder", None)
                 services["embedder"] = _get_emb() if _get_emb else None
@@ -1322,7 +1580,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         uid=sc.uid,
                         level=sc.level,
                         is_admin=(sc.uid == ADMIN_UID),
-                        extra_tools=custom_extras,
+                        extra_tools=loop_extras,
+                        loop_ctx=(
+                            loop_ctx if spk is speakers[0] else None
+                        ),
                     ):
                         if ev == "done":
                             done_data = data
@@ -1411,10 +1672,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             logger.warning("provider 错误: %s", exc)
             billing.refund(state, sc.uid, unspent)  # 未发言座位的费用退回
             await run.emit("error", {"message": str(exc), "fatal": True})
+            loop_failed = True
             return "error"
         except asyncio.CancelledError:
             # 用户主动停止：未发言座位没执行，退回其费用；已发言的不退
             billing.refund(state, sc.uid, unspent)
+            loop_cancelled = True
             raise  # finally 仍执行：edit/regen 回滚或保留 + 保存
         except Exception as exc:
             logger.exception("群聊流异常")
@@ -1423,6 +1686,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 "error",
                 {"message": f"{type(exc).__name__}: {exc}", "fatal": True},
             )
+            loop_failed = True
             return "error"
         finally:
             # 收编本轮回复为新 reply variant；空产出回滚。正常群聊 mode="" 时只保存
@@ -1433,6 +1697,14 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 state.galgame_choices.discard(run.id)
                 _merge_galgame_tts_overlay(state, session)
             sc.store.save(session)
+            # P2 长跑终态落 agent.db（loop_ctx 为 None 时直接空转）
+            if loop_ctx is not None:
+                if loop_cancelled:
+                    loop_ctx.stop_status = LOOP_STOPPED
+                await _finalize_loop(
+                    state, sc, session.id, loop_ctx, history,
+                    failed=loop_failed,
+                )
 
     _spawn_run(run, drive, run_manager)
     return _sse_response(run)
