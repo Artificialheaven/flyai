@@ -31,6 +31,9 @@ from ..config import (
     SchedulerSettings,
     CustomToolSettings,
     LoopSettings,
+    MoodSettings,
+    ProactorSettings,
+    SelfMemorySettings,
     mask_api_key,
     save_config,
 )
@@ -96,6 +99,10 @@ class ConfigPayload(BaseModel):
     scheduler: Optional[dict] = None
     custom_tools: Optional[dict] = None
     loop: Optional[dict] = None
+    # P3 心情/自我记忆/主动行为（均无密钥，整段读写）
+    mood: Optional[dict] = None
+    self_memory: Optional[dict] = None
+    proactor: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -190,6 +197,10 @@ def _masked_config(state, uid: Optional[str] = None):
         "scheduler": cfg.scheduler.dict(),
         "custom_tools": cfg.custom_tools.dict(),
         "loop": cfg.loop.dict(),
+        # P3 三段不含密钥，与 scheduler 同策略对所有登录用户可见
+        "mood": cfg.mood.dict(),
+        "self_memory": cfg.self_memory.dict(),
+        "proactor": cfg.proactor.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -335,6 +346,17 @@ def put_config(payload: ConfigPayload, request: Request):
     if payload.loop is not None:
         # 热重建工具表时 _reload_tools 会注册/摘除 loop 工具并同步 loop_manager
         cfg.loop = LoopSettings.parse_obj(dict(payload.loop))
+
+    if payload.mood is not None:
+        # _reload_tools 会把新设置同步给 mood_store
+        cfg.mood = MoodSettings.parse_obj(dict(payload.mood))
+
+    if payload.self_memory is not None:
+        cfg.self_memory = SelfMemorySettings.parse_obj(dict(payload.self_memory))
+
+    if payload.proactor is not None:
+        # ticker 每 tick 读 store.settings，保存后自然热生效
+        cfg.proactor = ProactorSettings.parse_obj(dict(payload.proactor))
 
     _persist(state)
     if scheduler_changed:

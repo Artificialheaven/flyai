@@ -52,6 +52,12 @@ TOOL_CATEGORIES = {
     # P2 长跑模式（仅全局；loop_finish 为请求级 extra，不在全局表中）
     "loop_request": "loop",
     "loop_start": "loop",
+    # P3 第一人称自我记忆（仅全局，默认开）
+    "remember_self": "self_memory",
+    "recall_self": "self_memory",
+    # P3 承诺/提醒（随主动行为总闸，默认关）
+    "remember_commitment": "proactor",
+    "close_commitment": "proactor",
     # 已上线的自定义函数工具名是动态的（custom__<name>），按前缀识别
 }
 
@@ -66,6 +72,8 @@ _GLOBAL_FLAGS = {
     "sandbox": ("sandbox", False),
     "custom_tools": ("custom_tools", False),
     "loop": ("loop", False),
+    "self_memory": ("self_memory", True),
+    "proactor": ("proactor", False),
 }
 
 # 类别 → UserSettings 上的覆盖字段名
@@ -187,7 +195,8 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
 
     on_categories = {"base"}
     for category in ("web", "browser", "pixiv", "image", "galgame", "tts",
-                     "sandbox", "custom_tools", "loop"):
+                     "sandbox", "custom_tools", "loop", "self_memory",
+                     "proactor"):
         if feature_enabled(category, cfg, user_settings):
             on_categories.add(category)
 

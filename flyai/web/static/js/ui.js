@@ -160,6 +160,29 @@ function cacheElements() {
   el.setLoopKeepRounds = document.getElementById("set-loop-keep-rounds");
   el.setLoopContextWindow = document.getElementById("set-loop-context-window");
   el.setLoopRequestLevel = document.getElementById("set-loop-request-level");
+  // P3 心情 / 自我记忆 / 主动行为设置
+  el.setMoodEnabled = document.getElementById("set-mood-enabled");
+  el.setMoodBaseline = document.getElementById("set-mood-baseline");
+  el.setMoodDeltaThreshold = document.getElementById("set-mood-delta-threshold");
+  el.setMoodMinConfidence = document.getElementById("set-mood-min-confidence");
+  el.setMoodDailyCap = document.getElementById("set-mood-daily-cap");
+  el.setMoodTimelineKeep = document.getElementById("set-mood-timeline-keep");
+  el.setMoodJudgeProvider = document.getElementById("set-mood-judge-provider");
+  el.setMoodJudgeModel = document.getElementById("set-mood-judge-model");
+  el.setSmEnabled = document.getElementById("set-sm-enabled");
+  el.setSmQuota = document.getElementById("set-sm-quota");
+  el.setSmTopk = document.getElementById("set-sm-topk");
+  el.setSmBudget = document.getElementById("set-sm-budget");
+  el.setProEnabled = document.getElementById("set-pro-enabled");
+  el.setProWakeCheck = document.getElementById("set-pro-wake-check");
+  el.setProWakeProb = document.getElementById("set-pro-wake-prob");
+  el.setProWakeN = document.getElementById("set-pro-wake-n");
+  el.setProActiveHours = document.getElementById("set-pro-active-hours");
+  el.setProPeak = document.getElementById("set-pro-peak");
+  el.setProValley = document.getElementById("set-pro-valley");
+  el.setProCooldown = document.getElementById("set-pro-cooldown");
+  el.setProQuiet = document.getElementById("set-pro-quiet");
+  el.setProPollsMax = document.getElementById("set-pro-polls-max");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");
@@ -194,6 +217,8 @@ function cacheElements() {
   el.userName = document.getElementById("user-name");
   el.btnUsers = document.getElementById("btn-users");
   el.btnLoop = document.getElementById("btn-loop");
+  el.btnMood = document.getElementById("btn-mood");
+  el.btnProactive = document.getElementById("btn-proactive");
   el.userDialog = document.getElementById("user-dialog");
   el.userList = document.getElementById("user-list");
   el.userNameInput = document.getElementById("user-new-name");
@@ -433,6 +458,12 @@ function bindEvents() {
   if (el.btnUsers) el.btnUsers.addEventListener("click", openUserDialog);
   if (el.btnLoop) el.btnLoop.addEventListener("click", function () {
     if (window.openLoopManager) openLoopManager();
+  });
+  if (el.btnMood) el.btnMood.addEventListener("click", function () {
+    if (window.openMoodManager) openMoodManager();
+  });
+  if (el.btnProactive) el.btnProactive.addEventListener("click", function () {
+    if (window.openProactiveManager) openProactiveManager();
   });
   if (el.btnJump) el.btnJump.addEventListener("click", jumpBottom);
   if (el.messages) el.messages.addEventListener("scroll", onMessagesScroll);

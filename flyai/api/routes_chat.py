@@ -28,6 +28,12 @@ from ..agentdb.loop_store import (
     LOOP_INTERRUPTED,
     LOOP_STOPPED,
 )
+from ..proactor.integrate import (
+    extract_self_after_turn,
+    handle_post_turn_mood,
+    transcript_from_history,
+)
+from ..proactor.live_ctx import had_pending_announce, render_for_turn
 from ..providers.base import StreamEventType
 from ..tools.loop_tools import LoopFinishTool
 from .. import billing, feature_prefs
@@ -113,6 +119,36 @@ async def _summarize_for_compact(provider, head_text: str) -> str:
         return "（摘要生成失败，已保留最近工作轮次，早期上下文被截断）"
     note = "".join(parts).strip()
     return note or "（摘要为空，已保留最近工作轮次）"
+
+
+def _install_proactor_services(services: dict, state, sc, member=None) -> None:
+    """P3：把自我记忆/承诺存储按开关注入工具服务；缺失或关闭即不注入。"""
+    cfg = getattr(state, "config", None)
+    sm_store = getattr(state, "self_memory_store", None)
+    if sm_store is not None and getattr(getattr(cfg, "self_memory", None),
+                                        "enabled", True):
+        services["self_memory_store"] = sm_store
+    c_store = getattr(state, "commitment_store", None)
+    if c_store is not None and getattr(getattr(cfg, "proactor", None),
+                                       "enabled", False):
+        services["commitment_store"] = c_store
+        services["tzname"] = getattr(
+            getattr(cfg, "scheduler", None), "timezone", "Asia/Shanghai"
+        )
+        if member is not None:
+            services["member"] = member
+
+
+async def _touch_proactor(state, sc, session_id: str) -> None:
+    """真人消息到达：刷新 opt-in 会话的活跃时间（未开启时存储内空转）。"""
+    store = getattr(state, "proactor_store", None)
+    if store is None or not getattr(getattr(state.config, "proactor", None),
+                                    "enabled", False):
+        return
+    try:
+        await asyncio.to_thread(store.touch_human, sc.uid, session_id)
+    except Exception:
+        logger.exception("主动行为活跃时间刷新失败")
 
 
 def _loop_extras(custom_extras: list, loop_ctx: Optional[LoopContext]) -> list:
@@ -846,6 +882,8 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             services, state, sc, loop_ctx, provider,
             loop_starter=_make_loop_starter(state, sc, run_manager),
         )
+    # P3 自我记忆/承诺工具服务（按各自开关）
+    _install_proactor_services(services, state, sc)
 
     # 权威 check-and-set：独占会话后再落用户消息；抢锁失败则未做任何变更
     run = run_manager.create(sc.uid, session.id)
@@ -943,12 +981,20 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             ]
             phi = "\n\n".join(p for p in phi_parts if p.strip())
             recall_head = len(session.messages)
+            # P3 LIVE_CTX：逐轮易变内容走尾部 system，静态前缀保持字节稳定
+            live_block = await render_for_turn(
+                state, sc, session_id=session.id,
+                character_id=session.character_id or "",
+                query=req.message or "",
+            )
+            await _touch_proactor(state, sc, session.id)
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
                 provider=provider,
                 registry=state.registry,
                 settings=eff_tools,
                 system_prompt=system_prompt + system_extra,
+                live_ctx=live_block,
                 session_id=session.id,
                 services=services,
                 web_max_iterations=getattr(
@@ -985,6 +1031,15 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 history=session.messages, member=None,
                 provider=provider,
             )
+            # P3 轮后：心情判定/宣布消费 + 第一人称自我记忆抽取（失败不阻断）
+            turn_text = transcript_from_history(session.messages)
+            await handle_post_turn_mood(
+                state, sc, session_id=session.id,
+                character_id=session.character_id or "",
+                transcript=turn_text, provider=provider,
+                had_pending=had_pending_announce(live_block),
+            )
+            await extract_self_after_turn(state, sc, turn_text)
             await _finalize_loop(
                 state, sc, session.id, loop_ctx, session.messages
             )
@@ -1333,6 +1388,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 {"session_id": session.id, "thread_id": thread.id,
                  "character_id": "", "world_id": ""},
             )
+            # P3：真人发起的本轮刷新主动行为活跃时间（未 opt-in 时空转）
+            await _touch_proactor(state, sc, session.id)
             # 编辑/重生成：流式起点（此刻 history 末尾即锚点用户消息）
             mode_head = len(history) if mode else 0
             # 房间默认 provider 的懒解析副本（勿在 drive 内直接给外层 provider
@@ -1426,6 +1483,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         spk_provider,
                         loop_starter=_make_loop_starter(state, sc, run_manager),
                     )
+                # P3 自我记忆/承诺工具服务（按各自开关；member 取本座位）
+                _install_proactor_services(services, state, sc, spk)
                 # RAG 语义检索：配了 embeddings 提供商才注入，否则工具回退关键词检索
                 _get_emb = getattr(state, "get_embedder", None)
                 services["embedder"] = _get_emb() if _get_emb else None
@@ -1547,6 +1606,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             ),
                         )
                     })
+                # P3 LIVE_CTX：按本座位角色的心情/约定组装尾部实时块
+                live_block = await render_for_turn(
+                    state, sc, session_id=session.id,
+                    character_id=spk.character_id or "",
+                    query=req.message or "",
+                )
                 while True:
                     attempts += 1
                     before = len(history)
@@ -1573,6 +1638,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         allowed_tools=allowed_tools,
                         deep_thinking=getattr(req, "deep_thinking", False),
                         post_history_instructions=preset_phi,
+                        live_ctx=live_block,
                         max_tokens=eff_max_tokens,
                         depth_blocks=depth_specs + rendered_preset.depth_blocks,
                         extra_params=rendered_preset.params or None,
@@ -1665,6 +1731,21 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     history=history, member=spk,
                     provider=spk_provider,
                 )
+                # P3 轮后心情：跳过的座位没有真实发言，不判定、不消费宣布
+                if not skipped:
+                    await handle_post_turn_mood(
+                        state, sc, session_id=session.id,
+                        character_id=spk.character_id or "",
+                        transcript=transcript_from_history(
+                            history, head=head_snapshot, actor_id=spk.id
+                        ),
+                        provider=spk_provider,
+                        had_pending=had_pending_announce(live_block),
+                    )
+            # P3 第一人称自我记忆：每请求一次（全局视角，不按座位重复）
+            await extract_self_after_turn(
+                state, sc, transcript_from_history(history)
+            )
             _merge_galgame_tts_overlay(state, session)
             sc.store.save(session)
             return "done"

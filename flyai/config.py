@@ -594,6 +594,100 @@ class LoopSettings(BaseModel):
             return 0
 
 
+class MoodSettings(BaseModel):
+    """心情系统（P3）：半衰期心情值 + 七绪，便宜模型判定、本地二次限幅。
+
+    默认关闭。判定结果只通过 LIVE_CTX 尾部块注入；显著波动每天最多宣布
+    daily_cap 次，且「先 pending、ChatRun 成功后再 consumed」避免丢失宣布。
+    """
+
+    enabled: bool = False
+    baseline: int = 70              # 心情基线/回归值
+    delta_threshold: int = 5        # |delta| 达到该值才允许宣布
+    min_confidence: int = 60        # 判定置信度下限（0-100）
+    daily_cap: int = 6              # 每天最多注入宣布次数
+    timeline_keep: int = 200        # 每会话时间线保留条数
+    judge_provider_id: str = ""     # 判定模型路由；空=当前激活 provider
+    judge_model: str = ""
+
+    @validator("baseline", "delta_threshold", "min_confidence",
+               "daily_cap", "timeline_keep")
+    def _clamp_ints(cls, v):  # noqa: N805
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+
+class SelfMemorySettings(BaseModel):
+    """第一人称自我记忆（P3）：全局「我」视角，复用 BM25 召回。
+
+    默认启用但只在对应工具暴露时生效；每日写配额只对新建计费，更新不计费。
+    """
+
+    enabled: bool = True
+    daily_quota: int = 8
+    recall_topk: int = 5
+    recall_budget: int = 300        # 召回文本注入的字符预算
+
+    @validator("daily_quota", "recall_topk")
+    def _clamp_pos(cls, v):  # noqa: N805
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 1
+
+    @validator("recall_budget")
+    def _clamp_budget(cls, v):  # noqa: N805
+        try:
+            return max(50, int(v))
+        except (TypeError, ValueError):
+            return 300
+
+
+class ProactorSettings(BaseModel):
+    """主动行为（P3）：总闸默认关闭，按会话 opt-in。
+
+    30 分钟一个 tick：基础唤醒概率 + 连续未中保底；主动搭话按工作日峰谷、
+    冷场乘子、自冷却与静默时段约束。触发只产生后台 ChatRun，模型可用
+    [静默] 选择不发言。
+    """
+
+    enabled: bool = False
+    wake_check_minutes: int = 30
+    wake_prob_percent: int = 10
+    wake_every_n: int = 20
+    active_hours: float = 12.0
+    speakup_peak_percent: int = 20
+    speakup_valley_percent: int = 60
+    self_cooldown_minutes: int = 20
+    quiet_hours: str = "01:00-08:00"
+    polls_max_per_session: int = 10
+
+    @validator("wake_check_minutes", "wake_every_n",
+               "self_cooldown_minutes", "polls_max_per_session")
+    def _clamp_pos_int(cls, v):  # noqa: N805
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 1
+
+    @validator("wake_prob_percent", "speakup_peak_percent",
+               "speakup_valley_percent")
+    def _clamp_pct(cls, v):  # noqa: N805
+        try:
+            return min(100, max(0, int(v)))
+        except (TypeError, ValueError):
+            return 0
+
+    @validator("active_hours")
+    def _clamp_hours(cls, v):  # noqa: N805
+        try:
+            return min(72.0, max(0.5, float(v)))
+        except (TypeError, ValueError):
+            return 12.0
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -615,6 +709,9 @@ class AppConfig(BaseModel):
     scheduler: SchedulerSettings = SchedulerSettings()
     custom_tools: CustomToolSettings = CustomToolSettings()
     loop: LoopSettings = LoopSettings()
+    mood: MoodSettings = MoodSettings()
+    self_memory: SelfMemorySettings = SelfMemorySettings()
+    proactor: ProactorSettings = ProactorSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

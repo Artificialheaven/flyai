@@ -271,6 +271,7 @@ async def run_agent_loop(
     allowed_tools: Optional[set] = None,
     deep_thinking: bool = False,
     post_history_instructions: str = "",
+    live_ctx: str = "",
     max_tokens: Optional[int] = None,
     depth_blocks: Optional[List[Dict[str, Any]]] = None,
     extra_params: Optional[Dict[str, Any]] = None,
@@ -299,6 +300,8 @@ async def run_agent_loop(
     OpenAI 兼容厂商合并模型配置的 thinking_params 请求片段）。
     post_history_instructions：角色卡 PHI，每轮追加在聊天历史之后（工具续写
     nudge 之前），不写入 history；空串不追加。
+    live_ctx：P3 尾部实时块（时钟/心情/自我记忆/约定/独白），在 PHI 之后
+    独立成一条 system 消息；空串不追加，不写入 history。
     max_tokens：本轮回复 token 上限覆盖（窗口 > 用户全局 > 提供商配置），
     None/0 时不传，由提供商按自身配置处理。
     depth_blocks：酒馆 @depth 常驻块（世界书条目/预设 prompt），每轮在
@@ -392,6 +395,11 @@ async def run_agent_loop(
         phi = (post_history_instructions or "").strip()
         if phi:
             msgs.append(Message(role="system", content=phi))
+        # P3 LIVE_CTX：逐轮易变的实时块（心情/自我记忆/约定/时钟/独白），
+        # 独立一条尾部 system，保证静态前缀字节稳定以命中前缀缓存
+        live = (live_ctx or "").strip()
+        if live:
+            msgs.append(Message(role="system", content=live))
         if pending_nudge:
             msgs.append(Message(role="system", content=_POST_TOOL_NUDGE))
         if idle_nudge:

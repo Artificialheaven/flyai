@@ -167,5 +167,33 @@
     "keep_rounds": 4,
     "context_window": 0,
     "request_min_level": 0
+  },
+  "mood": {
+    "enabled": false,
+    "baseline": 70,
+    "delta_threshold": 5,
+    "min_confidence": 60,
+    "daily_cap": 6,
+    "timeline_keep": 200,
+    "judge_provider_id": "",
+    "judge_model": ""
+  },
+  "self_memory": {
+    "enabled": true,
+    "daily_quota": 8,
+    "recall_topk": 5,
+    "recall_budget": 300
+  },
+  "proactor": {
+    "enabled": false,
+    "wake_check_minutes": 30,
+    "wake_prob_percent": 10,
+    "wake_every_n": 20,
+    "active_hours": 12.0,
+    "speakup_peak_percent": 20,
+    "speakup_valley_percent": 60,
+    "self_cooldown_minutes": 20,
+    "quiet_hours": "01:00-08:00",
+    "polls_max_per_session": 10
   }
 }

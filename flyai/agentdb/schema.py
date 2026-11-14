@@ -76,6 +76,131 @@ MIGRATIONS: Dict[int, List[str]] = {
         """,
         "CREATE INDEX IF NOT EXISTS idx_loop_sess_status ON loop_sessions(status, session_id)",
     ],
+    4: [
+        # P3 心情：每（会话,角色）一行的锚点状态 + 「只宣布一次」状态机
+        """
+        CREATE TABLE IF NOT EXISTS mood_state (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            character_id    TEXT NOT NULL,
+            mood            REAL NOT NULL DEFAULT 70,
+            dims            TEXT NOT NULL DEFAULT '{}',
+            updated_at      REAL NOT NULL DEFAULT 0,
+            inject_count    INTEGER NOT NULL DEFAULT 0,
+            inject_date     TEXT NOT NULL DEFAULT '',
+            announce_status TEXT NOT NULL DEFAULT '',  -- ''|pending|injected
+            announce_text   TEXT NOT NULL DEFAULT '',
+            UNIQUE(session_id, character_id)
+        )
+        """,
+        # P3 心情判定流水（按会话裁剪保留 N 条）
+        """
+        CREATE TABLE IF NOT EXISTS mood_timeline (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL,
+            character_id TEXT NOT NULL,
+            delta        REAL NOT NULL DEFAULT 0,
+            dims         TEXT NOT NULL DEFAULT '{}',
+            reason       TEXT NOT NULL DEFAULT '',
+            confidence   INTEGER NOT NULL DEFAULT 0,
+            source       TEXT NOT NULL DEFAULT 'human',
+            created_at   REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_mood_tl ON mood_timeline(session_id, id)",
+        # P3 第一人称自我记忆（全局视角，不绑角色卡）
+        """
+        CREATE TABLE IF NOT EXISTS self_memories (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            statement      TEXT NOT NULL,
+            tags           TEXT NOT NULL DEFAULT '',
+            importance     REAL NOT NULL DEFAULT 0.5,
+            superseded     INTEGER NOT NULL DEFAULT 0,
+            supersedes_id  INTEGER NOT NULL DEFAULT 0,
+            created_at     REAL NOT NULL,
+            last_accessed  REAL NOT NULL DEFAULT 0,
+            access_count   INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_self_mem_active ON self_memories(superseded, id)",
+        # P3 自我记忆每日写配额（本地自然日）
+        """
+        CREATE TABLE IF NOT EXISTS self_memory_state (
+            date          TEXT PRIMARY KEY,
+            created_count INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        # P3 回忆链审计流水（永不拼进模型上下文）
+        """
+        CREATE TABLE IF NOT EXISTS self_memory_traces (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind       TEXT NOT NULL,  -- recall|revise|supersede
+            memory_id  INTEGER NOT NULL DEFAULT 0,
+            detail     TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        )
+        """,
+        # P3 约定/待办与到期提醒（与剧情台账职责分离）
+        """
+        CREATE TABLE IF NOT EXISTS commitments (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            owner_name TEXT NOT NULL DEFAULT '',
+            content    TEXT NOT NULL,
+            due_at     REAL NOT NULL DEFAULT 0,
+            status     TEXT NOT NULL DEFAULT 'open',  -- open|closed|cancelled
+            reminded   INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            closed_at  REAL NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_commit_due ON commitments(status, reminded, due_at)",
+        # P3 定时作业：once/daily/weekly，严格未来语义
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL,
+            mode         TEXT NOT NULL,  -- once|daily|weekly
+            hhmm         TEXT NOT NULL,
+            weekday      INTEGER NOT NULL DEFAULT -1,
+            brief        TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            next_run_at  REAL NOT NULL,
+            last_run_at  REAL NOT NULL DEFAULT 0,
+            last_status  TEXT NOT NULL DEFAULT '',
+            created_at   REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_jobs_due ON scheduled_jobs(enabled, next_run_at)",
+        # P3 会话内自建轮询（每会话上限由配置约束）
+        """
+        CREATE TABLE IF NOT EXISTS polls (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            title              TEXT NOT NULL DEFAULT '',
+            probability        INTEGER NOT NULL DEFAULT 10,
+            wake_every_n       INTEGER NOT NULL DEFAULT 20,
+            active_hours       REAL NOT NULL DEFAULT 12,
+            ticks_since_fire   INTEGER NOT NULL DEFAULT 0,
+            enabled            INTEGER NOT NULL DEFAULT 1,
+            created_at         REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_polls_sess ON polls(session_id, enabled)",
+        # P3 主动行为状态：会话 opt-in 开关 + 保底计数/冷却（重启不丢）
+        """
+        CREATE TABLE IF NOT EXISTS proactor_state (
+            session_id        TEXT PRIMARY KEY,
+            enabled           INTEGER NOT NULL DEFAULT 0,
+            wake_miss_streak  INTEGER NOT NULL DEFAULT 0,
+            last_wake_at      REAL NOT NULL DEFAULT 0,
+            last_speakup_at   REAL NOT NULL DEFAULT 0,
+            -- 最后一条真人消息时间：活跃门依据（消息模型本身无时间戳）
+            last_human_at     REAL NOT NULL DEFAULT 0,
+            updated_at        REAL NOT NULL
+        )
+        """,
+    ],
 }
 
 DB_VERSION = max(MIGRATIONS)

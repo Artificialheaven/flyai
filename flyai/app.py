@@ -8,7 +8,7 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -94,6 +94,14 @@ class AppState:
     # P2 长跑：每用户 agent.db 状态机（申请/运行/重启 reconcile）+ 安全点打断队列
     loop_manager: Optional[LoopManager] = None
     interrupt_hub: InterruptHub = field(default_factory=InterruptHub)
+    # P3 心情/自我记忆/主动行为：每用户 agent.db 的同步 DAL（None=未就绪）
+    mood_store: Optional[Any] = None
+    self_memory_store: Optional[Any] = None
+    proactor_store: Optional[Any] = None
+    job_store: Optional[Any] = None
+    commitment_store: Optional[Any] = None
+    # 判定模型派生 provider 缓存：(provider_id, model) -> provider
+    _judge_providers: Dict[str, Any] = field(default_factory=dict)
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -323,6 +331,24 @@ class AppState:
                 if tool.name == "loop_request":
                     tool.min_level = int(self.config.loop.request_min_level)
                 self.registry.register(tool)
+        # P3：设置热同步给 DAL/ticker（时区改名即时生效）；工具恒注册，
+        # 是否暴露给模型由 feature_prefs 的 self_memory/proactor 类别过滤
+        tzname = self.config.scheduler.timezone
+        if self.mood_store is not None:
+            self.mood_store.settings = self.config.mood
+            self.mood_store.tzname = tzname
+        if self.self_memory_store is not None:
+            self.self_memory_store.settings = self.config.self_memory
+            self.self_memory_store.tzname = tzname
+        if self.proactor_store is not None:
+            self.proactor_store.settings = self.config.proactor
+            self.proactor_store.tzname = tzname
+        if self.job_store is not None:
+            self.job_store.tzname = tzname
+        from .tools.proactor_tools import PROACTOR_TOOLS
+
+        for proactor_tool_cls in PROACTOR_TOOLS:
+            self.registry.register(proactor_tool_cls())
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -394,6 +420,23 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                                reconciled)
         except Exception:
             logger.exception("长跑 reconcile 失败，不阻断启动")
+        # P3 存储层：心情/自我记忆/主动行为/作业/承诺（每用户 agent.db 短连接）
+        tzname = state.config.scheduler.timezone
+        from .agentdb.self_memory import SelfMemoryStore
+        from .proactor.mood import MoodStore
+        from .proactor.proactor import ProactorStore, ProactorTicker
+        from .proactor.reminders import CommitmentStore, ReminderTicker
+        from .proactor.scheduler_jobs import JobStore, JobTicker
+
+        state.mood_store = MoodStore(data_dir, state.config.mood, tzname)
+        state.self_memory_store = SelfMemoryStore(
+            data_dir, state.config.self_memory, tzname
+        )
+        state.proactor_store = ProactorStore(
+            data_dir, state.config.proactor, tzname
+        )
+        state.job_store = JobStore(data_dir, tzname)
+        state.commitment_store = CommitmentStore(data_dir)
         state.reload_tools()
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
@@ -404,6 +447,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
         # 后台调度服务：enabled=false 时内部直接待命，领导锁保证多 worker 单实例
         state.scheduler = SchedulerService(state)
+        state.scheduler.add_ticker(ProactorTicker(state, state.proactor_store))
+        state.scheduler.add_ticker(JobTicker(state, state.job_store))
+        state.scheduler.add_ticker(ReminderTicker(
+            state, state.commitment_store, state.proactor_store,
+            check_seconds=state.config.scheduler.reminder_check_seconds,
+        ))
         await state.scheduler.start()
         app.state.flyai = state
         logger.info(
@@ -468,6 +517,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_memory import router as memory_router
     from .api.routes_plugins import router as plugins_router
     from .api.routes_preset import router as preset_router
+    from .api.routes_proactor import router as proactor_router
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
 
@@ -482,6 +532,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(memory_router)
     app.include_router(plugins_router)
     app.include_router(preset_router)
+    app.include_router(proactor_router)
     app.include_router(room_router)
     app.include_router(session_router)
 

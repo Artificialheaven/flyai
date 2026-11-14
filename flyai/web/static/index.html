@@ -69,6 +69,8 @@
         <button id="btn-batch-delete" class="footer-btn">🗑 批量删除</button>
         <button id="btn-users" class="footer-btn hidden">👥 用户管理</button>
         <button id="btn-loop" class="footer-btn hidden">🔁 长跑任务</button>
+        <button id="btn-mood" class="footer-btn hidden">💗 心情管理</button>
+        <button id="btn-proactive" class="footer-btn hidden">🔔 主动行为</button>
         <button id="btn-theme" class="footer-btn">🌗 切换主题</button>
         <p class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">冀ICP备2025098938号-2</a></p>
       </div>
@@ -821,6 +823,72 @@
           <label class="f-label">loop_request 最低用户等级（0=仅管理员）
             <input type="number" id="set-loop-request-level" value="0" min="0" />
           </label>
+          <h4>心情系统</h4>
+          <p class="sub">每轮对话结束后由评审模型判定心情增量，主心情按 3 小时半衰期回归基线，七个情绪维度按 90 分钟半衰期归零；显著变化生成「内心独白」并只宣布一次。心情作为实时上下文尾注注入，不写入历史，静态系统前缀保持字节稳定。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-mood-enabled" /> 启用心情系统</label>
+          <label class="f-label">基线心情（0–100）
+            <input type="number" id="set-mood-baseline" value="70" min="0" max="100" />
+          </label>
+          <label class="f-label">注入阈值（|增量| 小于该值不落库）
+            <input type="number" id="set-mood-delta-threshold" value="5" min="0" />
+          </label>
+          <label class="f-label">评审最低置信度（0–100）
+            <input type="number" id="set-mood-min-confidence" value="60" min="0" max="100" />
+          </label>
+          <label class="f-label">每日落库次数上限
+            <input type="number" id="set-mood-daily-cap" value="6" min="1" />
+          </label>
+          <label class="f-label">时间线每角色保留条数
+            <input type="number" id="set-mood-timeline-keep" value="200" min="10" />
+          </label>
+          <label class="f-label">评审模型提供商 ID（留空=当前主提供商）
+            <input type="text" id="set-mood-judge-provider" placeholder="" />
+          </label>
+          <label class="f-label">评审模型名（留空=提供商默认模型）
+            <input type="text" id="set-mood-judge-model" placeholder="" />
+          </label>
+          <h4>自我记忆</h4>
+          <p class="sub">AI 以第一人称沉淀关于用户与自身的长期事实，存每用户 agent.db，BM25+重要度+时效混合召回，每轮作为实时上下文尾注注入。每日新建有配额，合并更新不占配额；审计流水只存库、不进模型上下文。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-sm-enabled" /> 启用自我记忆</label>
+          <label class="f-label">每日新建配额
+            <input type="number" id="set-sm-quota" value="8" min="1" />
+          </label>
+          <label class="f-label">召回条数 top-k
+            <input type="number" id="set-sm-topk" value="5" min="1" />
+          </label>
+          <label class="f-label">召回上下文预算（字符）
+            <input type="number" id="set-sm-budget" value="300" min="50" />
+          </label>
+          <h4>主动行为</h4>
+          <p class="sub">需先启用后台调度器。用户按会话 opt-in 后，调度器在冷群时按概率唤醒 AI、主动搭话、执行自建轮询与定时作业，并在承诺到点时提醒。所有后台动作走会话锁 try-lock，撞锁跳过不排队；静默轮不写历史。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-pro-enabled" /> 启用主动行为</label>
+          <label class="f-label">唤醒检查周期（分钟）
+            <input type="number" id="set-pro-wake-check" value="30" min="1" />
+          </label>
+          <label class="f-label">单次唤醒基础概率（%）
+            <input type="number" id="set-pro-wake-prob" value="10" min="0" max="100" />
+          </label>
+          <label class="f-label">连续未唤醒 N 次保底唤醒一次
+            <input type="number" id="set-pro-wake-n" value="20" min="1" />
+          </label>
+          <label class="f-label">活跃门限（小时，超过该时长无真人消息才评估）
+            <input type="number" id="set-pro-active-hours" value="12" min="0.5" step="0.5" />
+          </label>
+          <label class="f-label">主动搭话概率·白天高峰（%）
+            <input type="number" id="set-pro-peak" value="20" min="0" max="100" />
+          </label>
+          <label class="f-label">主动搭话概率·夜间低谷（%）
+            <input type="number" id="set-pro-valley" value="60" min="0" max="100" />
+          </label>
+          <label class="f-label">搭话冷却（分钟）
+            <input type="number" id="set-pro-cooldown" value="20" min="0" />
+          </label>
+          <label class="f-label">免打扰时段（HH:MM-HH:MM，可跨午夜）
+            <input type="text" id="set-pro-quiet" value="01:00-08:00" />
+          </label>
+          <label class="f-label">每会话轮询数量上限
+            <input type="number" id="set-pro-polls-max" value="10" min="1" />
+          </label>
           <div class="m-page-actions">
             <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>
           </div>
@@ -1030,6 +1098,117 @@
         <button type="button" id="btn-loop-close" class="btn ghost">关 闭</button>
       </div>
       <div id="loop-mgr-msg" class="msg-bar"></div>
+    </div>
+  </dialog>
+
+  <!-- 心情管理弹窗：当前心情/七维 + 时间线 + 清除 -->
+  <dialog id="mood-mgr-dialog">
+    <div class="dialog-body">
+      <h3>💗 心情管理</h3>
+      <div class="mem-filters">
+        <select id="mood-session-sel" class="pro-sel"></select>
+        <input type="text" id="mood-cid-input" placeholder="角色 ID" />
+        <button type="button" id="btn-mood-query" class="btn small">查询</button>
+        <span id="mood-admin-scope" class="loop-admin-scope hidden">
+          目标 uid
+          <input type="text" id="mood-target-uid" placeholder="留空=自己" />
+        </span>
+      </div>
+      <div id="mood-current" class="pro-card"></div>
+      <h4>心情时间线</h4>
+      <div id="mood-timeline" class="mem-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-mood-clear" class="btn danger">清除该角色心情</button>
+        <button type="button" id="btn-mood-close" class="btn ghost">关 闭</button>
+      </div>
+      <div id="mood-mgr-msg" class="msg-bar"></div>
+    </div>
+  </dialog>
+
+  <!-- 主动行为弹窗：会话 opt-in/轮询、定时作业、承诺、自我记忆 -->
+  <dialog id="proactive-mgr-dialog">
+    <div class="dialog-body">
+      <h3>🔔 主动行为</h3>
+      <div class="mem-tabs">
+        <button type="button" data-ptab="pro" class="mem-tab pro-tab active">会话与轮询</button>
+        <button type="button" data-ptab="jobs" class="mem-tab pro-tab">定时作业</button>
+        <button type="button" data-ptab="commit" class="mem-tab pro-tab">承诺提醒</button>
+        <button type="button" data-ptab="sm" class="mem-tab pro-tab" id="pro-tab-sm">自我记忆</button>
+      </div>
+      <div class="mem-filters">
+        <button type="button" id="btn-pro-refresh" class="btn small">刷新</button>
+        <span id="pro-admin-scope" class="loop-admin-scope hidden">
+          目标 uid
+          <input type="text" id="pro-target-uid" placeholder="留空=自己" />
+        </span>
+      </div>
+
+      <div id="pro-pane-pro">
+        <div class="mem-filters">
+          <select id="pro-session-sel" class="pro-sel"></select>
+          <label class="f-label toggle"><input type="checkbox" id="pro-optin" /> 本会话开启主动行为</label>
+        </div>
+        <h4>自建轮询</h4>
+        <div id="pro-poll-list" class="mem-list"></div>
+        <div class="pro-form">
+          <input type="text" id="poll-title" placeholder="轮询标题（如：查收邮件）" />
+          <input type="number" id="poll-prob" value="10" min="0" max="100" title="每次掷骰概率 %" />
+          <input type="number" id="poll-n" value="20" min="1" title="连续未中 N 次保底" />
+          <input type="number" id="poll-hours" value="12" min="0.5" step="0.5" title="活跃门限（小时）" />
+          <button type="button" id="btn-poll-add" class="btn small">新建轮询</button>
+        </div>
+      </div>
+
+      <div id="pro-pane-jobs" class="hidden">
+        <div id="pro-job-list" class="mem-list"></div>
+        <div class="pro-form">
+          <select id="job-session-sel" class="pro-sel"></select>
+          <select id="job-mode">
+            <option value="once">单次</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+          </select>
+          <input type="time" id="job-hhmm" value="09:00" />
+          <select id="job-weekday" title="每周模式的星期">
+            <option value="-1">（非每周）</option>
+            <option value="0">周一</option>
+            <option value="1">周二</option>
+            <option value="2">周三</option>
+            <option value="3">周四</option>
+            <option value="4">周五</option>
+            <option value="5">周六</option>
+            <option value="6">周日</option>
+          </select>
+          <input type="text" id="job-brief" placeholder="任务内容（brief）" />
+          <button type="button" id="btn-job-add" class="btn small">新建作业</button>
+        </div>
+      </div>
+
+      <div id="pro-pane-commit" class="hidden">
+        <div id="pro-commit-list" class="mem-list"></div>
+        <div class="pro-form">
+          <select id="commit-session-sel" class="pro-sel"></select>
+          <input type="text" id="commit-due" placeholder="到点：YYYY-MM-DD HH:MM 或 HH:MM" />
+          <input type="text" id="commit-content" placeholder="承诺内容" />
+          <button type="button" id="btn-commit-add" class="btn small">登记承诺</button>
+        </div>
+      </div>
+
+      <div id="pro-pane-sm" class="hidden">
+        <div id="pro-sm-list" class="mem-list"></div>
+        <div class="pro-form">
+          <input type="text" id="sm-statement" placeholder="第一人称事实陈述" />
+          <input type="text" id="sm-tags" placeholder="标签（逗号分隔）" />
+          <input type="number" id="sm-imp" value="0.5" min="0" max="1" step="0.1" title="重要度 0–1" />
+          <button type="button" id="btn-sm-add" class="btn small">新建记忆</button>
+          <button type="button" id="btn-sm-traces" class="btn small">审计流水</button>
+        </div>
+      </div>
+
+      <div class="dialog-actions">
+        <button type="button" id="btn-pro-close" class="btn ghost">关 闭</button>
+      </div>
+      <div id="pro-mgr-msg" class="msg-bar"></div>
     </div>
   </dialog>
 
@@ -1370,6 +1549,7 @@
   <script src="/static/js/presets.js?v=20261018b"></script>
   <script src="/static/js/memory-manager.js?v=20261010a"></script>
   <script src="/static/js/loop.js?v=20261114a"></script>
-  <script src="/static/js/settings.js?v=20261011c"></script>
+  <script src="/static/js/proactor.js?v=20261114a"></script>
+  <script src="/static/js/settings.js?v=20261114b"></script>
 </body>
 </html>

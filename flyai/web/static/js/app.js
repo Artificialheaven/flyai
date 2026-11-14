@@ -103,6 +103,7 @@ function init() {
     state.toolsMeta = res[5].tools || [];
     renderProviderBar();
     if (window.updateLoopButton) updateLoopButton();
+    if (window.updateProactorButtons) updateProactorButtons();
     renderSessionList();
     renderSessionMeta();
     updateSdEngineButton();

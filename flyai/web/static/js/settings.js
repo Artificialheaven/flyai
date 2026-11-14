@@ -476,6 +476,32 @@ function fillAdminForm() {
   if (el.setLoopKeepRounds) el.setLoopKeepRounds.value = lp.keep_rounds != null ? lp.keep_rounds : 4;
   if (el.setLoopContextWindow) el.setLoopContextWindow.value = lp.context_window != null ? lp.context_window : 0;
   if (el.setLoopRequestLevel) el.setLoopRequestLevel.value = lp.request_min_level != null ? lp.request_min_level : 0;
+  // P3 心情 / 自我记忆 / 主动行为（旧配置缺段时回退后端默认值）
+  var md = state.config.mood || {};
+  if (el.setMoodEnabled) el.setMoodEnabled.checked = md.enabled === true;
+  if (el.setMoodBaseline) el.setMoodBaseline.value = md.baseline != null ? md.baseline : 70;
+  if (el.setMoodDeltaThreshold) el.setMoodDeltaThreshold.value = md.delta_threshold != null ? md.delta_threshold : 5;
+  if (el.setMoodMinConfidence) el.setMoodMinConfidence.value = md.min_confidence != null ? md.min_confidence : 60;
+  if (el.setMoodDailyCap) el.setMoodDailyCap.value = md.daily_cap != null ? md.daily_cap : 6;
+  if (el.setMoodTimelineKeep) el.setMoodTimelineKeep.value = md.timeline_keep != null ? md.timeline_keep : 200;
+  if (el.setMoodJudgeProvider) el.setMoodJudgeProvider.value = md.judge_provider_id || "";
+  if (el.setMoodJudgeModel) el.setMoodJudgeModel.value = md.judge_model || "";
+  var sm = state.config.self_memory || {};
+  if (el.setSmEnabled) el.setSmEnabled.checked = sm.enabled !== false;
+  if (el.setSmQuota) el.setSmQuota.value = sm.daily_quota != null ? sm.daily_quota : 8;
+  if (el.setSmTopk) el.setSmTopk.value = sm.recall_topk != null ? sm.recall_topk : 5;
+  if (el.setSmBudget) el.setSmBudget.value = sm.recall_budget != null ? sm.recall_budget : 300;
+  var pro = state.config.proactor || {};
+  if (el.setProEnabled) el.setProEnabled.checked = pro.enabled === true;
+  if (el.setProWakeCheck) el.setProWakeCheck.value = pro.wake_check_minutes != null ? pro.wake_check_minutes : 30;
+  if (el.setProWakeProb) el.setProWakeProb.value = pro.wake_prob_percent != null ? pro.wake_prob_percent : 10;
+  if (el.setProWakeN) el.setProWakeN.value = pro.wake_every_n != null ? pro.wake_every_n : 20;
+  if (el.setProActiveHours) el.setProActiveHours.value = pro.active_hours != null ? pro.active_hours : 12;
+  if (el.setProPeak) el.setProPeak.value = pro.speakup_peak_percent != null ? pro.speakup_peak_percent : 20;
+  if (el.setProValley) el.setProValley.value = pro.speakup_valley_percent != null ? pro.speakup_valley_percent : 60;
+  if (el.setProCooldown) el.setProCooldown.value = pro.self_cooldown_minutes != null ? pro.self_cooldown_minutes : 20;
+  if (el.setProQuiet) el.setProQuiet.value = pro.quiet_hours || "01:00-08:00";
+  if (el.setProPollsMax) el.setProPollsMax.value = pro.polls_max_per_session != null ? pro.polls_max_per_session : 10;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -883,6 +909,35 @@ function saveConfig() {
     context_window: Math.max(0, parseInt(el.setLoopContextWindow && el.setLoopContextWindow.value, 10) || 0),
     request_min_level: Math.max(0, parseInt(el.setLoopRequestLevel && el.setLoopRequestLevel.value, 10) || 0),
   };
+  // P3 三段配置：钳制范围与后端 pydantic 校验保持一致
+  var moodSettings = {
+    enabled: el.setMoodEnabled ? !!el.setMoodEnabled.checked : false,
+    baseline: Math.max(0, Math.min(100, parseInt(el.setMoodBaseline && el.setMoodBaseline.value, 10) || 70)),
+    delta_threshold: Math.max(0, parseInt(el.setMoodDeltaThreshold && el.setMoodDeltaThreshold.value, 10) || 5),
+    min_confidence: Math.max(0, Math.min(100, parseInt(el.setMoodMinConfidence && el.setMoodMinConfidence.value, 10) || 60)),
+    daily_cap: Math.max(1, parseInt(el.setMoodDailyCap && el.setMoodDailyCap.value, 10) || 6),
+    timeline_keep: Math.max(10, parseInt(el.setMoodTimelineKeep && el.setMoodTimelineKeep.value, 10) || 200),
+    judge_provider_id: (el.setMoodJudgeProvider && el.setMoodJudgeProvider.value || "").trim(),
+    judge_model: (el.setMoodJudgeModel && el.setMoodJudgeModel.value || "").trim(),
+  };
+  var selfMemorySettings = {
+    enabled: el.setSmEnabled ? !!el.setSmEnabled.checked : true,
+    daily_quota: Math.max(1, parseInt(el.setSmQuota && el.setSmQuota.value, 10) || 8),
+    recall_topk: Math.max(1, parseInt(el.setSmTopk && el.setSmTopk.value, 10) || 5),
+    recall_budget: Math.max(50, parseInt(el.setSmBudget && el.setSmBudget.value, 10) || 300),
+  };
+  var proactorSettings = {
+    enabled: el.setProEnabled ? !!el.setProEnabled.checked : false,
+    wake_check_minutes: Math.max(1, parseInt(el.setProWakeCheck && el.setProWakeCheck.value, 10) || 30),
+    wake_prob_percent: Math.max(0, Math.min(100, parseInt(el.setProWakeProb && el.setProWakeProb.value, 10) || 10)),
+    wake_every_n: Math.max(1, parseInt(el.setProWakeN && el.setProWakeN.value, 10) || 20),
+    active_hours: Math.max(0.5, parseFloat(el.setProActiveHours && el.setProActiveHours.value) || 12),
+    speakup_peak_percent: Math.max(0, Math.min(100, parseInt(el.setProPeak && el.setProPeak.value, 10) || 20)),
+    speakup_valley_percent: Math.max(0, Math.min(100, parseInt(el.setProValley && el.setProValley.value, 10) || 60)),
+    self_cooldown_minutes: Math.max(0, parseInt(el.setProCooldown && el.setProCooldown.value, 10) || 20),
+    quiet_hours: (el.setProQuiet && el.setProQuiet.value || "").trim() || "01:00-08:00",
+    polls_max_per_session: Math.max(1, parseInt(el.setProPollsMax && el.setProPollsMax.value, 10) || 10),
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -893,6 +948,7 @@ function saveConfig() {
       pixiv: pixiv, web_search: webSearch, browser: browser, tts: tts,
       galgame: galgame, sandbox: sandbox, scheduler: scheduler,
       custom_tools: customTools, loop: loopSettings,
+      mood: moodSettings, self_memory: selfMemorySettings, proactor: proactorSettings,
     }),
   }).then(function (cfg) {
     state.config = cfg;
@@ -900,6 +956,7 @@ function saveConfig() {
     el.dialog.close();
     renderProviderBar();
     if (window.updateLoopButton) updateLoopButton();
+    if (window.updateProactorButtons) updateProactorButtons();
     return fetchJSON("/api/plugins");
   }).then(function (r) { state.plugins = r.plugins || []; })
     .catch(function (e) {
