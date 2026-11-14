@@ -19,6 +19,27 @@ MIGRATIONS: Dict[int, List[str]] = {
         )
         """,
     ],
+    2: [
+        # AI 自定义工具（P1）：代码本体只在 python -I 短生子进程里 exec
+        """
+        CREATE TABLE IF NOT EXISTS custom_tools (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope          TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            title          TEXT NOT NULL DEFAULT '',
+            description    TEXT NOT NULL,
+            params_schema  TEXT NOT NULL,
+            code           TEXT NOT NULL,
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            owner_only     INTEGER NOT NULL DEFAULT 0,
+            created_by     TEXT NOT NULL DEFAULT '',
+            created_at     REAL NOT NULL,
+            updated_at     REAL NOT NULL,
+            UNIQUE(scope, name)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_custom_scope ON custom_tools(scope, enabled)",
+    ],
 }
 
 DB_VERSION = max(MIGRATIONS)

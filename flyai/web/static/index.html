@@ -780,6 +780,22 @@
           <label class="f-label">提醒检查周期（秒，最小 5）
             <input type="number" id="set-scheduler-reminder" value="60" min="5" />
           </label>
+          <h4>AI 自定义工具</h4>
+          <p class="sub">启用后 AI 可通过 custom_tool_validate / publish / list / toggle / remove 五个管理工具自行编写并上线 Python 工具（管理动作仅管理员可执行）；上线工具以 custom__ 前缀按请求注入，各用户互不可见。工具代码在 python -I 隔离子进程中执行，环境变量里的密钥/令牌会被剥离，超时强杀整棵进程树。</p>
+          <p class="sub"><strong>安全提示：</strong>子进程隔离不是容器/虚拟机沙箱，工具代码仍拥有本机普通用户权限与网络访问，仅在可信环境、对 AI 行为有把握时启用。</p>
+          <label class="f-label toggle"><input type="checkbox" id="set-custom-tools-enabled" /> 启用 AI 自定义工具</label>
+          <label class="f-label">单工具代码上限（字符）
+            <input type="number" id="set-custom-code-max" value="8000" min="100" />
+          </label>
+          <label class="f-label">每作用域工具数量上限
+            <input type="number" id="set-custom-max-scope" value="20" min="1" />
+          </label>
+          <label class="f-label">校验超时（秒，1–300）
+            <input type="number" id="set-custom-validate-timeout" value="10" min="1" max="300" step="0.5" />
+          </label>
+          <label class="f-label">调用超时（秒，1–300）
+            <input type="number" id="set-custom-call-timeout" value="20" min="1" max="300" step="0.5" />
+          </label>
           <div class="m-page-actions">
             <button type="button" class="btn primary btn-admin-save m-full-btn">保存设置</button>
           </div>

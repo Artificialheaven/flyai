@@ -17,7 +17,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from ..config import ToolSettings
 from ..providers.base import StreamEventType
 from ..schemas import ImageAttachment, Message, ToolCall
-from ..tools.base import ToolContext
+from ..tools.base import Tool, ToolContext
 from ..tools.registry import ToolRegistry
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -255,6 +255,7 @@ async def run_agent_loop(
     uid: str = "",
     level: int = 0,
     is_admin: bool = False,
+    extra_tools: Optional[List["Tool"]] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -282,6 +283,8 @@ async def run_agent_loop(
     优先级高于模型自身 cfg.params、低于 max_tokens 覆盖。
     assistant_prefill：预设 jailbreak 的 assistant 强制前缀，每轮作为最后一条
     assistant 消息发送（不入库），空串不追加。
+    extra_tools：请求级工具（P1 自定义工具），按调用者身份临时注入，不进全局
+    注册表；settings.enabled=False 时与内置工具一起整体停用。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -308,7 +311,14 @@ async def run_agent_loop(
     pending_nudge = False  # 上一轮执行了工具：下轮请求尾部追加续写提示
     while True:
         iteration += 1
-        tool_specs = registry.specs(allowed_tools) if settings.enabled else []
+        # extra_tools 为请求级自定义工具（每用户独立，不进全局注册表）；
+        # 仅在非空时传 extras，保持对精简测试注册表（无该形参）的兼容
+        if not settings.enabled:
+            tool_specs = []
+        elif extra_tools:
+            tool_specs = registry.specs(allowed_tools, extras=extra_tools)
+        else:
+            tool_specs = registry.specs(allowed_tools)
         request_messages = _actor_view(history, actor, actor_name)
         request_messages = _keep_recent_turns(request_messages, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
@@ -445,7 +455,10 @@ async def run_agent_loop(
                     "status_text": _render_status(call),
                 },
             )
-            result = await registry.execute(call, ctx)
+            if extra_tools:
+                result = await registry.execute(call, ctx, extras=extra_tools)
+            else:
+                result = await registry.execute(call, ctx)
             # 多图标记卡（如 search_pixiv 含十几行候选标记）需完整输出供前端解析，
             # 普通工具文本也只在 SSE 传输不落库，给到 4000 字符
             preview = (result.output or "")[:4000]

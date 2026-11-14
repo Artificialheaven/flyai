@@ -147,6 +147,11 @@ function cacheElements() {
   el.setSchedulerTimezone = document.getElementById("set-scheduler-timezone");
   el.setSchedulerTick = document.getElementById("set-scheduler-tick");
   el.setSchedulerReminder = document.getElementById("set-scheduler-reminder");
+  el.setCustomToolsEnabled = document.getElementById("set-custom-tools-enabled");
+  el.setCustomCodeMax = document.getElementById("set-custom-code-max");
+  el.setCustomMaxScope = document.getElementById("set-custom-max-scope");
+  el.setCustomValidateTimeout = document.getElementById("set-custom-validate-timeout");
+  el.setCustomCallTimeout = document.getElementById("set-custom-call-timeout");
   el.btnConfigSave = document.getElementById("btn-config-save");
   el.btnConfigCancel = document.getElementById("btn-config-cancel");
   el.configMsg = document.getElementById("config-msg");

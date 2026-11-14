@@ -54,6 +54,23 @@ def _get_querier(sc, character, world):
     return LoreQuerier(character, world)
 
 
+def _custom_extras(state, sc, session_id: str) -> list:
+    """P1：按调用者自己的 agent.db 构建请求级自定义工具。
+
+    工具不进全局注册表，杜绝用户 A 的自定义工具泄漏进用户 B 的模型上下文；
+    未启用/读取失败时返回空列表，绝不阻断正常聊天。
+    """
+    runtime = getattr(state, "custom_runtime", None)
+    if runtime is None or not getattr(getattr(runtime, "settings", None),
+                                      "enabled", False):
+        return []
+    try:
+        return runtime.tools_for(sc.uid, session_id)
+    except Exception:
+        logger.exception("自定义工具加载失败，本轮跳过")
+        return []
+
+
 def _lore_depth_specs(querier, character, user_char, last_message,
                       group_names=None) -> List[dict]:
     """世界书/角色表的 @depth 常驻条目：掷概率 + 宏替换后返回注入规格。"""
@@ -539,6 +556,8 @@ async def chat(req: ChatRequest, request: Request):
     eff_roleplay = feature_prefs.effective_roleplay(state.config, _us)
     eff_tools = feature_prefs.effective_tool_settings(state.config, _us)
     _registry = getattr(state, "registry", None)
+    # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
+    custom_extras = _custom_extras(state, sc, session.id)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -546,6 +565,7 @@ async def chat(req: ChatRequest, request: Request):
                 set(getattr(req, "disabled_tools", None) or [])
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
+            extra_names={t.name for t in custom_extras},
         )
         if hasattr(_registry, "all") else None
     )
@@ -559,6 +579,8 @@ async def chat(req: ChatRequest, request: Request):
     services["sandbox_settings"] = getattr(
         getattr(state, "config", None), "sandbox", None
     )
+    # P1 自定义工具管理五件套据此打开调用者自己的 agent.db
+    services["custom_runtime"] = getattr(state, "custom_runtime", None)
     # 召回日志（主动召回记录）
     services["recall_logs"] = getattr(state, "recall_logs", None)
     # TTS：角色卡绑定音色 + 当前用户等级（工具内解析/鉴权）
@@ -722,6 +744,7 @@ async def chat(req: ChatRequest, request: Request):
                 uid=sc.uid,
                 level=sc.level,
                 is_admin=(sc.uid == ADMIN_UID),
+                extra_tools=custom_extras,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -884,6 +907,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     eff_roleplay = feature_prefs.effective_roleplay(state.config, _us)
     eff_tools = feature_prefs.effective_tool_settings(state.config, _us)
     _registry = getattr(state, "registry", None)
+    # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
+    custom_extras = _custom_extras(state, sc, session.id)
     allowed_tools = (
         feature_prefs.allowed_tool_names(
             _registry, state.config, _us,
@@ -891,6 +916,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 set(getattr(req, "disabled_tools", None) or [])
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
+            extra_names={t.name for t in custom_extras},
         )
         if hasattr(_registry, "all") else None
     )
@@ -1109,6 +1135,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 services["sandbox_settings"] = getattr(
                     getattr(state, "config", None), "sandbox", None
                 )
+                services["custom_runtime"] = getattr(state, "custom_runtime", None)
                 services["tts_voice"] = getattr(char, "voice", "") or ""
                 services["user_level"] = getattr(sc, "level", 0)
                 if char or world:
@@ -1295,6 +1322,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         uid=sc.uid,
                         level=sc.level,
                         is_admin=(sc.uid == ADMIN_UID),
+                        extra_tools=custom_extras,
                     ):
                         if ev == "done":
                             done_data = data

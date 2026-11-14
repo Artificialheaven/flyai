@@ -150,5 +150,12 @@
     "timezone": "Asia/Shanghai",
     "tick_seconds": 30,
     "reminder_check_seconds": 60
+  },
+  "custom_tools": {
+    "enabled": false,
+    "code_max_chars": 8000,
+    "max_per_scope": 20,
+    "validate_timeout": 10.0,
+    "call_timeout": 20.0
   }
 }

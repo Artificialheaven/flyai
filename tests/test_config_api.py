@@ -138,6 +138,31 @@ def test_admin_sees_every_model(tmp_path):
     state = _mkstate(tmp_path)
     view = get_config(_req(state))
     assert {p["id"] for p in view["providers"]} == {"deepseek", "gated"}
+
+
+def test_custom_tools_roundtrip_visible_to_all_users(tmp_path):
+    state = _mkstate(tmp_path)
+    # 默认段随配置下发（不含密钥，普通用户也可见）
+    default_view = get_config(_req(state))
+    assert default_view["custom_tools"]["enabled"] is False
+    put_config(ConfigPayload(custom_tools={
+        "enabled": True,
+        "code_max_chars": 4000,
+        "max_per_scope": 5,
+        "validate_timeout": 8,
+        "call_timeout": 15,
+    }), _req(state))
+    view = get_config(_req(state))
+    assert view["custom_tools"] == {
+        "enabled": True,
+        "code_max_chars": 4000,
+        "max_per_scope": 5,
+        "validate_timeout": 8.0,
+        "call_timeout": 15.0,
+    }
+    state.user_store.add("u1", level=1)
+    user_view = get_config(_req(state, "u1"))
+    assert user_view["custom_tools"]["enabled"] is True
     assert {m["id"] for m in view["image_models"]} == {"img-open", "img-gated"}
 
 

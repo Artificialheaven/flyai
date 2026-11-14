@@ -509,6 +509,37 @@ class SchedulerSettings(BaseModel):
         return max(5, v)
 
 
+class CustomToolSettings(BaseModel):
+    """AI 自定义工具（P1）：隔离子进程执行 AI 编写的 Python 工具。
+
+    信任边界：管理动作（发布/删除）仅管理员；代码在 python -I 短生子进程里
+    exec，环境变量中的密钥/令牌一律剥离，超时强杀整棵进程树。注意这不是
+    容器/沙箱级隔离——子进程仍有本机普通用户权限与网络访问，因此默认关闭。
+    """
+
+    enabled: bool = False
+    code_max_chars: int = 8000
+    max_per_scope: int = 20
+    validate_timeout: float = 10.0
+    call_timeout: float = 20.0
+
+    @validator("code_max_chars", "max_per_scope")
+    def _clamp_int(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 20
+        return max(1, v)
+
+    @validator("validate_timeout", "call_timeout")
+    def _clamp_timeout(cls, v):  # noqa: N805
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 10.0
+        return max(1.0, min(v, 300.0))
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -528,6 +559,7 @@ class AppConfig(BaseModel):
     galgame: GalgameSettings = GalgameSettings()
     sandbox: SandboxSettings = SandboxSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
+    custom_tools: CustomToolSettings = CustomToolSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

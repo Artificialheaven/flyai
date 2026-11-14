@@ -29,6 +29,7 @@ from ..config import (
     RoleplaySettings,
     SandboxSettings,
     SchedulerSettings,
+    CustomToolSettings,
     mask_api_key,
     save_config,
 )
@@ -92,6 +93,7 @@ class ConfigPayload(BaseModel):
     galgame: Optional[dict] = None
     sandbox: Optional[dict] = None
     scheduler: Optional[dict] = None
+    custom_tools: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -181,9 +183,10 @@ def _masked_config(state, uid: Optional[str] = None):
         "browser": cfg.browser.dict(),
         "galgame": cfg.galgame.dict(),
         "tts": _masked_tts(cfg),
-        # 沙箱/调度器段不含密钥，对所有登录用户可见（同 SD 段）
+        # 沙箱/调度器/自定义工具段不含密钥，对所有登录用户可见（同 SD 段）
         "sandbox": cfg.sandbox.dict(),
         "scheduler": cfg.scheduler.dict(),
+        "custom_tools": cfg.custom_tools.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -321,6 +324,10 @@ def put_config(payload: ConfigPayload, request: Request):
     scheduler_changed = payload.scheduler is not None
     if scheduler_changed:
         cfg.scheduler = SchedulerSettings.parse_obj(dict(payload.scheduler))
+
+    if payload.custom_tools is not None:
+        # 热重建工具表时 _reload_tools 会把新设置同步给 custom_runtime
+        cfg.custom_tools = CustomToolSettings.parse_obj(dict(payload.custom_tools))
 
     _persist(state)
     if scheduler_changed:

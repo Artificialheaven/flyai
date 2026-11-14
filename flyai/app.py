@@ -41,6 +41,7 @@ from .agent.runs import ChatRunManager
 from .galgame.choices import GalgameChoiceManager
 from .market.store import MarketStore
 from .proactor import SchedulerService
+from .tools.custom_tool_runtime import CustomToolRuntime
 from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 
 logger = logging.getLogger("flyai")
@@ -86,6 +87,8 @@ class AppState:
     galgame_tts_overlay: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # 后台调度服务（P0 骨架；scheduler.enabled=false 时只待命不 tick）
     scheduler: Optional[SchedulerService] = None
+    # AI 自定义工具运行时（P1）：每用户 agent.db + 隔离子进程；未启用时仅待命
+    custom_runtime: Optional[CustomToolRuntime] = None
 
     _PROPOSAL_TTL = 1800
     _PROPOSAL_MAX = 32
@@ -188,6 +191,9 @@ class AppState:
         loop.create_task(self.scheduler.restart())
 
     def _reload_tools(self) -> None:
+        # 配置热更新后让运行时跟随新设置（超时/配额/开关）
+        if self.custom_runtime is not None:
+            self.custom_runtime.settings = self.config.custom_tools
         self.registry = ToolRegistry()
         # 内置工具：角色/世界观内容表查询
         self.registry.register(QueryLoreTool())
@@ -292,6 +298,14 @@ class AppState:
                 FsDeleteTool(),
             ):
                 self.registry.register(fs_tool)
+        # AI 自定义工具管理五件套：risk 工具，注册表执行期 admin 门禁；
+        # 真正的自定义函数工具按请求 extras 注入，不进全局表。
+        # runtime 在 lifespan 中创建，启动早期的 reload 直接跳过。
+        if self.config.custom_tools.enabled and self.custom_runtime is not None:
+            from .tools.custom_tool_manage import MANAGE_TOOLS
+
+            for manage_tool_cls in MANAGE_TOOLS:
+                self.registry.register(manage_tool_cls())
         self.loader = PluginLoader(self.registry)
         self.loader.load_all(self.config.tools.plugin_dirs)
 
@@ -347,10 +361,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except ConfigError as exc:
             logger.error("启动失败: %s", exc)
             raise
-        state.reload_tools()
         data_dir = Path(__file__).resolve().parent.parent / "data"
         migrate_legacy(data_dir)
         state.data_dir = data_dir
+        # 自定义工具运行时先于工具表重建：管理工具注册与请求级 extras 都靠它
+        state.custom_runtime = CustomToolRuntime(
+            data_dir, state.config.custom_tools
+        )
+        state.reload_tools()
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)

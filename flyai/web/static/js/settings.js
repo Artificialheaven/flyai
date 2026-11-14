@@ -461,6 +461,12 @@ function fillAdminForm() {
   if (el.setSchedulerTimezone) el.setSchedulerTimezone.value = sch.timezone || "Asia/Shanghai";
   if (el.setSchedulerTick) el.setSchedulerTick.value = sch.tick_seconds != null ? sch.tick_seconds : 30;
   if (el.setSchedulerReminder) el.setSchedulerReminder.value = sch.reminder_check_seconds != null ? sch.reminder_check_seconds : 60;
+  var ct = state.config.custom_tools || {};
+  if (el.setCustomToolsEnabled) el.setCustomToolsEnabled.checked = ct.enabled === true;
+  if (el.setCustomCodeMax) el.setCustomCodeMax.value = ct.code_max_chars != null ? ct.code_max_chars : 8000;
+  if (el.setCustomMaxScope) el.setCustomMaxScope.value = ct.max_per_scope != null ? ct.max_per_scope : 20;
+  if (el.setCustomValidateTimeout) el.setCustomValidateTimeout.value = ct.validate_timeout != null ? ct.validate_timeout : 10;
+  if (el.setCustomCallTimeout) el.setCustomCallTimeout.value = ct.call_timeout != null ? ct.call_timeout : 20;
 }
 
 // 音色清单动态行：显示名 + 音色 ID + 删除（仿 editor.js 的 entry 行模式）
@@ -851,6 +857,13 @@ function saveConfig() {
     tick_seconds: Math.max(5, parseInt(el.setSchedulerTick && el.setSchedulerTick.value, 10) || 30),
     reminder_check_seconds: Math.max(5, parseInt(el.setSchedulerReminder && el.setSchedulerReminder.value, 10) || 60),
   };
+  var customTools = {
+    enabled: el.setCustomToolsEnabled ? !!el.setCustomToolsEnabled.checked : false,
+    code_max_chars: Math.max(100, parseInt(el.setCustomCodeMax && el.setCustomCodeMax.value, 10) || 8000),
+    max_per_scope: Math.max(1, parseInt(el.setCustomMaxScope && el.setCustomMaxScope.value, 10) || 20),
+    validate_timeout: Math.max(1, Math.min(300, parseFloat(el.setCustomValidateTimeout && el.setCustomValidateTimeout.value) || 10)),
+    call_timeout: Math.max(1, Math.min(300, parseFloat(el.setCustomCallTimeout && el.setCustomCallTimeout.value) || 20)),
+  };
   fetchJSON("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -860,6 +873,7 @@ function saveConfig() {
       image_models: imageModels, stable_diffusion: stableDiffusion,
       pixiv: pixiv, web_search: webSearch, browser: browser, tts: tts,
       galgame: galgame, sandbox: sandbox, scheduler: scheduler,
+      custom_tools: customTools,
     }),
   }).then(function (cfg) {
     state.config = cfg;

@@ -34,16 +34,29 @@ class ToolRegistry:
     def all(self) -> List[Tool]:
         return list(self._tools.values())
 
-    def specs(self, allowed: Optional[set] = None) -> List[dict]:
-        """生成 OpenAI tool specs；allowed 非空时只暴露其中的工具名。"""
-        tools = self._tools.values()
+    def specs(self, allowed: Optional[set] = None,
+              extras: Optional[List[Tool]] = None) -> List[dict]:
+        """生成 OpenAI tool specs；allowed 非空时只暴露其中的工具名。
+
+        extras 为请求级工具（如每用户自定义工具），不进全局表、不跨请求泄漏；
+        与全局表重名时 extras 优先（会话级覆盖语义）。
+        """
+        seen = set()
+        tools: List[Tool] = []
+        for t in (list(extras or []) + list(self._tools.values())):
+            if t.name in seen:  # extras 排在前面，同名时覆盖全局工具
+                continue
+            seen.add(t.name)
+            tools.append(t)
         if allowed is not None:
             tools = [t for t in tools if t.name in allowed]
         return [t.spec_openai() for t in tools]
 
-    async def execute(self, call: ToolCall, ctx: ToolContext) -> ToolResult:
+    async def execute(self, call: ToolCall, ctx: ToolContext,
+                      extras: Optional[List[Tool]] = None) -> ToolResult:
         """执行单个工具调用。任何异常都转为失败 ToolResult，不向循环抛出。"""
-        tool = self._tools.get(call.name)
+        extra_map = {t.name: t for t in extras} if extras else {}
+        tool = extra_map.get(call.name) or self._tools.get(call.name)
         if tool is None:
             return ToolResult(ok=False, output=f"[工具错误] 未知工具: {call.name}")
 

@@ -43,6 +43,13 @@ TOOL_CATEGORIES = {
     "fs_write": "sandbox",
     "fs_append": "sandbox",
     "fs_delete": "sandbox",
+    # AI 自定义工具管理五件套（仅全局；发布动作另有注册表 admin 执行期门禁）
+    "custom_tool_validate": "custom_tools",
+    "custom_tool_publish": "custom_tools",
+    "custom_tool_list": "custom_tools",
+    "custom_tool_toggle": "custom_tools",
+    "custom_tool_remove": "custom_tools",
+    # 已上线的自定义函数工具名是动态的（custom__<name>），按前缀识别
 }
 
 # 类别 → (配置段名, 缺段/缺字段时的默认值)；默认值与各 Settings 类一致
@@ -54,6 +61,7 @@ _GLOBAL_FLAGS = {
     "galgame": ("galgame", True),
     "tts": ("tts", True),
     "sandbox": ("sandbox", False),
+    "custom_tools": ("custom_tools", False),
 }
 
 # 类别 → UserSettings 上的覆盖字段名
@@ -158,20 +166,24 @@ def base_tool_names(registry) -> Set[str]:
     }
 
 
-def allowed_tool_names(registry, cfg, user_settings, disabled=None) -> Optional[Set[str]]:
+def allowed_tool_names(registry, cfg, user_settings, disabled=None,
+                       extra_names: Optional[Set[str]] = None) -> Optional[Set[str]]:
     """该用户请求中允许暴露给模型的工具名集合。
 
     返回 None 表示不过滤（理论上不会走到：这里总是显式计算）。
     工具总开关（合并后的 tools.enabled）关闭时，只剩空集。
     disabled：本轮在用户快捷开关里手动关闭的工具名集合，只做收窄，
     不能突破类别级功能开关/权限。
+    extra_names：请求级工具名（P1 自定义函数工具 custom__*），仅在
+    custom_tools 类别开启时并入——它们不在全局注册表里，需要显式放行。
     """
     tools = effective_tool_settings(cfg, user_settings)
     if not tools.enabled:
         return set()
 
     on_categories = {"base"}
-    for category in ("web", "browser", "pixiv", "image", "galgame", "tts", "sandbox"):
+    for category in ("web", "browser", "pixiv", "image", "galgame", "tts",
+                     "sandbox", "custom_tools"):
         if feature_enabled(category, cfg, user_settings):
             on_categories.add(category)
 
@@ -180,6 +192,10 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None) -> Optional[
         category = TOOL_CATEGORIES.get(tool.name, "base")  # 插件等未知名归 base
         if category in on_categories:
             allowed.add(tool.name)
+    if "custom_tools" in on_categories and extra_names:
+        # 只放行合法前缀，防止调用方把别的名字塞进白名单
+        allowed |= {n for n in extra_names
+                    if isinstance(n, str) and n.startswith("custom__")}
     if disabled:
         allowed -= {str(n) for n in disabled if isinstance(n, str)}
     return allowed
