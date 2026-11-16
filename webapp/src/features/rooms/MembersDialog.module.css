@@ -1,0 +1,140 @@
+.dialog {
+  width: 680px;
+  max-height: calc(100vh - 48px);
+}
+
+.main {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.subtitle {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fly-alias-label-tertiary);
+  word-break: break-all;
+}
+
+.empty {
+  padding: 24px 0;
+  font-size: 13px;
+  text-align: center;
+  color: var(--fly-alias-label-caption);
+}
+
+.block {
+  padding: 12px;
+  border: 1px solid var(--fly-alias-border-l1);
+  border-radius: 10px;
+
+  & + & {
+    margin-top: 10px;
+  }
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fly-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--fly-alias-brand-text);
+  background-color: var(--fly-alias-button-ghost-active-fill);
+}
+
+.seatLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.select {
+  flex: 1 1 160px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 4px;
+  border: 1px solid var(--fly-alias-border-l2);
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--fly-alias-label-primary);
+  background-color: var(--fly-alias-bg-base);
+  outline: none;
+
+  &:focus {
+    border-color: var(--fly-alias-brand-primary);
+  }
+}
+
+.textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--fly-alias-border-l2);
+  border-radius: 7px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fly-alias-label-primary);
+  background-color: var(--fly-alias-bg-base);
+  outline: none;
+  resize: vertical;
+
+  &::placeholder {
+    color: var(--fly-alias-label-caption);
+  }
+
+  &:focus {
+    border-color: var(--fly-alias-brand-primary);
+  }
+
+  & + & {
+    margin-top: 6px;
+  }
+}
+
+.attrs {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.saveLine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ok {
+  font-size: 12px;
+  color: var(--fly-alias-brand-text);
+}
+
+.error {
+  font-size: 12px;
+  color: var(--fly-alias-state-error-primary);
+}
+
+@media (max-width: 860px) {
+  .dialog {
+    width: calc(100vw - 32px);
+  }
+}

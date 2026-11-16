@@ -1,0 +1,248 @@
+/* 新建对话：根卡网格 + 主卡/副本选择 */
+.dialog {
+  width: 560px;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.titleLabel {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--fly-alias-label-secondary);
+}
+
+.titleInput {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--fly-alias-border-l2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--fly-alias-label-primary);
+  background-color: var(--fly-alias-bg-base);
+  outline: none;
+
+  &::placeholder {
+    color: var(--fly-alias-label-caption);
+  }
+
+  &:focus {
+    border-color: var(--fly-alias-brand-primary);
+  }
+}
+
+.navBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 20px;
+}
+
+.back {
+  padding: 0;
+  border: none;
+  font-size: 12px;
+  color: var(--fly-alias-brand-text);
+  background: none;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--fly-alias-label-tertiary);
+}
+
+.rootGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.rootCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background-color: var(--fly-alias-bg-skeleton);
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s;
+
+  &:hover {
+    border-color: var(--fly-alias-border-l2);
+    background-color: var(--fly-alias-interactive-bg-hover);
+  }
+}
+
+.rootName {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fly-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rootMeta {
+  font-size: 11px;
+  color: var(--fly-alias-label-caption);
+  white-space: nowrap;
+}
+
+.variantList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.variantRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: none;
+  color: var(--fly-alias-label-primary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--fly-alias-interactive-bg-hover);
+  }
+}
+
+.variantPicked {
+  border-color: var(--fly-alias-brand-primary);
+  background-color: var(--fly-alias-button-ghost-active-fill);
+
+  &:hover {
+    background-color: var(--fly-alias-button-ghost-active-fill);
+  }
+}
+
+.tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--fly-alias-brand-text);
+  background-color: var(--fly-alias-button-ghost-active-fill);
+}
+
+.tagVariant {
+  color: var(--fly-alias-label-secondary);
+  background-color: var(--fly-alias-bg-skeleton);
+}
+
+.variantName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check {
+  color: var(--fly-alias-brand-text);
+  font-weight: 600;
+}
+
+.variantRow > svg {
+  color: var(--fly-alias-label-caption);
+}
+
+.tray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--fly-alias-border-l1);
+}
+
+.trayLabel {
+  font-size: 12px;
+  color: var(--fly-alias-label-tertiary);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--fly-alias-label-primary);
+  background-color: var(--fly-alias-bg-skeleton);
+}
+
+.chipX {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: var(--fly-alias-label-tertiary);
+  background: none;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--fly-alias-label-primary);
+    background-color: var(--fly-alias-interactive-bg-hover-accent);
+  }
+}
+
+.empty {
+  padding: 28px 0;
+  font-size: 13px;
+  color: var(--fly-alias-label-tertiary);
+  text-align: center;
+}
+
+.emptySub {
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--fly-alias-label-caption);
+  text-align: center;
+}
+
+@media (max-width: 860px) {
+  .dialog {
+    width: 100%;
+  }
+
+  .rootGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    max-height: 50vh;
+  }
+}

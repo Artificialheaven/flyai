@@ -1,0 +1,83 @@
+.dialog {
+  width: 480px;
+  max-height: calc(100vh - 48px);
+}
+
+.subtitle {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fly-alias-label-tertiary);
+}
+
+.empty {
+  padding: 20px 0;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+  color: var(--fly-alias-label-caption);
+}
+
+.list {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.row,
+.rowActive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--fly-alias-interactive-bg-hover);
+  }
+}
+
+.rowActive {
+  background-color: var(--fly-alias-interactive-bg-hover-accent);
+}
+
+.check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--fly-alias-brand-primary);
+}
+
+.name {
+  flex-shrink: 0;
+  max-width: 140px;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--fly-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.intro {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--fly-alias-label-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fly-alias-state-error-primary);
+}
+
+@media (max-width: 860px) {
+  .dialog {
+    width: calc(100vw - 32px);
+  }
+}

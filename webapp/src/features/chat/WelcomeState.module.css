@@ -1,0 +1,37 @@
+.wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.logo {
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--fly-alias-brand-text);
+  margin-bottom: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fly-alias-label-primary);
+}
+
+.hint {
+  margin: 0 0 16px;
+  font-size: 14px;
+  color: var(--fly-alias-label-tertiary);
+}
+
+.buttonIcon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+}

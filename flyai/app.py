@@ -611,7 +611,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.get("/login", include_in_schema=False)
     async def login_page():
-        return FileResponse(str(WEB_DIR / "login.html"))
+        # 新 SPA 取消独立 login.html：未登录访问 /login 由 #/login 渲染登录页，
+        # 这里直接返回 index.html，兼容旧 APK 外壳与书签链接
+        return FileResponse(str(WEB_DIR / "index.html"))
+
+    # SPA 从页面根目录取运行期配置与图标（资源本身挂在 /static/，这两个在产物根）
+    @app.get("/config.json", include_in_schema=False)
+    async def runtime_config():
+        return FileResponse(str(WEB_DIR / "config.json"))
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon():
+        return FileResponse(str(WEB_DIR / "favicon.svg"))
 
     @app.api_route(
         "/{full_path:path}",

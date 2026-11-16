@@ -1,0 +1,29 @@
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--fly-alias-border-l1);
+}
+
+.tab {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background-color: transparent;
+  color: var(--fly-alias-label-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--fly-alias-label-primary);
+}
+
+.tabActive {
+  color: var(--fly-alias-brand-text);
+  border-bottom-color: var(--fly-alias-brand-primary);
+  font-weight: 600;
+}

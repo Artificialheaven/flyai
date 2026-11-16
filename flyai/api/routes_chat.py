@@ -763,7 +763,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         # 旧形态会话立即升级再入线程路径：否则后台 drive 保存旧形态，
         # 会覆盖刷新时 store.get() 做的迁移，线程 id 每次加载都随机变化
         thread = bootstrap_room(session)
-        sc.store.save(session)
+        sc.store.save_merged(session)
         thread_id = thread.id
     if thread_id:
         req.thread_id = thread_id
@@ -954,7 +954,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             session.set_title((req.message[:20] or "图片").strip() or "图片")
         # 修复此前因重启中断、失去 tool 响应的 assistant（否则直接 400）
         session.messages[:] = _heal_dangling_tool_calls(session.messages)
-        sc.store.save(session)
+        sc.store.save_merged(session)
     except Exception:
         run.mark_failed()
         run_manager.unlock_session(session.id, run)
@@ -1032,6 +1032,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 query=req.message or "",
             )
             await _touch_proactor(state, sc, session.id)
+            done_data = None
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
                 provider=provider,
@@ -1064,10 +1065,16 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
-                await run.emit(ev, data)
+                    done_data = data
+                else:
+                    await run.emit(ev, data)
             # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
             _attach_recall(session.messages, recall_head, "", recall_items)
-            sc.store.save(session)
+            # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
+            # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
+            sc.store.save_merged(session)
+            if done_data is not None:
+                await run.emit("done", done_data)
             _schedule_extraction(
                 state, sc,
                 char_id=session.character_id or "",
@@ -1092,14 +1099,14 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             logger.warning("provider 错误: %s", exc)
             billing.refund(state, sc.uid, cost)  # 回复未生成：退回本轮费用
             await run.emit("error", {"message": str(exc), "fatal": True})
-            sc.store.save(session)
+            sc.store.save_merged(session)
             await _finalize_loop(
                 state, sc, session.id, loop_ctx, session.messages, failed=True
             )
             return "error"
         except asyncio.CancelledError:
             # 用户主动停止：模型已实际调用，不退款；已生成部分照样落盘
-            sc.store.save(session)
+            sc.store.save_merged(session)
             if loop_ctx is not None:
                 loop_ctx.stop_status = LOOP_STOPPED
                 await _finalize_loop(
@@ -1113,7 +1120,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 "error",
                 {"message": f"{type(exc).__name__}: {exc}", "fatal": True},
             )
-            sc.store.save(session)
+            sc.store.save_merged(session)
             await _finalize_loop(
                 state, sc, session.id, loop_ctx, session.messages, failed=True
             )
@@ -1388,7 +1395,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 prev = versions.begin_edit(thread, anchor, new_user)
             except ValueError:
                 raise HTTPException(400, "要编辑的消息不存在")
-            sc.store.save(session)
+            sc.store.save_merged(session)
         elif regen_id:
             mode = versions.MODE_REGEN
             anchor = regen_id
@@ -1396,7 +1403,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 prev = versions.begin_regen(thread, anchor)
             except ValueError:
                 raise HTTPException(400, "要重新生成的消息不存在")
-            sc.store.save(session)
+            sc.store.save_merged(session)
         elif resume_body is not None:
             # Galgame：不新增用户消息，给中断的 galgame_choice 补 tool 响应后续演
             custom = {
@@ -1404,7 +1411,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 % resume_text
             }
             history[:] = _heal_dangling_tool_calls(history, custom)
-            sc.store.save(session)
+            sc.store.save_merged(session)
         else:
             # 追加用户消息到该窗口（用户扮演自设时按角色名标注，便于展示）
             history.append(
@@ -1417,7 +1424,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             )
             # 修复此前因重启中断、失去 tool 响应的 assistant（否则直接 400）
             history[:] = _heal_dangling_tool_calls(history)
-            sc.store.save(session)
+            sc.store.save_merged(session)
     except Exception:
         run.mark_failed()
         run_manager.unlock_session(session.id, run)
@@ -1753,7 +1760,6 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 最后一位发言者的 done 才结束整个运行
                 fan_done = dict(done_data or {"reason": "stop", "iterations": attempts})
                 fan_done["terminal"] = spk is speakers[-1]
-                await run.emit("done", fan_done)
                 # 隐藏遗留的空白 assistant 消息（被重试舍弃的空白回合）；真正的跳过则隐藏最后一条。
                 if skipped and ender is not None and ender.role == "assistant":
                     ender.hidden = True
@@ -1768,6 +1774,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             and not m.tool_calls
                         ):
                             m.hidden = True
+                # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
+                # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
+                if fan_done["terminal"]:
+                    sc.store.save_merged(session)
+                await run.emit("done", fan_done)
                 if skipped:
                     await run.emit(
                         "speaker_skip",
@@ -1796,7 +1807,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 state, sc, transcript_from_history(history)
             )
             _merge_galgame_tts_overlay(state, session)
-            sc.store.save(session)
+            sc.store.save_merged(session)
             return "done"
         except ProviderError as exc:
             logger.warning("provider 错误: %s", exc)
@@ -1826,7 +1837,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 清理未被作答的阻塞选项 future
                 state.galgame_choices.discard(run.id)
                 _merge_galgame_tts_overlay(state, session)
-            sc.store.save(session)
+            sc.store.save_merged(session)
             # P2 长跑终态落 agent.db（loop_ctx 为 None 时直接空转）
             if loop_ctx is not None:
                 if loop_cancelled:
@@ -2027,8 +2038,12 @@ async def memory_snapshot(rid: str, request: Request,
                 session.add_usage(done_data.get("usage"))
             fan_done = dict(done_data or {"reason": "stop", "iterations": 1})
             fan_done["terminal"] = spk is speakers[-1]
+            # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
+            # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
+            if fan_done["terminal"]:
+                sc.store.save_merged(session)
             await run.emit("done", fan_done)
-        sc.store.save(session)
+        sc.store.save_merged(session)
         return "done"
 
     _spawn_run(run, drive, run_manager)

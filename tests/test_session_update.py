@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import pytest
 
 from flyai.api.routes_session import SessionUpdate, update_session
+from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore, session_from_dict, session_to_dict
 
 
@@ -50,6 +51,24 @@ def test_update_missing_session_404(tmp_path):
     with pytest.raises(Exception) as exc:
         update_session("ghost", SessionUpdate(title="x"), _req(store))
     assert getattr(exc.value, "status_code", None) == 404
+
+
+def test_stale_drive_copy_keeps_concurrent_rename(tmp_path):
+    """长跑 drive 发消息时加载旧副本；流式期间用户改名/置顶已落盘。
+    drive 收尾用 save_merged 时不得把旧标题写回去（线上真实竞态回归）。"""
+    store = JsonSessionStore(tmp_path)
+    s = store.create(title="旧标题")
+    s.messages.append(Message(role="user", content="你好"))
+    store.save(s)
+    drive = store.get(s.id)  # drive 持有的副本（旧形态会话在此被迁移为房间形态）
+    update_session(drive.id, SessionUpdate(title="新名字", pinned=True), _req(store))
+    drive.threads[0].messages.append(Message(role="assistant", content="回复"))
+    store.save_merged(drive)
+    disk = store.get(drive.id)
+    assert disk.title == "新名字"
+    assert disk.pinned is True
+    # 本轮消息照常落盘
+    assert disk.threads[0].messages[-1].content == "回复"
 
 
 # ---- 单窗口 max_tokens ----

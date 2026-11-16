@@ -1,0 +1,10 @@
+FlyAI WebApp
+============
+
+本工程的表现层组件（src/components/base/、主题与视口机制等）移植自
+deepseek-ai/chat-demo（https://github.com/deepseek-ai/chat-demo），
+依据其 MIT 许可证使用，源码版权归原作者所有。
+
+MIT 许可证全文：https://github.com/deepseek-ai/chat-demo/blob/main/LICENSE
+
+FlyAI 自有代码（领域状态、通信协议、业务视图等）按 FlyAI 项目自身条款发布。

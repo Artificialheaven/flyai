@@ -1,0 +1,45 @@
+.dialog {
+  width: 400px;
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--fly-alias-border-l2);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fly-alias-label-primary);
+  background-color: var(--fly-alias-bg-base);
+  outline: none;
+
+  &::placeholder {
+    color: var(--fly-alias-label-caption);
+  }
+
+  &:focus {
+    border-color: var(--fly-alias-brand-primary);
+  }
+}
+
+.text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fly-alias-label-secondary);
+}
+
+.error {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fly-alias-state-error-primary);
+}
+
+@media (max-width: 860px) {
+  .dialog {
+    width: calc(100vw - 32px);
+  }
+}

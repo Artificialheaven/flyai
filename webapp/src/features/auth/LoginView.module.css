@@ -1,0 +1,92 @@
+.page {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+  box-sizing: border-box;
+  background-color: var(--fly-alias-bg-base);
+}
+
+.themeCorner {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.card {
+  width: 380px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 32px 28px;
+  border-radius: 24px;
+  background-color: var(--fly-alias-bg-layer-2);
+  box-shadow:
+    inset 0 0 0 1px var(--fly-alias-border-inverted),
+    var(--fly-shadow-lv3);
+}
+
+.brand {
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 700;
+  color: var(--fly-alias-brand-text);
+  letter-spacing: 1px;
+}
+
+.subtitle {
+  margin: 6px 0 24px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--fly-alias-label-tertiary);
+}
+
+.field {
+  display: block;
+  margin-bottom: 16px;
+}
+
+.label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--fly-alias-label-secondary);
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--fly-control-height-l);
+  padding: 0 14px;
+  border: 1px solid var(--fly-alias-border-l2);
+  border-radius: 12px;
+  background-color: var(--fly-specific-login-input);
+  color: var(--fly-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+  transition:
+    border-color var(--fly-transition-duration) var(--fly-ease-in-out),
+    background-color var(--fly-transition-duration) var(--fly-ease-in-out);
+
+  &::placeholder {
+    color: var(--fly-alias-label-caption);
+  }
+
+  &:focus {
+    border-color: var(--fly-alias-brand-primary);
+  }
+}
+
+.error {
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background-color: var(--fly-alias-interactive-bg-hover-danger);
+  color: var(--fly-alias-state-error-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
