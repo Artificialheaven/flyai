@@ -6,8 +6,13 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from flyai.api.routes_chat import _attach_recall, build_auto_recall_block
+from flyai.api.routes_chat import (
+    _attach_recall,
+    _belongs_to_speaker,
+    build_auto_recall_block,
+)
 from flyai.config import AppConfig
+from flyai.sessions.models import RoomMember
 from flyai.user import UserScope
 from flyai.schemas import Message
 
@@ -140,7 +145,96 @@ def test_attach_recall_empty_items_noop():
     assert history[0].recall is None
 
 
-def test_recall_from_book(tmp_path):
+# ---- 按角色 id 隔离：群聊别家台词 / 换卡后旧卡台词不进候选池 ----
+
+def test_belongs_to_speaker_group_isolates_other_actors():
+    a = RoomMember(name="爱琳", character_id="CA")
+    b = RoomMember(name="小玥", character_id="CB")
+    mine = Message(role="assistant", content="x", actor_id=b.id, name="小玥")
+    theirs = Message(role="assistant", content="y", actor_id=a.id, name="爱琳")
+    user = Message(role="user", content="z")
+    assert _belongs_to_speaker(mine, b, "CB")
+    assert not _belongs_to_speaker(theirs, b, "CB")
+    # 用户消息恒算（用户是同一个人）
+    assert _belongs_to_speaker(user, b, "CB")
+
+
+def test_belongs_to_speaker_card_id_beats_actor():
+    seat = RoomMember(name="小玥", character_id="CB")
+    old = Message(role="assistant", content="旧卡台词", actor_id=seat.id,
+                  character_id="CA")
+    new = Message(role="assistant", content="新卡台词", actor_id=seat.id,
+                  character_id="CB")
+    # 同一座位换卡：消息级角色卡 id 优先于座位 actor_id
+    assert not _belongs_to_speaker(old, seat, "CB")
+    assert _belongs_to_speaker(new, seat, "CB")
+    # 旧卡自己回看历史时仍能看到自己的台词
+    assert _belongs_to_speaker(old, seat, "CA")
+
+
+def test_auto_recall_excludes_other_characters(tmp_path):
+    import asyncio
+
+    scope, state = _env(tmp_path)
+    scope.user_settings.auto_recall = True
+    scope.user_settings.keep_turns = 1
+    a = RoomMember(name="爱琳", character_id="CA")
+    b = RoomMember(name="小玥", character_id="CB")
+    history = [
+        Message(role="user", content="我们以前在码头碰过头"),
+        Message(role="assistant", content="码头暗号只有我知道",
+                actor_id=a.id, name="爱琳"),
+        Message(role="assistant", content="码头海风很大",
+                actor_id=b.id, name="小玥"),
+        Message(role="user", content="今天随便聊聊"),
+        Message(role="assistant", content="好的呀",
+                actor_id=b.id, name="小玥"),
+    ]
+    block, items = asyncio.get_event_loop().run_until_complete(
+        build_auto_recall_block(
+            state=state, sc=scope, char_id="CB", history=history,
+            member=b, query="码头", cache_namespace="tid",
+        )
+    )
+    # 别家角色的台词不进入候选池
+    assert "暗号" not in block
+    assert all("暗号" not in it["text"] for it in items)
+    assert not any(it["source"] == "旧对话·爱琳" for it in items)
+    # 用户消息与本角色旧台词照常召回
+    assert "码头海风很大" in block
+
+
+def test_auto_recall_respects_message_card_id(tmp_path):
+    import asyncio
+
+    scope, state = _env(tmp_path)
+    scope.user_settings.auto_recall = True
+    scope.user_settings.keep_turns = 1
+    seat = RoomMember(name="小玥", character_id="NEW")
+    history = [
+        Message(role="assistant", content="旧卡约定在码头接头",
+                actor_id=seat.id, character_id="OLD"),
+        Message(role="assistant", content="新卡知道码头有船",
+                actor_id=seat.id, character_id="NEW"),
+        Message(role="user", content="今天聊别的"),
+        Message(role="assistant", content="好", actor_id=seat.id,
+                character_id="NEW"),
+        Message(role="user", content="再说点"),
+        Message(role="assistant", content="行", actor_id=seat.id,
+                character_id="NEW"),
+    ]
+    block, items = asyncio.get_event_loop().run_until_complete(
+        build_auto_recall_block(
+            state=state, sc=scope, char_id="NEW", history=history,
+            member=seat, query="码头", cache_namespace="tid",
+        )
+    )
+    assert "接头" not in block
+    assert "新卡知道码头有船" in block
+
+
+def test_auto_recall_ignores_book(tmp_path):
+    """自动回忆只取当前窗口消息：跨会话记忆簿不进入候选池。"""
     import asyncio
 
     scope, state = _env(tmp_path)
@@ -152,5 +246,4 @@ def test_recall_from_book(tmp_path):
             member=None, query="码头", cache_namespace="sid",
         )
     )
-    assert "记忆簿" in block and "码头" in block
-    assert any(it["source"] == "记忆簿" for it in items)
+    assert block == "" and items == []

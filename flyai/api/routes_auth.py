@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,7 +19,14 @@ from ..auth_sessions import extract_token
 from ..errors import ProviderError  # noqa: F401  (保持错误统一导出)
 from ..user import ADMIN_LEVEL, ADMIN_UID
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# 注册流程串行化：查重名 → 建用户 → 扣邀请码 → 签发令牌。
+# 仅保证单进程内不交叠；多进程部署时 users.json/invites.json 的文件级写入
+# 不是事务性的，进程崩溃可能留下部分状态（用户已建、邀请码未计）。
+_REGISTER_LOCK = threading.Lock()
 
 
 def _identity(request: Request):
@@ -52,6 +61,12 @@ def _require_admin(request: Request):
 class LoginPayload(BaseModel):
     name: str
     password: str = ""
+
+
+class RegisterPayload(BaseModel):
+    name: str
+    password: str = ""
+    invite_code: str = ""
 
 
 class CreateUserPayload(BaseModel):
@@ -120,6 +135,86 @@ def _issue_login(state, uid: str, name: str, role: str, level: int) -> dict:
     return {"token": token, "id": uid, "name": name, "role": role, "level": level}
 
 
+def _undo_register(state, uid: str, code: Optional[str]) -> None:
+    """回滚注册的残留状态：先撤回邀请码使用记录，再删用户。"""
+    if code:
+        store = getattr(state, "invite_store", None)
+        if store is not None:
+            try:
+                store.unmark_used(code, uid)
+            except Exception:
+                logger.exception("回滚邀请码使用记录失败")
+    if uid:
+        try:
+            state.user_store.remove(uid)
+        except Exception:
+            logger.exception("回滚注册用户失败")
+
+
+@router.post("/register")
+def register(payload: RegisterPayload, request: Request):
+    """邀请码注册：校验邀请码 → 创建普通用户 → 自动登录。"""
+    state = request.app.state.flyai
+    name = (payload.name or "").strip()
+    password = payload.password or ""
+    invite_code = (payload.invite_code or "").strip()
+    if not name:
+        raise HTTPException(400, "请输入用户名")
+    # 空密码会被 check_password 视为任意密码均可登录，注册时必须拒绝
+    if not password:
+        raise HTTPException(400, "请输入密码")
+    admin = getattr(getattr(state.config, "auth", None), "admin", None)
+    admin_name = (getattr(admin, "username", "") or "").strip()
+    if admin_name and name == admin_name:
+        raise HTTPException(400, "该用户名不可用")
+    if not invite_code:
+        raise HTTPException(400, "请输入邀请码")
+
+    limit_key = "register:" + _client_ip(request) + "|" + name
+    wait = state.login_limiter.locked_seconds(limit_key)
+    if wait:
+        raise HTTPException(429, f"注册失败次数过多，请 {wait} 秒后再试")
+
+    store = getattr(state, "invite_store", None)
+    if store is None:
+        raise HTTPException(503, "邀请码服务未就绪")
+
+    uid = ""
+    marked: Optional[str] = None
+    with _REGISTER_LOCK:
+        try:
+            if state.user_store.get_by_name(name):
+                raise HTTPException(400, f"用户名已存在: {name}")
+            invite = store.check(invite_code)
+            if invite is None:
+                raise HTTPException(400, "邀请码无效")
+            if invite["status"] != "usable":
+                raise HTTPException(400, "邀请码已用尽")
+            u = state.user_store.create(name, password, level=0)
+            uid = u.id
+            reg = getattr(state.config, "registration", None)
+            quota = float(getattr(reg, "default_quota", 0) or 0)
+            if quota:
+                state.user_store.set_quota_total(uid, quota)
+            store.mark_used(invite["code"], uid, name)
+            marked = invite["code"]
+            state.login_limiter.record_success(limit_key)
+            return _issue_login(state, uid, name, "user", 0)
+        except HTTPException:
+            _undo_register(state, uid, marked)
+            state.login_limiter.record_failure(limit_key)
+            raise
+        except ValueError as exc:
+            _undo_register(state, uid, marked)
+            state.login_limiter.record_failure(limit_key)
+            raise HTTPException(400, str(exc))
+        except Exception:
+            _undo_register(state, uid, marked)
+            state.login_limiter.record_failure(limit_key)
+            logger.exception("注册失败")
+            raise HTTPException(500, "注册失败，请重试")
+
+
 @router.get("/users")
 def list_users(request: Request):
     """列出普通用户（仅管理员）。"""
@@ -142,6 +237,9 @@ def create_user(payload: CreateUserPayload, request: Request):
     name = (payload.name or "").strip()
     if not name:
         raise HTTPException(400, "请输入用户名")
+    # 与管理员同名会永远无法登录（登录优先匹配管理员凭据）
+    if (state.config.auth.admin.username or "").strip() == name:
+        raise HTTPException(400, "该用户名不可用")
     if state.user_store.get_by_name(name):
         raise HTTPException(400, f"用户名已存在: {name}")
     level = max(0, min(int(payload.level or 0), 255))
@@ -208,6 +306,13 @@ def delete_user(uid: str, request: Request):
     state = request.app.state.flyai
     if not state.user_store.remove(uid):
         raise HTTPException(400, "删除失败（用户不存在）")
+    # 用户被删除后其邀请码一并清理；失败不影响删除结果
+    store = getattr(state, "invite_store", None)
+    if store is not None:
+        try:
+            store.remove_owner(uid)
+        except Exception:
+            logger.exception("删除用户时清理邀请码失败")
     return {"ok": True}
 
 

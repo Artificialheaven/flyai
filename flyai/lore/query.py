@@ -25,6 +25,12 @@ _KEYWORD_LIMIT_DEFAULT = 8
 
 _TERM_SPLIT_RE = re.compile(r"[\s,，、;；/]+")
 
+# 未指定角色卡时的默认人格：通用 AI 助手（替代角色扮演设定）
+GENERAL_ASSISTANT_PROMPT = (
+    "你是一个热情、细腻的 AI 助手，以热情细腻的风格提供帮助，"
+    "力求让对话体验更舒适，为用户的需求提供灵活帮助。"
+)
+
 
 class LoreQuerier:
     """绑定到单个会话的活动角色/世界观，供 query_lore 工具检索。"""
@@ -301,6 +307,9 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
         parts.append(
             "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
         )
+    else:
+        # 无角色卡：回退到通用 AI 助手人格，不使用扮演口吻
+        parts.append(GENERAL_ASSISTANT_PROMPT)
 
     persona = _persona_block(opts.user_character)
     if persona:

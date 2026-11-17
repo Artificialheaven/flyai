@@ -8,7 +8,9 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
+from ..models_access import visible_providers
 from ..sessions.resolve import member_character
+from ..user import ADMIN_UID
 from .routes_session import _session_dict
 
 
@@ -20,6 +22,29 @@ def _safe_room_id(rid: str) -> str:
         return check_safe_name(rid, "房间 ID")
     except InvalidName:
         raise HTTPException(400, "房间 ID 非法")
+
+
+def _stamp_seat_messages(s, member_id: str, card_id: str) -> None:
+    """给某座位的旧 assistant 消息补记角色卡 id（换卡时调用）。
+
+    历史消息此前只按座位 actor_id 归属；座位换卡后同一 actor_id 下会混着
+    两张卡的对白，自动回忆无法区分。换卡时把旧卡 id 回填到其尚未标注的
+    消息上，此后新卡只回忆自己产生的对话。旧卡 id 为空时跳过。
+    """
+    if not card_id:
+        return
+
+    def _stamp(messages) -> None:
+        for msg in messages:
+            if msg.role != "assistant" or (msg.actor_id or "").strip() != member_id:
+                continue
+            if not (msg.character_id or "").strip():
+                msg.character_id = card_id
+
+    for t in s.threads:
+        if member_id in (t.member_ids or []):
+            _stamp(t.messages)
+    _stamp(s.messages)
 
 
 class RoomCreate(BaseModel):
@@ -86,8 +111,11 @@ def _apply_member_seat_settings(state, sc, m, provider_id, memory_mode,
     """校验并写入座位的 provider / 记忆挂载设置。None 字段=不改。"""
     if provider_id is not None:
         pid = (provider_id or "").strip()
-        if pid and not any(p.id == pid for p in state.config.providers):
-            raise HTTPException(400, "该模型不存在或尚未配置")
+        if pid:
+            level = int(getattr(sc, "level", 0) or 0)
+            usable = visible_providers(state.config, getattr(sc, "uid", ""), level)
+            if not any(p.id == pid for p in usable):
+                raise HTTPException(403, "该模型不可用")
         m.provider_id = pid
     if memory_mode is not None:
         mode = (memory_mode or "").strip()
@@ -121,6 +149,16 @@ def create_room(body: RoomCreate, request: Request):
         "galgame", state.config, getattr(sc, "user_settings", None)
     ):
         raise HTTPException(403, "Galgame 模式未开放（默认关闭或被管理员禁用）")
+    # 等级门槛：admin 恒过，其余用户按 access.galgame_min_level 拦截
+    if is_galgame and sc.uid != ADMIN_UID:
+        access = getattr(state.config, "access", None)
+        required = int(getattr(access, "galgame_min_level", 0) or 0) if access else 0
+        level = int(getattr(sc, "level", 0) or 0)
+        if level < required:
+            raise HTTPException(
+                403,
+                "权限等级不足（Galgame 需要 Lv%d，当前 Lv%d）" % (required, level),
+            )
     # Galgame 第一期：单角色（先校验再落盘，避免留下空会话文件）
     if is_galgame and len(body.character_ids or []) != 1:
         raise HTTPException(400, "Galgame 模式必须且只能选择一个角色")
@@ -145,6 +183,10 @@ def create_room(body: RoomCreate, request: Request):
     # 开场白（first_mes）：仅单角色普通房间自动落一条 AI 首条消息。
     # 多角色归属不明、Galgame 有自己的初始剧情流程，均不播种。
     if not is_galgame and len(chosen) == 1:
+        # 单 AI 房间同步顶层绑定字段：会话副本 / 导出 / 压缩校验都读顶层，
+        # 与 update_member 换座后的同步规则保持一致。
+        s.character_id = chosen[0][1]
+        s.character_override = None
         greeting = (chosen[0][0].first_mes or "").strip()
         if greeting:
             from ..lore.query import substitute_chat_macros
@@ -152,7 +194,8 @@ def create_room(body: RoomCreate, request: Request):
 
             greeting = substitute_chat_macros(greeting, chosen[0][0].name, "你")
             s.threads[0].messages.append(
-                Message(role="assistant", content=greeting)
+                Message(role="assistant", content=greeting,
+                        actor_id=m.id, character_id=chosen[0][1] or "")
             )
     sc.store.save(s)
     return _session_dict(s, with_messages=True, lore=sc.lore)
@@ -198,6 +241,10 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
         if body.character_id and not sc.lore.get_character(body.character_id):
             raise HTTPException(400, "角色不存在")
         card_changed = body.character_id != m.character_id
+        old_card_id = m.character_id or ""
+        if card_changed and not m.is_user:
+            # 先把旧卡的对白按旧卡 id 落标，避免同一座位的新卡串旧卡的回忆
+            _stamp_seat_messages(s, m.id, old_card_id)
         m.character_id = body.character_id
         # 换卡时清掉旧的会话专属副本，避免遮蔽库卡
         m.override = None

@@ -241,6 +241,40 @@ def test_update_mounted_memory_char_id_owner(tmp_path):
     assert books.load("TA") == []
 
 
+def test_cardless_seat_never_uses_anonymous_book(tmp_path):
+    """未绑定角色卡的座位不读也不写匿名 ".json" 公共簿（含强制存档）。"""
+    from flyai.lore.character_memory import CharacterMemoryStore
+    from flyai.tools.memory_tool import _book_read_mode, _book_write_mode
+
+    store = JsonSessionStore(tmp_path)
+    s = store.create(title="S")
+    s.members.append(RoomMember(name="你", is_user=True))
+    seat = RoomMember(name="AI")
+    s.members.append(seat)
+    store.save(s)
+    books = CharacterMemoryStore(tmp_path / "mem")
+    books.append("", "匿名簿里的旧事实")
+
+    assert _book_read_mode(seat) == "" and _book_write_mode(seat) == ""
+
+    services = {"store": store, "session": s, "member": seat, "char_memory": books}
+    ctx = ToolContext(session_id=s.id, services=services)
+    # 无卡座位本来就不能检索跨窗对话；关键是绝不能从匿名簿里捞到内容
+    res = asyncio.run(QueryChatMemoryTool().run({"topic": "旧事实"}, ctx))
+    assert "匿名簿里的旧事实" not in res.output
+
+    res = asyncio.run(UpdateChatMemoryTool().run({"add": "只写会话"}, ctx))
+    assert res.ok and "只写会话" in seat.memory
+    assert not any("只写会话" in e for e in books.load(""))
+
+    forced = ToolContext(
+        session_id=s.id, services=dict(services, book_force_write=True)
+    )
+    res = asyncio.run(UpdateChatMemoryTool().run({"add": "强制也不写"}, forced))
+    assert res.ok
+    assert not any("强制也不写" in e for e in books.load(""))
+
+
 # ---- 本房间记忆（member.memory）也能被 query 检索到 ----
 
 def test_query_includes_room_memory_on_topic(tmp_path):

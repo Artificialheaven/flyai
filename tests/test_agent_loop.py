@@ -208,6 +208,83 @@ def test_max_tokens_none_when_unset():
     assert provider.kwargs_list[0]["max_tokens"] is None
 
 
+def test_session_id_passed_through_to_provider():
+    async def go():
+        provider = _ScriptedProvider([("final", "好")])
+        out = []
+        async for ev, data in run_agent_loop(
+            [Message(role="user", content="hi")],
+            provider,
+            _FakeRegistry(),
+            ToolSettings(enabled=True),
+            session_id="sess-1",
+        ):
+            out.append((ev, data))
+        return provider, out
+
+    provider, events = _run(go())
+    assert provider.kwargs_list[0]["session_id"] == "sess-1"
+    assert _done(events)["reason"] == "stop"
+
+
+# ---- 执行期白名单：模型回放未开放工具时不得真正执行 ----
+
+async def _collect_with_allowed(turns, allowed):
+    provider = _ScriptedProvider(turns)
+    registry = _FakeRegistry()
+    settings = ToolSettings(enabled=True, max_iterations=5)
+    history = [Message(role="user", content="hi")]
+    out = []
+    async for ev, data in run_agent_loop(
+        history,
+        provider,
+        registry,
+        settings,
+        system_prompt="sys",
+        allowed_tools=allowed,
+    ):
+        out.append((ev, data))
+    return out, registry, history
+
+
+def test_blocked_tool_not_executed_and_recorded_as_failure():
+    turns = [("calls", [("read_file", {"path": "/etc/passwd"})]),
+             ("final", "好")]
+    events, registry, history = _run(
+        _collect_with_allowed(turns, allowed={"web_search"}))
+
+    assert registry.executed == []  # 未执行
+    ends = [d for ev, d in events if ev == "tool_end"]
+    assert ends[0]["ok"] is False
+    assert "权限不足" in ends[0]["preview"]
+
+    tool_msgs = [m for m in history if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].ok is False
+    assert "权限不足" in tool_msgs[0].content
+    # 被拒后仍可正常收尾
+    assert _done(events)["reason"] == "stop"
+
+
+def test_allowed_tool_still_executes_with_whitelist():
+    turns = [("calls", [("web_search", {"query": "q"})]),
+             ("final", "答")]
+    events, registry, _history = _run(
+        _collect_with_allowed(turns, allowed={"web_search"}))
+    assert registry.executed == ["web_search"]
+    ends = [d for ev, d in events if ev == "tool_end"]
+    assert ends[0]["ok"] is True
+
+
+def test_allowed_tools_none_keeps_full_access():
+    turns = [("calls", [("read_file", {"path": "/f"})]),
+             ("final", "答")]
+    events, registry, _history = _run(
+        _collect_with_allowed(turns, allowed=None))
+    assert registry.executed == ["read_file"]
+    assert _done(events)["reason"] == "stop"
+
+
 class _SlowProvider:
     """先吐一帧，然后阻塞在 Event 上等取消。"""
 

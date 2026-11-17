@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
 
-/** 窄于 860px 按移动端布局（沿用 FlyAI 旧站断点；chat-demo 原为 768px） */
-const query = window.matchMedia('not all and (min-width: 860px)')
+/** 窄于 768px 按移动端布局 */
+const query = window.matchMedia('not all and (min-width: 768px)')
 
 const subscribe = (onChange: () => void) => {
   query.addEventListener('change', onChange)
@@ -9,6 +9,9 @@ const subscribe = (onChange: () => void) => {
 }
 
 export const useIsMobile = () => useSyncExternalStore(subscribe, () => query.matches)
+
+/** 当前是否移动端布局（非 hook，事件回调里用） */
+export const isMobileViewport = () => query.matches
 
 const preventPageScroll = (event: TouchEvent) => {
   if (event.touches.length !== 1) {

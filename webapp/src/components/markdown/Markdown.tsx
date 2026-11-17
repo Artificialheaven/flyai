@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import type { CitationSource as Source } from '../../types/citation.js'
+import type { Source } from '../../services/chat/view.js'
 import { toMdAst } from '../../services/markdown/parse.js'
 import { useScrollToBottom } from '../messages/scrollContext.js'
 import { MarkdownAstRenderer } from './MarkdownAstRenderer.js'

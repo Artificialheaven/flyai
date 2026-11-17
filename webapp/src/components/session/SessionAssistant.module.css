@@ -1,0 +1,226 @@
+/* 会话助手：主动行为 / 心情 / 记忆 / 承诺 / 作业 / 轮询 / 长跑 */
+
+.dialog {
+  width: 720px;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+}
+
+.tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background-color: var(--dsw-alias-bg-skeleton);
+}
+
+.tab {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tabActive {
+  background-color: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.hint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.checkField {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  user-select: none;
+
+  input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--dsw-alias-brand-primary);
+  }
+}
+
+.formCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.inlineFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.itemMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.itemName {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.itemMeta {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.itemActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.badge {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.chip {
+  padding: 0 6px;
+  border-radius: 6px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.moodBox {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.moodValue {
+  flex: none;
+  font-size: 34px;
+  line-height: 42px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.moodText {
+  flex: 1;
+  min-width: 0;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  width: 100%;
+}
+
+@media not all and (min-width: 768px) {
+  .dialog {
+    align-self: flex-end;
+    width: 100%;
+    max-width: none;
+    border-radius: 24px 24px 0 0;
+  }
+
+  .content {
+    max-height: 74vh;
+  }
+
+  .item {
+    flex-wrap: wrap;
+  }
+
+  .itemActions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

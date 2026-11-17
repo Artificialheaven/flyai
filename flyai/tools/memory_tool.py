@@ -68,7 +68,11 @@ def _book_read_mode(member) -> str:
     未显式挂载且归属就是本角色自身时，默认按只读可见——
     同一角色在不同房间之间天然延续记忆；
     挂载别人卡的簿（副本/派生卡）则必须显式选择挂载，默认不读。
+    没有角色归属的座位（未绑定角色卡且未挂载）不读任何簿，
+    避免落到匿名的 ".json" 公共簿。
     """
+    if not _memory_owner(member):
+        return ""
     mode = _memory_mode(member)
     if mode:
         return mode
@@ -83,7 +87,11 @@ def _book_write_mode(member) -> str:
     自己的跨会话记忆簿本就应在各房间延续（自动整理与 update_chat_memory
     默认即可写入，否则用户会觉得「记忆功能没生效」）；
     挂载别人卡的簿（副本/派生卡）必须显式选成读写，默认不可写。
+    没有角色归属的座位（未绑定角色卡且未挂载）不写任何簿，
+    避免落到匿名的 ".json" 公共簿。
     """
+    if not _memory_owner(member):
+        return ""
     mode = _memory_mode(member)
     if mode:
         return mode
@@ -418,11 +426,12 @@ class UpdateChatMemoryTool(Tool):
         # 用户显式触发的一次性记入，即使本座位是只读/未挂载也写入；
         # 其余情况只写本会话，不报错
         force_write = bool(services.get("book_force_write"))
-        if _book_write_mode(member) == "rw" or force_write:
+        owner = _memory_owner(member)
+        if owner and (_book_write_mode(member) == "rw" or force_write):
             char_store = services.get("char_memory")
             if char_store is not None:
                 try:
-                    char_store.append(_memory_owner(member), add)
+                    char_store.append(owner, add)
                     note = "\n（已同步进跨会话角色记忆簿）"
                 except Exception as exc:
                     note = f"\n[警告] 跨会话记忆簿写入失败: {type(exc).__name__}: {exc}"

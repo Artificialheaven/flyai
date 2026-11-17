@@ -9,7 +9,7 @@
   min-width: 124px;
   padding: 4px;
   border-radius: 12px;
-  background-color: var(--fly-specific-menu);
+  background-color: var(--dsw-specific-menu);
   box-shadow:
     0 0 1px rgba(0, 0, 0, 0.2),
     0 0 4px rgba(0, 0, 0, 0.02),
@@ -24,12 +24,12 @@
   border-radius: 8px;
   font-size: 14px;
   line-height: 24px;
-  color: var(--fly-alias-label-primary);
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   user-select: none;
 
   &:hover {
-    background-color: var(--fly-alias-interactive-bg-hover);
+    background-color: var(--dsw-alias-interactive-bg-hover);
   }
 }
 
@@ -39,9 +39,9 @@
 }
 
 .danger {
-  color: var(--fly-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
 
   &:hover {
-    background-color: var(--fly-alias-interactive-bg-hover-danger);
+    background-color: var(--dsw-alias-interactive-bg-hover-danger);
   }
 }

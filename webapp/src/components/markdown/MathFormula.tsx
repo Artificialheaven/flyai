@@ -49,10 +49,10 @@ const useMathHtml = (input: string, isInline: boolean): MathHtmlResult => {
 export const MathBlock = memo(function MathBlock({ value }: { value: string }) {
   const { html, renderMode } = useMathHtml(value, false)
   if (renderMode === 'fallback') {
-    return <p className="fly-markdown-paragraph">{html}</p>
+    return <p className="ds-markdown-paragraph">{html}</p>
   }
   return (
-    <span className="katex-display fly-markdown-math">
+    <span className="katex-display ds-markdown-math">
       <span className="katex" dangerouslySetInnerHTML={{ __html: html }}></span>
     </span>
   )

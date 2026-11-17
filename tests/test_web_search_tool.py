@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import httpx
 import pytest
 
-from flyai.config import WebSearchSettings
+from flyai.config import DeepSeekSettings, WebSearchSettings
+from flyai.errors import DeepSeekError
+from flyai.metering import per_success_cost
 from flyai.tools import web_search_tool as mod
 from flyai.tools.base import ToolContext
 from flyai.tools.web_search_tool import WebFetchTool, WebSearchTool
@@ -887,3 +889,168 @@ def test_baidu_captcha_then_bing_also_fails():
     assert not result.ok and "浏览器搜索失败" in result.output
     assert "RuntimeError" in result.output and "down" in result.output
     assert len(searcher.calls) == 2
+
+
+# ---------- DeepSeek 搜索/抓取优先与回退计费 ----------
+
+def _ds(**kw):
+    kw.setdefault("api_key", "sk-ds")
+    return DeepSeekSettings(**kw)
+
+
+class _Meter:
+    """按次计费的记录器；available 可配置为余额不足。"""
+
+    def __init__(self, available=True):
+        self._available = available
+        self.charges = []
+
+    def available(self):
+        return self._available
+
+    def charge(self, kind, quantity, unit, cost, engine="", session_id=""):
+        self.charges.append((kind, quantity, unit, cost, engine))
+        return cost
+
+
+class _FakeDsClient:
+    search_result = None
+    search_error = None
+    fetch_result = None
+    fetch_error = None
+    calls = []
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    async def search(self, query, count):
+        _FakeDsClient.calls.append(("search", query, count))
+        if _FakeDsClient.search_error is not None:
+            raise _FakeDsClient.search_error
+        return list(_FakeDsClient.search_result or [])
+
+    async def fetch(self, url):
+        _FakeDsClient.calls.append(("fetch", url))
+        if _FakeDsClient.fetch_error is not None:
+            raise _FakeDsClient.fetch_error
+        return dict(_FakeDsClient.fetch_result or {})
+
+
+@pytest.fixture
+def fake_ds(monkeypatch):
+    _FakeDsClient.search_result = None
+    _FakeDsClient.search_error = None
+    _FakeDsClient.fetch_result = None
+    _FakeDsClient.fetch_error = None
+    _FakeDsClient.calls = []
+    monkeypatch.setattr(mod, "DeepSeekToolsClient", _FakeDsClient)
+    return _FakeDsClient
+
+
+_SEARCH_COST = per_success_cost(5.0)  # 0.005
+
+
+def test_search_deepseek_success_billed(fake_ds):
+    fake_ds.search_result = [
+        {"title": "结果甲", "url": "https://a.example/p", "content": "摘要甲"},
+    ]
+    meter = _Meter()
+    result = asyncio.run(WebSearchTool(_settings()).run(
+        {"query": "词"}, _ctx(deepseek_settings=_ds(), usage_meter=meter)))
+    assert result.ok
+    assert "1. 结果甲" in result.output
+    assert "URL: https://a.example/p" in result.output
+    assert fake_ds.calls == [("search", "词", 8)]
+    assert meter.charges == [
+        ("search", 1, "次", _SEARCH_COST, "deepseek"),
+    ]
+
+
+def test_search_deepseek_failure_falls_back_and_bills_fallback(
+        monkeypatch, fake_ds):
+    fake_ds.search_error = DeepSeekError("down", status_code=502)
+
+    def handler(request):
+        return httpx.Response(200, text=_bing_html())
+
+    _install_transport(monkeypatch, handler)
+    meter = _Meter()
+    result = asyncio.run(WebSearchTool(_settings()).run(
+        {"query": "词"}, _ctx(deepseek_settings=_ds(), usage_meter=meter)))
+    assert result.ok and "共 3 条结果" in result.output
+    assert meter.charges == [
+        ("search", 1, "次", _SEARCH_COST, "fallback"),
+    ]
+
+
+def test_search_deepseek_empty_results_falls_back(fake_ds, monkeypatch):
+    fake_ds.search_result = []
+    searcher = _FakeSearcher(results=_chromium_results())
+    meter = _Meter()
+    result = asyncio.run(WebSearchTool(_settings(engine="chromium")).run(
+        {"query": "词"},
+        _ctx(deepseek_settings=_ds(), usage_meter=meter,
+             chromium_search=searcher)))
+    assert result.ok and "共 3 条结果" in result.output
+    assert searcher.calls == [("词", "bing", 8)]
+    assert meter.charges[-1][4] == "fallback"
+
+
+def test_search_insufficient_balance_no_call(fake_ds):
+    result = asyncio.run(WebSearchTool(_settings()).run(
+        {"query": "词"},
+        _ctx(deepseek_settings=_ds(), usage_meter=_Meter(available=False))))
+    assert not result.ok and "余额不足" in result.output
+    assert fake_ds.calls == []
+
+
+def test_fetch_deepseek_success_billed_and_cached(fake_ds):
+    fake_ds.fetch_result = {"title": "深索页", "content": "深索正文内容" * 5}
+    meter = _Meter()
+    cache = mod.PageTextCache()
+    result = asyncio.run(WebFetchTool(_settings()).run(
+        {"url": "https://example.com/q"},
+        _ctx(deepseek_settings=_ds(), usage_meter=meter, page_cache=cache)))
+    assert result.ok
+    assert "[网页] 深索页" in result.output and "深索正文内容" in result.output
+    assert fake_ds.calls == [("fetch", "https://example.com/q")]
+    assert meter.charges == [
+        ("fetch", 1, "次", _SEARCH_COST, "deepseek"),
+    ]
+    assert cache.get("https://example.com/q")
+
+
+def test_fetch_deepseek_failure_falls_back_and_bills(
+        monkeypatch, fake_ds):
+    fake_ds.fetch_error = DeepSeekError("down", status_code=502)
+
+    def handler(request):
+        return _html_response(_page_html("回退页", "回退正文"))
+
+    _install_transport(monkeypatch, handler)
+    meter = _Meter()
+    result = asyncio.run(WebFetchTool(_settings()).run(
+        {"url": "https://example.com/r"},
+        _ctx(deepseek_settings=_ds(), usage_meter=meter,
+             page_cache=mod.PageTextCache())))
+    assert result.ok and "回退正文" in result.output
+    assert meter.charges == [
+        ("fetch", 1, "次", _SEARCH_COST, "fallback"),
+    ]
+
+
+def test_fetch_cache_pagination_not_charged_again(fake_ds):
+    fake_ds.fetch_result = {"title": "长页", "content": "正文内容" * 200}
+    meter = _Meter()
+    cache = mod.PageTextCache()
+    ctx = _ctx(deepseek_settings=_ds(), usage_meter=meter, page_cache=cache)
+    tool = WebFetchTool(_settings(max_page_chars=200))
+
+    first = asyncio.run(tool.run({"url": "https://example.com/s"}, ctx))
+    assert first.ok and len(meter.charges) == 1
+    second = asyncio.run(tool.run(
+        {"url": "https://example.com/s", "offset": 200}, ctx))
+    assert second.ok and "内容 201–400" in second.output
+    # 翻页命中缓存：不请求上游、不重复计费
+    assert len(fake_ds.calls) == 1
+    assert len(meter.charges) == 1

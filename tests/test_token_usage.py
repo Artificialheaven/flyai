@@ -33,7 +33,17 @@ def test_add_usage_accumulates_across_turns():
     s = Session()
     s.add_usage({"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150})
     s.add_usage({"prompt_tokens": 200, "completion_tokens": 80, "total_tokens": 280})
-    assert s.token_usage == {"prompt_tokens": 300, "completion_tokens": 130, "total_tokens": 430}
+    assert s.token_usage == {"prompt_tokens": 300, "completion_tokens": 130,
+                             "total_tokens": 430, "cached_tokens": 0}
+
+
+def test_add_usage_accumulates_cached_tokens():
+    s = Session()
+    s.add_usage({"prompt_tokens": 100, "completion_tokens": 10,
+                 "cached_tokens": 60})
+    s.add_usage({"prompt_tokens": 50, "cached_tokens": 20})
+    assert s.token_usage["cached_tokens"] == 80
+    assert s.token_usage["prompt_tokens"] == 150
 
 
 def test_add_usage_derives_total_when_missing():
@@ -59,7 +69,8 @@ def test_json_store_roundtrips_token_usage(tmp_path):
     store.save(s)
 
     loaded = store.get(s.id)
-    assert loaded.token_usage == {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+    assert loaded.token_usage == {"prompt_tokens": 1000, "completion_tokens": 500,
+                                  "total_tokens": 1500, "cached_tokens": 0}
 
 
 def test_old_session_without_token_usage_loads_empty(tmp_path):
@@ -74,7 +85,8 @@ def test_session_dict_contains_token_usage():
     s = Session()
     s.add_usage({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
     d = _session_dict(s)
-    assert d["token_usage"] == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    assert d["token_usage"] == {"prompt_tokens": 5, "completion_tokens": 2,
+                                "total_tokens": 7, "cached_tokens": 0}
 
 
 # ---- agent loop done 带 usage ----
@@ -109,4 +121,5 @@ def test_agent_loop_done_payload_carries_usage():
 
     events = _run(collect())
     done = [d for ev, d in events if ev == "done"][-1]
-    assert done["usage"] == {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+    assert done["usage"] == {"prompt_tokens": 30, "completion_tokens": 10,
+                             "total_tokens": 40, "cached_tokens": 0}

@@ -8,7 +8,7 @@ import type {
   Root,
   Table as TableNode,
 } from 'mdast'
-import { CitationLink } from './CitationLink.js'
+import { CitationLink } from '../search/CitationLink.js'
 import { CodeBlock } from './CodeBlock.js'
 import { ImageAsLink, Link } from './Link.js'
 import { InlineMath, MathBlock } from './MathFormula.js'
@@ -17,7 +17,7 @@ const Html = memo(function Html({ value }: { value: string }) {
   if (/^<br\s*\/?>$/i.test(value)) {
     return <br />
   }
-  return <span className="fly-markdown-html">{value}</span>
+  return <span className="ds-markdown-html">{value}</span>
 })
 
 const List = memo(function List({ node, loading }: { node: ListNode; loading: boolean }) {
@@ -29,10 +29,10 @@ const List = memo(function List({ node, loading }: { node: ListNode; loading: bo
         const checked = child.checked
         const isTaskItem = typeof checked === 'boolean'
         return (
-          <li key={index} className={isTaskItem ? 'fly-markdown-task-list-item' : undefined}>
+          <li key={index} className={isTaskItem ? 'ds-markdown-task-list-item' : undefined}>
             {isTaskItem ? (
               // □ U+25A1 / ☑ U+2611
-              <span className="fly-markdown-task-checkbox">{checked ? '☑  ' : '□  '}</span>
+              <span className="ds-markdown-task-checkbox">{checked ? '☑  ' : '□  '}</span>
             ) : null}
             <MarkdownBlockContentOrDefinitionContent nodes={child.children} loading={loading} />
           </li>
@@ -187,7 +187,7 @@ const MarkdownBlockContentOrDefinitionContent = memo(
               )
         case 'paragraph':
           return (
-            <p key={index} className="fly-markdown-paragraph">
+            <p key={index} className="ds-markdown-paragraph">
               <MarkdownPhrasingContent nodes={node.children} />
             </p>
           )
@@ -234,7 +234,7 @@ export const MarkdownAstRenderer = memo(function MarkdownAstRenderer({
 
   return useMemo(
     () => (
-      <div className={clsx('fly-markdown', className)}>
+      <div className={clsx('ds-markdown', className)}>
         {/* 解析器在根节点下产出块级内容。 */}
         <MarkdownBlockContentOrDefinitionContent
           nodes={ast.children as Array<BlockContent | DefinitionContent>}

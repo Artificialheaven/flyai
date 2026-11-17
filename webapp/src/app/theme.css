@@ -1,252 +1,253 @@
-/*
- * FlyAI 设计 token 层。
- * 结构移植自 deepseek-ai/chat-demo (MIT) 的 theme.css，命名前缀 --dsw-/--ds- 统一改为 --fly-，
- * 品牌色替换为 FlyAI 蓝 #6c8cff，暗色调色板对齐旧站 #1b1b22 家族。
- * 组件只允许消费本文件定义的 token，禁止硬编码色值。
- */
 :root {
-  --fly-font-family:
+  --dsw-font-family:
     system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
     'Open Sans', 'Helvetica Neue', sans-serif;
   font-variant-ligatures: no-contextual;
 }
 
 body {
-  --fly-control-height-xl: 44px;
-  --fly-control-height-l: 40px;
-  --fly-control-height-m: 36px;
-  --fly-control-height-s: 32px;
-  --fly-control-height-xs: 28px;
+  --ds-control-height-xl: 44px;
+  --ds-control-height-l: 40px;
+  --ds-control-height-m: 36px;
+  --ds-control-height-s: 32px;
+  --ds-control-height-xs: 28px;
 
-  --fly-font-size-m: 14px;
+  --ds-font-size-m: 14px;
 
-  --fly-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ds-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 
-  --fly-font-family-code:
+  --ds-font-family-code:
     Menlo, Monaco, Consolas, 'Cascadia Mono', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Liberation Mono',
     'JetBrains Mono', 'Fira Code', Cousine, 'Roboto Mono', 'Courier New', Courier, sans-serif,
     system-ui;
 
-  --fly-transition-duration: 0.2s;
-  --fly-transition-duration-slow: 0.3s;
-}
-
-/* ===== 静态调色板：浅色（默认） ===== */
-body {
-  --fly-static-amber-100: rgb(254, 245, 231);
-  --fly-static-amber-400: rgb(247, 173, 49);
-  --fly-static-amber-500: rgb(245, 158, 11);
-  --fly-static-amber-600: rgb(221, 134, 41);
-  --fly-static-amber-900: rgb(39, 36, 31);
-  /* FlyAI 品牌蓝家族（替代 chat-demo 的 deepseek 蓝） */
-  --fly-static-blue-50: rgb(242, 245, 255);
-  --fly-static-blue-100: rgb(232, 238, 255);
-  --fly-static-blue-200: rgb(211, 222, 252);
-  --fly-static-blue-300: rgb(201, 214, 255);
-  --fly-static-blue-400: rgb(138, 165, 255);
-  --fly-static-blue-450: rgb(127, 156, 255);
-  --fly-static-blue-500: rgb(108, 140, 255);
-  --fly-static-blue-600: rgb(74, 95, 158);
-  --fly-static-blue-800: rgb(53, 64, 107);
-  --fly-static-blue-900: rgb(40, 48, 74);
-  --fly-static-green-100: rgb(230, 250, 237);
-  --fly-static-green-400: rgb(78, 209, 126);
-  --fly-static-green-500: rgb(34, 197, 94);
-  --fly-static-green-900: rgb(35, 60, 44);
-  --fly-static-neutral-850: rgb(33, 33, 35);
-  --fly-static-neutral-bluish-00: rgb(255, 255, 255);
-  --fly-static-neutral-bluish-1000: rgb(15, 17, 21);
-  --fly-static-neutral-bluish-100: rgb(235, 238, 242);
-  --fly-static-neutral-bluish-150: rgb(233, 236, 242);
-  --fly-static-neutral-bluish-200: rgb(225, 229, 238);
-  --fly-static-neutral-bluish-300: rgb(207, 211, 214);
-  --fly-static-neutral-bluish-400: rgb(173, 178, 184);
-  --fly-static-neutral-bluish-50: rgb(249, 250, 251);
-  --fly-static-neutral-bluish-600: rgb(129, 133, 140);
-  --fly-static-neutral-bluish-60: rgb(245, 246, 247);
-  --fly-static-neutral-bluish-700: rgb(97, 102, 107);
-  --fly-static-neutral-bluish-750: rgb(67, 69, 74);
-  --fly-static-neutral-bluish-75: rgb(241, 243, 245);
-  --fly-static-neutral-bluish-800: rgb(53, 54, 56);
-  --fly-static-neutral-bluish-850: rgb(44, 44, 46);
-  --fly-static-neutral-bluish-900: rgb(27, 27, 28);
-  --fly-static-neutral-bluish-950: rgb(21, 21, 23);
-  --fly-static-neutral-100: rgb(245, 245, 245);
-  --fly-static-neutral-300: rgb(212, 212, 212);
-  --fly-static-neutral-550: rgb(101, 103, 107);
-  --fly-static-red-400: rgb(242, 90, 90);
-  --fly-static-red-600: rgb(236, 19, 19);
-}
-
-/* ===== 静态调色板：深色（FlyAI #1b1b22 家族） ===== */
-body[data-fly-dark-theme] {
-  --fly-static-blue-50: rgb(242, 245, 255);
-  --fly-static-blue-100: rgb(232, 238, 255);
-  --fly-static-blue-200: rgb(211, 222, 252);
-  --fly-static-blue-300: rgb(201, 214, 255);
-  --fly-static-blue-400: rgb(138, 165, 255);
-  --fly-static-blue-450: rgb(108, 140, 255);
-  --fly-static-blue-500: rgb(133, 161, 255);
-  --fly-static-blue-600: rgb(74, 95, 158);
-  --fly-static-blue-800: rgb(53, 64, 107);
-  --fly-static-blue-900: rgb(40, 48, 74);
-  --fly-static-green-100: rgb(230, 250, 237);
-  --fly-static-green-400: rgb(78, 209, 126);
-  --fly-static-green-500: rgb(34, 197, 94);
-  --fly-static-green-900: rgb(35, 60, 44);
-  --fly-static-neutral-850: rgb(33, 33, 35);
-  --fly-static-neutral-bluish-00: rgb(255, 255, 255);
-  --fly-static-neutral-bluish-1000: rgb(15, 17, 21);
-  --fly-static-neutral-bluish-100: rgb(235, 238, 242);
-  --fly-static-neutral-bluish-150: rgb(233, 236, 242);
-  --fly-static-neutral-bluish-200: rgb(225, 229, 238);
-  --fly-static-neutral-bluish-300: rgb(207, 211, 214);
-  --fly-static-neutral-bluish-400: rgb(173, 178, 184);
-  --fly-static-neutral-bluish-50: rgb(249, 250, 251);
-  --fly-static-neutral-bluish-600: rgb(129, 133, 140);
-  --fly-static-neutral-bluish-60: rgb(249, 250, 251);
-  --fly-static-neutral-bluish-700: rgb(97, 102, 107);
-  /* 750：选择器胶囊、抬升按钮底 */
-  --fly-static-neutral-bluish-750: rgb(51, 51, 62);
-  --fly-static-neutral-bluish-75: rgb(241, 243, 245);
-  /* 800：弹层菜单 / 第三层背景 */
-  --fly-static-neutral-bluish-800: rgb(44, 44, 54);
-  /* 850：卡片第二层背景、tooltip */
-  --fly-static-neutral-bluish-850: rgb(38, 38, 47);
-  /* 900：侧栏填充 */
-  --fly-static-neutral-bluish-900: rgb(34, 34, 43);
-  /* 950：页面基底 #1b1b22 */
-  --fly-static-neutral-bluish-950: rgb(27, 27, 34);
-  --fly-static-neutral-100: rgb(245, 245, 245);
-  --fly-static-neutral-300: rgb(212, 212, 212);
-  --fly-static-neutral-550: rgb(101, 103, 107);
-  --fly-static-red-400: rgb(242, 90, 90);
-  --fly-static-red-600: rgb(236, 19, 19);
-}
-
-/* ===== 语义别名：浅色 ===== */
-body {
-  --fly-alias-bg-base: var(--fly-static-neutral-bluish-00);
-  --fly-alias-bg-layer-2: var(--fly-static-neutral-bluish-00);
-  --fly-alias-bg-layer-3: var(--fly-static-neutral-bluish-00);
-  --fly-alias-bg-skeleton: rgba(0, 0, 0, 0.04);
-  --fly-alias-border-inverted: rgba(0, 0, 0, 0);
-  --fly-alias-border-l1: rgba(0, 0, 0, 0.04);
-  --fly-alias-border-l2-darkmode-thin: rgba(0, 0, 0, 0.1);
-  --fly-alias-border-l2: rgba(0, 0, 0, 0.1);
-  --fly-alias-border-l3: rgba(0, 0, 0, 0.12);
-  --fly-alias-brand-primary-invert: var(--fly-static-blue-500);
-  --fly-alias-brand-primary: var(--fly-static-blue-500);
-  --fly-alias-brand-text: var(--fly-static-blue-500);
-  --fly-alias-button-contrast-fill: var(--fly-static-neutral-bluish-700);
-  --fly-alias-button-elevated-fill: var(--fly-static-neutral-bluish-00);
-  --fly-alias-button-ghost-active-border: var(--fly-static-blue-300);
-  --fly-alias-button-ghost-active-fill: var(--fly-static-blue-50);
-  --fly-alias-button-ghost-active-hover: var(--fly-static-blue-100);
-  --fly-alias-button-primary-fill: var(--fly-alias-brand-primary);
-  --fly-alias-button-primary-hover: var(--fly-static-blue-450);
-  --fly-alias-interactive-bg-active: rgba(38, 49, 72, 0.1);
-  --fly-alias-interactive-bg-hover-danger: rgba(236, 19, 19, 0.05);
-  --fly-alias-interactive-bg-hover: rgba(38, 49, 72, 0.06);
-  --fly-alias-interactive-bg-hover-accent: rgba(38, 49, 72, 0.14);
-  --fly-alias-label-caption: var(--fly-static-neutral-bluish-400);
-  --fly-alias-label-dimmed: var(--fly-static-neutral-bluish-200);
-  --fly-alias-label-primary-foreground: var(--fly-static-neutral-bluish-00);
-  --fly-alias-label-primary-inverted: var(--fly-static-neutral-bluish-00);
-  --fly-alias-label-primary: var(--fly-static-neutral-bluish-1000);
-  --fly-alias-label-secondary: var(--fly-static-neutral-bluish-700);
-  --fly-alias-label-tertiary: var(--fly-static-neutral-bluish-600);
-  --fly-alias-markdown-citation: var(--fly-static-neutral-bluish-100);
-  --fly-alias-markdown-code-block-banner: var(--fly-static-neutral-bluish-50);
-  --fly-alias-markdown-code-block: var(--fly-static-neutral-bluish-50);
-  --fly-alias-markdown-inline-code: var(--fly-static-neutral-bluish-100);
-  --fly-alias-markdown-placeholder: var(--fly-static-neutral-bluish-60);
-  --fly-alias-markdown-tag: var(--fly-static-neutral-bluish-75);
-  --fly-alias-state-error-primary: var(--fly-static-red-600);
-  --fly-alias-state-error-secondary: var(--fly-static-red-400);
-  --fly-alias-toast-bg: var(--fly-static-neutral-bluish-800);
-  --fly-specific-bubble: var(--fly-static-blue-50);
-  --fly-specific-input-major: var(--fly-static-neutral-bluish-00);
-  --fly-specific-login-input: var(--fly-static-neutral-bluish-50);
-  --fly-specific-menu: var(--fly-alias-bg-layer-3);
-  --fly-alias-tooltip-bg: var(--fly-static-neutral-bluish-850);
-  --fly-specific-selector: var(--fly-static-neutral-bluish-75);
-  --fly-specific-sidebar-fill: var(--fly-static-neutral-bluish-50);
-  --fly-specific-sidebar-nav-item-active-accent: var(--fly-static-blue-100);
-  --fly-specific-sidebar-nav-item-hover: var(--fly-static-neutral-bluish-75);
-}
-
-/* ===== 语义别名：深色 ===== */
-body[data-fly-dark-theme] {
-  --fly-alias-bg-base: var(--fly-static-neutral-bluish-950);
-  --fly-alias-bg-layer-2: var(--fly-static-neutral-bluish-850);
-  --fly-alias-bg-layer-3: var(--fly-static-neutral-bluish-800);
-  --fly-alias-bg-skeleton: rgba(255, 255, 255, 0.08);
-  --fly-alias-border-inverted: rgba(255, 255, 255, 0.06);
-  --fly-alias-border-l1: rgba(255, 255, 255, 0.06);
-  --fly-alias-border-l2-darkmode-thin: rgba(255, 255, 255, 0.06);
-  --fly-alias-border-l2: rgba(255, 255, 255, 0.12);
-  --fly-alias-border-l3: rgba(255, 255, 255, 0.16);
-  --fly-alias-brand-primary-invert: var(--fly-static-neutral-bluish-00);
-  --fly-alias-brand-primary: var(--fly-static-blue-450);
-  --fly-alias-brand-text: var(--fly-static-blue-400);
-  --fly-alias-button-contrast-fill: var(--fly-static-neutral-bluish-50);
-  --fly-alias-button-elevated-fill: var(--fly-static-neutral-bluish-750);
-  --fly-alias-button-ghost-active-border: var(--fly-static-blue-600);
-  --fly-alias-button-ghost-active-fill: var(--fly-static-blue-900);
-  --fly-alias-button-ghost-active-hover: var(--fly-static-blue-800);
-  --fly-alias-button-primary-fill: var(--fly-alias-brand-primary);
-  --fly-alias-button-primary-hover: var(--fly-static-blue-500);
-  --fly-alias-interactive-bg-active: rgba(255, 255, 255, 0.14);
-  --fly-alias-interactive-bg-hover-danger: rgba(242, 90, 90, 0.15);
-  --fly-alias-interactive-bg-hover: rgba(255, 255, 255, 0.08);
-  --fly-alias-interactive-bg-hover-accent: rgba(255, 255, 255, 0.24);
-  --fly-alias-label-caption: var(--fly-static-neutral-bluish-600);
-  --fly-alias-label-dimmed: var(--fly-static-neutral-bluish-750);
-  --fly-alias-label-primary-foreground: var(--fly-static-neutral-bluish-00);
-  --fly-alias-label-primary-inverted: var(--fly-static-neutral-bluish-800);
-  --fly-alias-label-primary: var(--fly-static-neutral-bluish-50);
-  --fly-alias-label-secondary: var(--fly-static-neutral-bluish-300);
-  --fly-alias-label-tertiary: var(--fly-static-neutral-bluish-400);
-  --fly-alias-markdown-citation: var(--fly-static-neutral-bluish-800);
-  --fly-alias-markdown-code-block-banner: var(--fly-static-neutral-bluish-850);
-  --fly-alias-markdown-code-block: var(--fly-static-neutral-bluish-900);
-  --fly-alias-markdown-inline-code: var(--fly-static-neutral-bluish-850);
-  --fly-alias-markdown-placeholder: var(--fly-static-neutral-bluish-850);
-  --fly-alias-markdown-tag: var(--fly-static-neutral-bluish-850);
-  --fly-alias-state-error-primary: var(--fly-static-red-400);
-  --fly-alias-state-error-secondary: var(--fly-static-red-400);
-  --fly-alias-toast-bg: var(--fly-static-neutral-bluish-750);
-  --fly-specific-bubble: var(--fly-static-neutral-bluish-850);
-  --fly-specific-input-major: var(--fly-static-neutral-bluish-850);
-  --fly-specific-login-input: var(--fly-static-neutral-bluish-900);
-  --fly-specific-menu: var(--fly-alias-bg-layer-3);
-  --fly-alias-tooltip-bg: var(--fly-static-neutral-bluish-750);
-  --fly-specific-selector: var(--fly-static-neutral-bluish-750);
-  --fly-specific-sidebar-fill: var(--fly-static-neutral-bluish-900);
-  --fly-specific-sidebar-nav-item-active-accent: var(--fly-static-neutral-bluish-800);
-  --fly-specific-sidebar-nav-item-hover: var(--fly-static-neutral-bluish-850);
+  --ds-transition-duration: 0.2s;
+  --ds-transition-duration-slow: 0.3s;
 }
 
 body {
-  --fly-shadow-lv3:
+  --dsw-static-amber-100: rgb(254, 245, 231);
+  --dsw-static-amber-400: rgb(247, 173, 49);
+  --dsw-static-amber-500: rgb(245, 158, 11);
+  --dsw-static-amber-600: rgb(221, 134, 41);
+  --dsw-static-amber-900: rgb(39, 36, 31);
+  --dsw-static-blue-100: rgb(228, 237, 253);
+  --dsw-static-blue-200: rgb(211, 226, 255);
+  --dsw-static-blue-300: rgb(183, 200, 254);
+  --dsw-static-blue-400: rgb(103, 158, 254);
+  --dsw-static-blue-450: rgb(86, 134, 254);
+  --dsw-static-blue-500: rgb(57, 100, 254);
+  --dsw-static-blue-50: rgb(237, 243, 254);
+  --dsw-static-blue-600: rgb(72, 104, 178);
+  --dsw-static-blue-800: rgb(52, 65, 91);
+  --dsw-static-blue-900: rgb(40, 49, 66);
+  --dsw-static-green-100: rgb(230, 250, 237);
+  --dsw-static-green-400: rgb(78, 209, 126);
+  --dsw-static-green-500: rgb(34, 197, 94);
+  --dsw-static-green-900: rgb(35, 60, 44);
+  --dsw-static-neutral-850: rgb(33, 33, 35);
+  --dsw-static-neutral-bluish-00: rgb(255, 255, 255);
+  --dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
+  --dsw-static-neutral-bluish-100: rgb(235, 238, 242);
+  --dsw-static-neutral-bluish-150: rgb(233, 236, 242);
+  --dsw-static-neutral-bluish-200: rgb(225, 229, 238);
+  --dsw-static-neutral-bluish-300: rgb(207, 211, 214);
+  --dsw-static-neutral-bluish-400: rgb(173, 178, 184);
+  --dsw-static-neutral-bluish-50: rgb(249, 250, 251);
+  --dsw-static-neutral-bluish-600: rgb(129, 133, 140);
+  --dsw-static-neutral-bluish-60: rgb(245, 246, 247);
+  --dsw-static-neutral-bluish-700: rgb(97, 102, 107);
+  --dsw-static-neutral-bluish-750: rgb(67, 69, 74);
+  --dsw-static-neutral-bluish-75: rgb(241, 243, 245);
+  --dsw-static-neutral-bluish-800: rgb(53, 54, 56);
+  --dsw-static-neutral-bluish-850: rgb(44, 44, 46);
+  --dsw-static-neutral-bluish-900: rgb(27, 27, 28);
+  --dsw-static-neutral-bluish-950: rgb(21, 21, 23);
+  --dsw-static-neutral-100: rgb(245, 245, 245);
+  --dsw-static-neutral-300: rgb(212, 212, 212);
+  --dsw-static-neutral-550: rgb(101, 103, 107);
+  --dsw-static-red-400: rgb(242, 90, 90);
+  --dsw-static-red-600: rgb(236, 19, 19);
+}
+
+body[data-ds-dark-theme] {
+  --dsw-static-amber-100: rgb(254, 245, 231);
+  --dsw-static-amber-400: rgb(247, 173, 49);
+  --dsw-static-amber-500: rgb(245, 158, 11);
+  --dsw-static-amber-600: rgb(221, 134, 41);
+  --dsw-static-amber-900: rgb(39, 36, 31);
+  --dsw-static-blue-100: rgb(228, 237, 253);
+  --dsw-static-blue-200: rgb(211, 226, 255);
+  --dsw-static-blue-300: rgb(183, 200, 254);
+  --dsw-static-blue-400: rgb(103, 158, 254);
+  --dsw-static-blue-450: rgb(86, 134, 254);
+  --dsw-static-blue-500: rgb(57, 100, 254);
+  --dsw-static-blue-50: rgb(237, 243, 254);
+  --dsw-static-blue-600: rgb(72, 104, 178);
+  --dsw-static-blue-800: rgb(52, 65, 91);
+  --dsw-static-blue-900: rgb(40, 49, 66);
+  --dsw-static-green-100: rgb(230, 250, 237);
+  --dsw-static-green-400: rgb(78, 209, 126);
+  --dsw-static-green-500: rgb(34, 197, 94);
+  --dsw-static-green-900: rgb(35, 60, 44);
+  --dsw-static-neutral-850: rgb(33, 33, 35);
+  --dsw-static-neutral-bluish-00: rgb(255, 255, 255);
+  --dsw-static-neutral-bluish-1000: rgb(15, 17, 21);
+  --dsw-static-neutral-bluish-100: rgb(235, 238, 242);
+  --dsw-static-neutral-bluish-150: rgb(233, 236, 242);
+  --dsw-static-neutral-bluish-200: rgb(225, 229, 238);
+  --dsw-static-neutral-bluish-300: rgb(207, 211, 214);
+  --dsw-static-neutral-bluish-400: rgb(173, 178, 184);
+  --dsw-static-neutral-bluish-50: rgb(249, 250, 251);
+  --dsw-static-neutral-bluish-600: rgb(129, 133, 140);
+  --dsw-static-neutral-bluish-60: rgb(249, 250, 251);
+  --dsw-static-neutral-bluish-700: rgb(97, 102, 107);
+  --dsw-static-neutral-bluish-750: rgb(67, 69, 74);
+  --dsw-static-neutral-bluish-75: rgb(241, 243, 245);
+  --dsw-static-neutral-bluish-800: rgb(53, 54, 56);
+  --dsw-static-neutral-bluish-850: rgb(44, 44, 46);
+  --dsw-static-neutral-bluish-900: rgb(27, 27, 28);
+  --dsw-static-neutral-bluish-950: rgb(21, 21, 23);
+  --dsw-static-neutral-100: rgb(245, 245, 245);
+  --dsw-static-neutral-300: rgb(212, 212, 212);
+  --dsw-static-neutral-550: rgb(101, 103, 107);
+  --dsw-static-red-400: rgb(242, 90, 90);
+  --dsw-static-red-600: rgb(236, 19, 19);
+}
+
+body {
+  --dsw-alias-bg-base: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-bg-layer-2: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-bg-layer-3: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-bg-skeleton: rgba(0, 0, 0, 0.04);
+  --dsw-alias-border-inverted: rgba(0, 0, 0, 0);
+  --dsw-alias-border-l1: rgba(0, 0, 0, 0.04);
+  --dsw-alias-border-l2-darkmode-thin: rgba(0, 0, 0, 0.1);
+  --dsw-alias-border-l2: rgba(0, 0, 0, 0.1);
+  --dsw-alias-border-l3: rgba(0, 0, 0, 0.12);
+  --dsw-alias-brand-primary-invert: var(--dsw-static-blue-500);
+  --dsw-alias-brand-primary: var(--dsw-static-blue-500);
+  --dsw-alias-brand-text: var(--dsw-static-blue-500);
+  --dsw-alias-button-contrast-fill: var(--dsw-static-neutral-bluish-700);
+  --dsw-alias-button-elevated-fill: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-button-ghost-active-border: var(--dsw-static-blue-300);
+  --dsw-alias-button-ghost-active-fill: var(--dsw-static-blue-50);
+  --dsw-alias-button-ghost-active-hover: var(--dsw-static-blue-100);
+  --dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);
+  --dsw-alias-button-primary-hover: var(--dsw-static-blue-450);
+  --dsw-alias-interactive-bg-active: rgba(38, 49, 72, 0.1);
+  --dsw-alias-interactive-bg-hover-danger: rgba(236, 19, 19, 0.05);
+  --dsw-alias-interactive-bg-hover: rgba(38, 49, 72, 0.06);
+  --dsw-alias-interactive-bg-hover-accent: rgba(38, 49, 72, 0.14);
+  --dsw-alias-label-caption: var(--dsw-static-neutral-bluish-400);
+  --dsw-alias-label-dimmed: var(--dsw-static-neutral-bluish-200);
+  --dsw-alias-label-primary-foreground: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-label-primary-inverted: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-label-primary: var(--dsw-static-neutral-bluish-1000);
+  --dsw-alias-label-secondary: var(--dsw-static-neutral-bluish-700);
+  --dsw-alias-label-tertiary: var(--dsw-static-neutral-bluish-600);
+  --dsw-alias-markdown-citation: var(--dsw-static-neutral-bluish-100);
+  --dsw-alias-markdown-code-block-banner: var(--dsw-static-neutral-bluish-50);
+  --dsw-alias-markdown-code-block: var(--dsw-static-neutral-bluish-50);
+  --dsw-alias-markdown-inline-code: var(--dsw-static-neutral-bluish-100);
+  --dsw-alias-markdown-placeholder: var(--dsw-static-neutral-bluish-60);
+  --dsw-alias-markdown-tag: var(--dsw-static-neutral-bluish-75);
+  --dsw-alias-state-error-primary: var(--dsw-static-red-600);
+  --dsw-alias-state-error-secondary: var(--dsw-static-red-400);
+  --dsw-alias-toast-bg: var(--dsw-static-neutral-bluish-800);
+  --dsw-specific-bubble: var(--dsw-static-blue-50);
+  --dsw-specific-input-major: var(--dsw-static-neutral-bluish-00);
+  --dsw-specific-login-input: var(--dsw-static-neutral-bluish-50);
+  --dsw-specific-menu: var(--dsw-alias-bg-layer-3);
+  --dsw-alias-tooltip-bg: var(--dsw-static-neutral-bluish-850);
+  --dsw-specific-selector: var(--dsw-static-neutral-bluish-75);
+  --dsw-specific-sidebar-fill: var(--dsw-static-neutral-bluish-50);
+  --dsw-specific-sidebar-nav-item-active-accent: var(--dsw-static-blue-100);
+  --dsw-specific-sidebar-nav-item-hover: var(--dsw-static-neutral-bluish-75);
+}
+
+body[data-ds-dark-theme] {
+  --dsw-alias-bg-base: var(--dsw-static-neutral-bluish-950);
+  --dsw-alias-bg-layer-2: var(--dsw-static-neutral-bluish-850);
+  --dsw-alias-bg-layer-3: var(--dsw-static-neutral-bluish-800);
+  --dsw-alias-bg-skeleton: rgba(255, 255, 255, 0.08);
+  --dsw-alias-border-inverted: rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l1: rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l2-darkmode-thin: rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
+  --dsw-alias-border-l3: rgba(255, 255, 255, 0.16);
+  --dsw-alias-brand-primary-invert: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-brand-primary: var(--dsw-static-blue-450);
+  --dsw-alias-brand-text: var(--dsw-static-blue-400);
+  --dsw-alias-button-contrast-fill: var(--dsw-static-neutral-bluish-50);
+  --dsw-alias-button-elevated-fill: var(--dsw-static-neutral-bluish-750);
+  --dsw-alias-button-ghost-active-border: var(--dsw-static-blue-600);
+  --dsw-alias-button-ghost-active-fill: var(--dsw-static-blue-900);
+  --dsw-alias-button-ghost-active-hover: var(--dsw-static-blue-800);
+  --dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);
+  --dsw-alias-button-primary-hover: var(--dsw-static-blue-500);
+  --dsw-alias-interactive-bg-active: rgba(255, 255, 255, 0.14);
+  --dsw-alias-interactive-bg-hover-danger: rgba(242, 90, 90, 0.15);
+  --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.08);
+  --dsw-alias-interactive-bg-hover-accent: rgba(255, 255, 255, 0.24);
+  --dsw-alias-label-caption: var(--dsw-static-neutral-bluish-600);
+  --dsw-alias-label-dimmed: var(--dsw-static-neutral-bluish-750);
+  --dsw-alias-label-primary-foreground: var(--dsw-static-neutral-bluish-00);
+  --dsw-alias-label-primary-inverted: var(--dsw-static-neutral-bluish-800);
+  --dsw-alias-label-primary: var(--dsw-static-neutral-bluish-50);
+  --dsw-alias-label-secondary: var(--dsw-static-neutral-bluish-300);
+  --dsw-alias-label-tertiary: var(--dsw-static-neutral-bluish-400);
+  --dsw-alias-markdown-citation: var(--dsw-static-neutral-bluish-800);
+  --dsw-alias-markdown-code-block-banner: var(--dsw-static-neutral-bluish-850);
+  --dsw-alias-markdown-code-block: var(--dsw-static-neutral-bluish-900);
+  --dsw-alias-markdown-inline-code: var(--dsw-static-neutral-bluish-850);
+  --dsw-alias-markdown-placeholder: var(--dsw-static-neutral-bluish-850);
+  --dsw-alias-markdown-tag: var(--dsw-static-neutral-bluish-850);
+  --dsw-alias-state-error-primary: var(--dsw-static-red-400);
+  --dsw-alias-state-error-secondary: var(--dsw-static-red-400);
+  --dsw-alias-toast-bg: var(--dsw-static-neutral-bluish-750);
+  --dsw-specific-bubble: var(--dsw-static-neutral-bluish-850);
+  --dsw-specific-input-major: var(--dsw-static-neutral-bluish-850);
+  --dsw-specific-login-input: var(--dsw-static-neutral-bluish-900);
+  --dsw-specific-menu: var(--dsw-alias-bg-layer-3);
+  --dsw-alias-tooltip-bg: var(--dsw-static-neutral-bluish-750);
+  --dsw-specific-selector: var(--dsw-static-neutral-bluish-750);
+  --dsw-specific-sidebar-fill: var(--dsw-static-neutral-bluish-900);
+  --dsw-specific-sidebar-nav-item-active-accent: var(--dsw-static-neutral-bluish-800);
+  --dsw-specific-sidebar-nav-item-hover: var(--dsw-static-neutral-bluish-850);
+}
+
+body {
+  --dsw-shadow-lv3:
     0 0 1px 0 rgba(0, 0, 0, 0.2), 0 0 4px 0 rgba(0, 0, 0, 0.02), 0 12px 32px 0 rgba(0, 0, 0, 0.08);
 }
 
-/* ===== 字体阶梯（Markdown 管线 P3 接入） ===== */
 body {
-  --fly-font-markdown-h1: 700 24px/34px var(--fly-font-family);
-  --fly-font-markdown-h2: 700 22px/32px var(--fly-font-family);
-  --fly-font-markdown-h3: 700 20px/30px var(--fly-font-family);
-  --fly-font-markdown-h4: 600 16px/28px var(--fly-font-family);
-  --fly-font-markdown-base: 16px/28px var(--fly-font-family);
-  --fly-font-markdown-base-strong: 600 16px/28px var(--fly-font-family);
-  --fly-font-markdown-table: 15px/25px var(--fly-font-family);
-  --fly-font-markdown-table-head: 500 15px/25px var(--fly-font-family);
-  --fly-font-markdown-small: 14px/24px var(--fly-font-family);
-  --fly-font-markdown-small-strong: 600 14px/24px var(--fly-font-family);
-  --fly-font-markdown-code: 14px/22px var(--fly-font-family-code);
-  --fly-font-markdown-code-block: 13px/22px var(--fly-font-family-code);
-  --fly-font-s-strong-14: 500 14px/22px var(--fly-font-family);
-  --fly-font-xs-13: 13px/20px var(--fly-font-family);
+  --dsw-font-markdown-h1: 700 24px/34px var(--dsw-font-family);
+
+  --dsw-font-markdown-h2: 700 22px/32px var(--dsw-font-family);
+
+  --dsw-font-markdown-h3: 700 20px/30px var(--dsw-font-family);
+
+  --dsw-font-markdown-h4: 600 16px/28px var(--dsw-font-family);
+
+  --dsw-font-markdown-base: 16px/28px var(--dsw-font-family);
+
+  --dsw-font-markdown-base-strong: 600 16px/28px var(--dsw-font-family);
+
+  --dsw-font-markdown-table: 15px/25px var(--dsw-font-family);
+
+  --dsw-font-markdown-table-head: 500 15px/25px var(--dsw-font-family);
+
+  --dsw-font-markdown-small: 14px/24px var(--dsw-font-family);
+
+  --dsw-font-markdown-small-strong: 600 14px/24px var(--dsw-font-family);
+
+  --dsw-font-markdown-code: 14px/22px var(--ds-font-family-code);
+
+  --dsw-font-markdown-code-block: 13px/22px var(--ds-font-family-code);
+
+  --dsw-font-s-strong-14: 500 14px/22px var(--dsw-font-family);
+
+  --dsw-font-xs-13: 13px/20px var(--dsw-font-family);
 }

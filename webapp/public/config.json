@@ -1,7 +1,3 @@
 {
-  "apiBase": "",
-  "deepseek": {
-    "baseUrl": "https://api.deepseek.com",
-    "apiKey": ""
-  }
+  "apiBase": ""
 }

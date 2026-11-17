@@ -1,4 +1,4 @@
-"""模型可见性纯逻辑：归属直通、非共享隐藏、等级 >= 边界、admin 全见。"""
+"""模型可见性纯逻辑：非共享隐藏、等级 >= 边界、admin 全见。"""
 
 import os
 import sys
@@ -14,20 +14,14 @@ from flyai.models_access import (
 from flyai.user import ADMIN_UID
 
 
-def test_owner_always_visible():
-    assert model_visible("u1", False, 0, "u1", 0)
-    # 自己的模型即便等级远高于本人也可见
-    assert model_visible("u1", True, 255, "u1", 0)
-
-
 def test_unshared_hidden_even_high_level():
-    assert not model_visible("admin", False, 0, "u1", 255)
+    assert not model_visible(False, 0, 255)
 
 
 def test_level_boundary_inclusive():
-    assert not model_visible("admin", True, 50, "u1", 49)
-    assert model_visible("admin", True, 50, "u1", 50)
-    assert model_visible("admin", True, 50, "u1", 51)
+    assert not model_visible(True, 50, 49)
+    assert model_visible(True, 50, 50)
+    assert model_visible(True, 50, 51)
 
 
 def test_visible_providers_filtering():
@@ -44,8 +38,8 @@ def test_visible_providers_filtering():
     assert ids10 == {"open"}
     ids50 = {p.id for p in visible_providers(cfg, "u1", 50)}
     assert ids50 == {"open", "gated"}
-    # u9 自己总能看到 private
-    assert "private" in {p.id for p in visible_providers(cfg, "u9", 0)}
+    # 用户自建能力已下线：私有模型连本人也不可见
+    assert "private" not in {p.id for p in visible_providers(cfg, "u9", 0)}
 
 
 def test_admin_sees_all():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 from pathlib import Path
@@ -17,6 +18,105 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "config.example.json"
+
+
+class PricePeriod(BaseModel):
+    """分时段价格覆盖：按列表顺序匹配，先命中先生效。
+
+    价格单位均为「点数 / 每百万 token」（1 点 = 1 元）。
+    时段条件可组合：daily_start/daily_end 为每日重复的挂钟时间窗（支持跨午夜），
+    date_start/date_end 为显式日期区间（含端点）；留空表示该维度不限。
+    """
+
+    name: str = ""
+    cache_hit_input: float = 0.0
+    input: float = 0.0
+    output: float = 0.0
+    daily_start: str = ""
+    daily_end: str = ""
+    date_start: str = ""
+    date_end: str = ""
+
+    @validator("cache_hit_input", "input", "output")
+    def _clamp_price(cls, v):  # noqa: N805
+        return max(0.0, float(v))
+
+    @validator("daily_start", "daily_end")
+    def _valid_hhmm(cls, v):  # noqa: N805
+        text = (v or "").strip()
+        if not text:
+            return ""
+        from .proactor.clock import parse_hhmm
+
+        if parse_hhmm(text) is None:
+            raise ValueError(f"时间段格式应为 HH:MM：{text}")
+        return text
+
+    @validator("date_start", "date_end")
+    def _valid_date(cls, v):  # noqa: N805
+        text = (v or "").strip()
+        if not text:
+            return ""
+        from datetime import date
+
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            raise ValueError(f"日期格式应为 YYYY-MM-DD：{text}")
+        return text
+
+    def matches(self, local: "datetime") -> bool:  # noqa: F821
+        """local 为指定时区的本地挂钟 naive datetime。"""
+        from .proactor.clock import parse_hhmm
+
+        if self.date_start and local.date().isoformat() < self.date_start:
+            return False
+        if self.date_end and local.date().isoformat() > self.date_end:
+            return False
+        if self.daily_start and self.daily_end:
+            start = parse_hhmm(self.daily_start)
+            end = parse_hhmm(self.daily_end)
+            if start is not None and end is not None:
+                cur = local.hour * 60 + local.minute
+                s_min, e_min = start[0] * 60 + start[1], end[0] * 60 + end[1]
+                if s_min == e_min:
+                    return False
+                if s_min < e_min:
+                    if not (s_min <= cur < e_min):
+                        return False
+                # 跨午夜：起点之后或终点之前
+                elif not (cur >= s_min or cur < e_min):
+                    return False
+        return True
+
+
+class TokenPricing(BaseModel):
+    """按 token 计费：顶层为基准价，periods 按顺序覆盖。"""
+
+    cache_hit_input: float = 0.0
+    input: float = 0.0
+    output: float = 0.0
+    periods: List[PricePeriod] = []
+
+    @validator("cache_hit_input", "input", "output")
+    def _clamp_price(cls, v):  # noqa: N805
+        return max(0.0, float(v))
+
+    def prices_at(self, local: "datetime") -> Dict[str, float]:  # noqa: F821
+        for p in self.periods or []:
+            if p.matches(local):
+                return {
+                    "cache_hit_input": p.cache_hit_input,
+                    "input": p.input,
+                    "output": p.output,
+                    "period": p.name,
+                }
+        return {
+            "cache_hit_input": self.cache_hit_input,
+            "input": self.input,
+            "output": self.output,
+            "period": "",
+        }
 
 
 class ProviderConfig(BaseModel):
@@ -40,7 +140,10 @@ class ProviderConfig(BaseModel):
     shared: bool = False
     min_level: int = 0
     # 计费倍率：普通用户每发起一轮扣 1×rate；允许小数，默认 1.0（管理员不计费）
+    # 配置了 pricing 时改按实际 token 计费，rate 不再生效
     rate: float = 1.0
+    # 按 token 计费（每百万 token 的点数）；None=沿用每轮 rate 计费
+    pricing: Optional[TokenPricing] = None
 
     @validator("min_level")
     def _clamp_min_level(cls, v):  # noqa: N805
@@ -95,6 +198,24 @@ class AdminSettings(BaseModel):
 
 class AuthSettings(BaseModel):
     admin: AdminSettings = AdminSettings()
+
+
+class RegistrationSettings(BaseModel):
+    """邀请码注册设置（仅 admin 可见/可改）。"""
+    # 新注册用户的初始额度（点数）；-1 表示不限，0 表示需管理员充值
+    default_quota: float = 0
+
+    @validator("default_quota", pre=True)
+    def _check_default_quota(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return 0
+        if math.isnan(number) or math.isinf(number):
+            return 0
+        if number < 0 and number != -1:
+            return 0
+        return number
 
 
 class HistorySettings(BaseModel):
@@ -377,6 +498,8 @@ class TtsSettings(BaseModel):
     """
 
     enabled: bool = True
+    # 合成引擎：deepseek（默认，走独立 DeepSeek Key）/ doubao（火山豆包）
+    engine: str = "deepseek"
     api_key: str = ""
     # 资源版本（决定模型效果与计费）
     resource_id: str = "seed-tts-2.0"
@@ -405,6 +528,10 @@ class TtsSettings(BaseModel):
     @validator("default_speaker", "proxy")
     def _strip(cls, v):  # noqa: N805
         return (v or "").strip()
+
+    @validator("engine")
+    def _check_tts_engine(cls, v):  # noqa: N805
+        return v if v in ("deepseek", "doubao") else "deepseek"
 
     @validator("format")
     def _check_format(cls, v):  # noqa: N805
@@ -754,6 +881,82 @@ class WatcherSettings(BaseModel):
             return 5
 
 
+class AccessSettings(BaseModel):
+    """功能权限门槛：低于阈值的普通用户不能使用对应功能。
+
+    0 = 不限制；范围 0-255（admin 按 UID 判定，恒不受限）。
+    agent_min_level 覆盖除 base 外的全部工具类别（联网/生图/TTS/沙箱/
+    自定义工具/长跑/自我记忆/主动行为/MCP）；browser/pixiv/galgame
+    使用各自专属阈值，不再被 agent 阈值二次拦截。
+    """
+
+    browser_min_level: int = 0
+    pixiv_min_level: int = 0
+    galgame_min_level: int = 0
+    agent_min_level: int = 0
+
+    @validator("browser_min_level", "pixiv_min_level",
+               "galgame_min_level", "agent_min_level", pre=True)
+    def _clamp_level(cls, v):  # noqa: N805
+        try:
+            return max(0, min(int(v), 255))
+        except (TypeError, ValueError):
+            return 0
+
+
+class DeepSeekSettings(BaseModel):
+    """独立 DeepSeek Key：搜索/抓取/TTS/ASR 默认走 DeepSeek 官方接口。
+
+    仅管理员可配置；普通用户不接触该 Key。价格单位为「点数」，
+    1 点 = 1 元：search/fetch 为元/1000 次，tts 为元/10000 计费字符，
+    asr 为元/小时。对应 *_enabled 关闭或调用失败时回退现有实现，
+    回退成功同样计费。
+    """
+
+    enabled: bool = True
+    api_key: str = ""
+    base_url: str = "https://api.deepseek.com"
+    proxy: str = ""
+    timeout_seconds: int = 60
+    search_enabled: bool = True
+    fetch_enabled: bool = True
+    tts_enabled: bool = True
+    asr_enabled: bool = True
+    search_price: float = 5.0
+    fetch_price: float = 5.0
+    tts_price: float = 3.0
+    asr_price: float = 1.0
+    tts_voice: str = "stella"
+
+    @validator("api_key", "base_url", "proxy")
+    def _strip(cls, v):  # noqa: N805
+        return (v or "").strip()
+
+    @validator("base_url")
+    def _check_base_url(cls, v):  # noqa: N805
+        a = (v or "").strip().rstrip("/")
+        return a if a.startswith(("http://", "https://")) else "https://api.deepseek.com"
+
+    @validator("timeout_seconds", pre=True)
+    def _clamp_timeout(cls, v):  # noqa: N805
+        try:
+            return max(5, min(int(v), 300))
+        except (TypeError, ValueError):
+            return 60
+
+    @validator("search_price", "fetch_price", "tts_price", "asr_price",
+               pre=True)
+    def _clamp_price(cls, v):  # noqa: N805
+        try:
+            return max(0.0, float(v))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @validator("tts_voice")
+    def _check_voice(cls, v):  # noqa: N805
+        return v if v in ("stella", "tide") else "stella"
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -762,6 +965,7 @@ class AppConfig(BaseModel):
     history: HistorySettings = HistorySettings()
     roleplay: RoleplaySettings = RoleplaySettings()
     auth: AuthSettings = AuthSettings()
+    registration: RegistrationSettings = RegistrationSettings()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     image_generation: ImageGenSettings = ImageGenSettings()
     image_models: List[ImageModelConfig] = []
@@ -781,6 +985,8 @@ class AppConfig(BaseModel):
     mcp: McpSettings = McpSettings()
     ext_trigger: ExtTriggerSettings = ExtTriggerSettings()
     watchers: WatcherSettings = WatcherSettings()
+    access: AccessSettings = AccessSettings()
+    deepseek: DeepSeekSettings = DeepSeekSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

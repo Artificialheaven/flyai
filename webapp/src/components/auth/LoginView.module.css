@@ -1,0 +1,174 @@
+.page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+  background-color: var(--dsw-alias-bg-base);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 360px;
+  padding: 36px 32px 32px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 20px;
+  background-color: var(--dsw-alias-bg-layer-2);
+}
+
+.brand {
+  color: var(--dsw-alias-label-primary);
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+.subtitle {
+  margin-top: -10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+  transition:
+    border-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:focus {
+    border-color: var(--dsw-alias-brand-primary);
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-ghost-active-border);
+  }
+}
+
+.error {
+  margin-top: -6px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}
+
+/* 登录/注册模式切换：低调的纯文本链接，不抢主按钮 */
+.modeSwitch {
+  margin-top: -8px;
+  text-align: center;
+}
+
+.modeLink {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-brand-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  outline: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-ghost-active-border);
+    border-radius: 4px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+/* 登录页底部的服务器地址提示：只在连不上后端时提供线索，视觉上保持低调 */
+.serverInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: -6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.serverLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.serverLabel {
+  flex-shrink: 0;
+}
+
+.serverValue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.serverOverride {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.serverReset {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-brand-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  outline: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-ghost-active-border);
+    border-radius: 4px;
+  }
+}

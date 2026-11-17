@@ -1,0 +1,14 @@
+.wordmark {
+  display: block;
+  width: auto;
+  height: 30px;
+  overflow: visible;
+  filter: drop-shadow(0 1px 4px rgb(57 100 254 / 18%));
+}
+
+.glyphs {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

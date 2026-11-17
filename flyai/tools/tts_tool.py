@@ -1,4 +1,4 @@
-"""语音合成工具：AI 调用豆包语音大模型把文本朗读为音频。
+"""语音合成工具：优先 DeepSeek 官方 TTS，失败回退豆包语音大模型。
 
 音频落进用户上传目录（data/uploads/<uid>/），工具 output 首行打标记
 ``[语音已生成] <url>``，前端据此在工具卡内渲染独立语音条。
@@ -14,11 +14,16 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from ..deepseek_tools import DeepSeekToolsClient, usable
+from ..errors import DeepSeekError
+from ..metering import billable_chars, tts_cost
 from ..tts import DoubaoTtsClient
 from ..tts.protocol import TtsError
 from .base import Tool, ToolContext, ToolResult
 
 TEXT_MAX_LEN = 1000
+DEEPSEEK_SAMPLE_RATE = 24000
+_DEEPSEEK_VOICES = ("stella", "tide")
 
 _FORMAT_EXT = {
     "mp3": ".mp3",
@@ -96,67 +101,118 @@ class TextToSpeechTool(Tool):
                     "当前 Lv%d）" % (required_level, user_level)
                 ),
             )
-        if not (s.api_key or "").strip():
-            return ToolResult(
-                ok=False,
-                output=(
-                    "[工具错误] 未配置豆包语音 API Key，"
-                    "请管理员在「设置 → 语音合成」中填写"
-                ),
-            )
-        # 音色解析：AI 显式 speaker → 角色卡绑定音色（tts_voice）→ 默认音色
+        ds = services.get("deepseek_settings")
+        meter = services.get("usage_meter")
+        price = _deepseek_tts_price(ds)
+        cost = tts_cost(billable_chars(text), price)
+        if meter is not None and cost > 0 and not meter.available():
+            return ToolResult(ok=False, output="[余额不足，请充值]")
+
         arg_speaker = str(arguments.get("speaker") or "").strip()
         bound_voice = str(services.get("tts_voice") or "").strip()
-        speaker = arg_speaker or bound_voice or (s.default_speaker or "").strip()
-        if arg_speaker:
-            voice_source = "arg"
-        elif bound_voice:
-            voice_source = "character"
-        else:
-            voice_source = "default"
-        if not speaker:
-            return ToolResult(
-                ok=False,
-                output="[工具错误] 未配置默认音色（default_speaker）",
-            )
+        engine = ""
+        ds_error = ""
+        use_deepseek = (
+            getattr(s, "engine", "deepseek") == "deepseek" and usable(ds, "tts")
+        )
 
-        try:
-            result = await asyncio.wait_for(
-                self._synthesize(text, speaker),
-                timeout=s.timeout_seconds,
+        if use_deepseek:
+            voice, voice_source = _deepseek_voice(
+                arg_speaker, bound_voice, getattr(ds, "tts_voice", "stella")
             )
-        except asyncio.TimeoutError:
-            ctx.logger.exception("TTS 合成超时")
-            return ToolResult(
-                ok=False,
-                output="[工具错误] 语音合成超时（%d 秒）" % s.timeout_seconds,
-            )
-        except TtsError as exc:
-            ctx.logger.exception("TTS 服务返回错误")
-            return ToolResult(ok=False, output=_describe_tts_error(exc))
-        except Exception as exc:
-            ctx.logger.exception("TTS 调用失败")
-            return ToolResult(
-                ok=False, output=_describe_transport_error(exc)
-            )
+            try:
+                content = await asyncio.wait_for(
+                    DeepSeekToolsClient(ds).tts(text, voice, "wav"),
+                    timeout=float(getattr(ds, "timeout_seconds", 60) or 60),
+                )
+            except (DeepSeekError, asyncio.TimeoutError) as exc:
+                ctx.logger.warning("DeepSeek TTS 失败，回退豆包: %s", exc)
+                ds_error = str(exc) or type(exc).__name__
+            else:
+                engine = "deepseek"
+                audio_format = "wav"
+                ext = ".wav"
+                audio_meta = {
+                    "speaker": voice,
+                    "voice_source": voice_source,
+                    "text_len": len(text),
+                    "format": "wav",
+                    "sample_rate": DEEPSEEK_SAMPLE_RATE,
+                }
 
-        audio_format = (s.format or "mp3").strip()
-        ext = _FORMAT_EXT.get(audio_format, ".mp3")
-        content = result.audio
-        if audio_format == "pcm":
-            content = pcm_to_wav(content, int(s.sample_rate))
+        if not engine:
+            # 回退豆包：只有走这条路才要求豆包 Key
+            if not (s.api_key or "").strip():
+                reasons = ["DeepSeek 调用失败（%s）" % ds_error
+                           if ds_error else "DeepSeek 未启用或未配置 Key",
+                           "豆包语音 API Key 未配置"]
+                return ToolResult(
+                    ok=False,
+                    output="[工具错误] 语音合成不可用：" + "；".join(reasons),
+                )
+            # 音色解析：AI 显式 speaker → 角色卡绑定音色（tts_voice）→ 默认音色
+            speaker = arg_speaker or bound_voice or (s.default_speaker or "").strip()
+            if arg_speaker:
+                voice_source = "arg"
+            elif bound_voice:
+                voice_source = "character"
+            else:
+                voice_source = "default"
+            if not speaker:
+                return ToolResult(
+                    ok=False,
+                    output="[工具错误] 未配置默认音色（default_speaker）",
+                )
 
-        audio_meta = {
-            "speaker": speaker,
-            "voice_source": voice_source,
-            "text_len": len(text),
-            "format": audio_format,
-            "sample_rate": int(s.sample_rate),
-        }
-        if audio_format == "pcm":
-            audio_meta["container"] = "wav"
+            try:
+                result = await asyncio.wait_for(
+                    self._synthesize(text, speaker),
+                    timeout=s.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                ctx.logger.exception("TTS 合成超时")
+                return ToolResult(
+                    ok=False,
+                    output=_with_ds_note(
+                        "[工具错误] 语音合成超时（%d 秒）" % s.timeout_seconds,
+                        ds_error,
+                    ),
+                )
+            except TtsError as exc:
+                ctx.logger.exception("TTS 服务返回错误")
+                return ToolResult(
+                    ok=False, output=_with_ds_note(_describe_tts_error(exc), ds_error)
+                )
+            except Exception as exc:
+                ctx.logger.exception("TTS 调用失败")
+                return ToolResult(
+                    ok=False,
+                    output=_with_ds_note(_describe_transport_error(exc), ds_error),
+                )
+
+            engine = "doubao"
+            audio_format = (s.format or "mp3").strip()
+            ext = _FORMAT_EXT.get(audio_format, ".mp3")
+            content = result.audio
+            if audio_format == "pcm":
+                content = pcm_to_wav(content, int(s.sample_rate))
+
+            audio_meta = {
+                "speaker": speaker,
+                "voice_source": voice_source,
+                "text_len": len(text),
+                "format": audio_format,
+                "sample_rate": int(s.sample_rate),
+            }
+            if audio_format == "pcm":
+                audio_meta["container"] = "wav"
 
         saved = save_generated_audio(services, content, ext, audio_meta)
+        if meter is not None:
+            try:
+                meter.charge("tts", billable_chars(text), "字符", cost, engine)
+            except Exception:  # noqa: BLE001 - 计量旁路，不应让已生成的语音失败
+                ctx.logger.warning("TTS 计费失败", exc_info=True)
         return ToolResult(output=saved["output"])
 
     async def _synthesize(self, text: str, speaker: str):
@@ -216,6 +272,30 @@ def save_generated_audio(
         "不要重复朗读文本，不要输出链接或文件路径。",
     ])
     return {"url": url, "output": output}
+
+
+def _deepseek_voice(arg_speaker: str, bound_voice: str, default: str):
+    """DeepSeek 音色选择：显式参数 → 角色卡绑定 → 默认，非法值一律回落默认。"""
+    if arg_speaker in _DEEPSEEK_VOICES:
+        return arg_speaker, "arg"
+    if bound_voice in _DEEPSEEK_VOICES:
+        return bound_voice, "character"
+    fallback = default if default in _DEEPSEEK_VOICES else "stella"
+    return fallback, "default"
+
+
+def _deepseek_tts_price(ds) -> float:
+    try:
+        return max(0.0, float(getattr(ds, "tts_price", 3.0)))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _with_ds_note(message: str, ds_error: str) -> str:
+    """回退豆包时把 DeepSeek 的失败原因附在后面，便于管理员判断修哪个 Key。"""
+    if not ds_error:
+        return message
+    return message + "\n（DeepSeek 优先调用失败：%s）" % ds_error[:300]
 
 
 def _describe_tts_error(exc: TtsError) -> str:

@@ -1,0 +1,56 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.version {
+  color: var(--dsw-alias-label-primary);
+}
+
+.meta {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.progress {
+  height: 6px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 3px;
+  background-color: var(--dsw-alias-bg-skeleton);
+}
+
+.progressBar {
+  height: 100%;
+  border-radius: 3px;
+  background-color: var(--dsw-alias-brand-primary);
+  transition: width 0.24s var(--ds-ease-in-out);
+}
+
+.progressMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.error {
+  margin-top: 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}

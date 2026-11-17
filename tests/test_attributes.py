@@ -63,10 +63,13 @@ def _rp_with_defaults():
     )
 
 
-def test_no_card_prompt_is_plain_assistant():
-    """无角色卡：以有用助手身份回答，不注入扮演格式/属性要求。"""
+def test_no_card_prompt_is_general_assistant():
+    """无角色卡：回退通用 AI 助手人格，不注入扮演格式/属性要求。"""
+    from flyai.lore.query import GENERAL_ASSISTANT_PROMPT
+
     prompt = build_system_prompt(None, None, "你是一个助手。", roleplay=_rp_with_defaults())
-    assert prompt == "你是一个助手。"
+    assert prompt == GENERAL_ASSISTANT_PROMPT + "\n\n你是一个助手。"
+    assert "（ ）" not in prompt and "update_attributes" not in prompt
 
 
 def test_build_system_prompt_injects_format_and_attrs():
@@ -117,4 +120,6 @@ def test_build_system_prompt_disabled_attrs_omits_tool_hint():
         attributes=AttributeSettings(enabled=False, ai_provided=True, list=[]),
     )
     prompt = build_system_prompt(None, None, "你是一个助手。", roleplay=rp)
-    assert prompt == "你是一个助手。"
+    from flyai.lore.query import GENERAL_ASSISTANT_PROMPT
+
+    assert prompt == GENERAL_ASSISTANT_PROMPT + "\n\n你是一个助手。"

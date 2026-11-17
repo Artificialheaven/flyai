@@ -9,14 +9,14 @@
   max-width: calc(100vw - 28px);
   padding: 4px 8px;
   border-radius: 10px;
-  background-color: var(--fly-alias-tooltip-bg);
-  color: var(--fly-static-neutral-bluish-00);
+  background-color: var(--dsw-alias-tooltip-bg);
+  color: var(--dsw-static-neutral-bluish-00);
   font-size: 12px;
   line-height: 1.5;
   pointer-events: none;
 
-  [data-fly-dark-theme] & {
-    color: var(--fly-alias-label-primary);
+  [data-ds-dark-theme] & {
+    color: var(--dsw-alias-label-primary);
     box-shadow:
       0 6px 16px 0 rgba(0, 0, 0, 0.08),
       0 3px 6px -4px rgba(0, 0, 0, 0.12),

@@ -10,3 +10,7 @@ data/
 tmp_*.json
 last_review.md
 test/temp/
+# frp 客户端（含认证 token 与二进制，勿入库）
+tools/frp/
+# 服务器 APK 发布包（大文件，仅分发用）
+webroot/*.apk

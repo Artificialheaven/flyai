@@ -1,6 +1,7 @@
 """Galgame API：分句 TTS（门槛/音色/成功）+ 选项应答。"""
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -12,9 +13,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from fastapi import HTTPException
 
 from flyai.api import routes_galgame, routes_chat
-from flyai.config import RoleplaySettings, TtsSettings
+from flyai.config import DeepSeekSettings, RoleplaySettings, TtsSettings
+from flyai.errors import DeepSeekError
 from flyai.galgame.choices import GalgameChoiceManager
 from flyai.lore.models import Character
+from flyai.metering import billable_chars, tts_cost
 from flyai.schemas import Message, ToolCall
 from flyai.sessions.json_store import JsonSessionStore
 from flyai.sessions.models import RoomMember, Session, Thread
@@ -41,7 +44,7 @@ class _FakeTtsClient:
         return SimpleNamespace(audio=_MP3)
 
 
-def _env(tmp_path, tts=None, level=5):
+def _env(tmp_path, tts=None, level=5, deepseek=None, access=None):
     store = JsonSessionStore(tmp_path / "sessions")
     s = Session(id="sid1", title="g", mode="galgame")
     s.members.append(RoomMember(name="你", is_user=True))
@@ -63,13 +66,15 @@ def _env(tmp_path, tts=None, level=5):
     state = SimpleNamespace(config=SimpleNamespace(
         tts=tts or TtsSettings(
             api_key="k", default_speaker="S_DEFAULT", min_level=0),
-        providers=[]),
+        providers=[], deepseek=deepseek, access=access),
         galgame_choices=GalgameChoiceManager(),
         galgame_tts_overlay={})
     # 计费：普通用户路径需要 user_store；测试替身一律放行（金额在专门用例里测）
     state.user_store = SimpleNamespace(
         consume=lambda uid, cost: True,
-        refund=lambda uid, cost: None)
+        refund=lambda uid, cost: None,
+        add_used=lambda uid, cost: None,
+        get_by_id=lambda uid: None)
     state.user = lambda request: sc
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(flyai=state)))
@@ -373,3 +378,166 @@ def test_choice_empty_body_400(tmp_path):
             routes_galgame.GalgameChoiceBody(run_id="run1", text=""),
             request))
     assert ei.value.status_code == 400
+
+
+# ---- DeepSeek TTS 主路径 / 回退 / 计费 ----
+
+_WAV = b"RIFFFAKE-WAV"
+
+
+class _FakeDsClient:
+    last = None
+    fail = False
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    async def tts(self, text, voice, fmt):
+        _FakeDsClient.last = (text, voice, fmt)
+        if _FakeDsClient.fail:
+            raise DeepSeekError("upstream down", status_code=502)
+        return _WAV
+
+
+@pytest.fixture
+def fake_ds(monkeypatch):
+    _FakeDsClient.last = None
+    _FakeDsClient.fail = False
+    monkeypatch.setattr(routes_galgame, "DeepSeekToolsClient", _FakeDsClient)
+    return _FakeDsClient
+
+
+def _enable_billing(state, sc, tmp_path, total=10.0, used=0.0):
+    """换上可核对的用户存储，并启用 usage.jsonl 流水。"""
+    users = {"u1": SimpleNamespace(quota_total=total, quota_used=used)}
+    charged = []
+
+    class _Store:
+        def get_by_id(self, uid):
+            return users.get(uid)
+
+        def add_used(self, uid, cost):
+            charged.append(cost)
+            users.setdefault(
+                uid, SimpleNamespace(quota_total=total, quota_used=used))
+            users[uid].quota_used += cost
+
+    state.user_store = _Store()
+    sc.settings_path = tmp_path / "data" / "u1" / "settings.json"
+    return charged
+
+
+def _ledger(tmp_path):
+    path = tmp_path / "data" / "u1" / "usage.jsonl"
+    return [json.loads(x)
+            for x in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_tts_deepseek_success_uses_default_voice_and_bills(
+        tmp_path, fake_ds, fake_tts):
+    ds = DeepSeekSettings(api_key="sk-ds", tts_voice="tide")
+    state, sc, request, _s = _env(tmp_path, deepseek=ds)
+    charged = _enable_billing(state, sc, tmp_path)
+
+    out = _run(routes_galgame.galgame_tts(
+        routes_galgame.GalgameTtsBody(session_id="sid1", text="「你好。」"),
+        request))
+
+    # 角色绑定音色不是 stella/tide：使用 DeepSeek 默认音色，输出 wav
+    assert fake_ds.last == ("「你好。」", "tide", "wav")
+    assert out["speaker"] == "tide" and out["voice_source"] == "default"
+    assert out["url"].endswith(".wav")
+    assert (sc.upload_dir / out["url"].split("/")[-1]).is_file()
+    assert _FakeTtsClient.last is None
+
+    assert charged == [pytest.approx(0.003)]  # 10 计费字符 × 3 元/万字符
+    row = _ledger(tmp_path)[0]
+    assert row["kind"] == "tts" and row["engine"] == "deepseek"
+    assert row["quantity"] == 10 and row["unit"] == "字符"
+    assert row["cost"] == pytest.approx(0.003)
+    assert row["session_id"] == "sid1"
+
+
+def test_tts_deepseek_honors_bound_stella_voice(tmp_path, fake_ds, fake_tts):
+    ds = DeepSeekSettings(api_key="sk-ds", tts_voice="tide")
+    state, sc, request, s = _env(tmp_path, deepseek=ds)
+    sc.lore.get_character("cid1").voice = "stella"
+
+    out = _run(routes_galgame.galgame_tts(
+        routes_galgame.GalgameTtsBody(session_id="sid1", text="嗨"), request))
+
+    assert fake_ds.last == ("嗨", "stella", "wav")
+    assert out["speaker"] == "stella" and out["voice_source"] == "character"
+
+
+def test_tts_deepseek_failure_falls_back_to_doubao_and_bills(
+        tmp_path, fake_ds, fake_tts):
+    ds = DeepSeekSettings(api_key="sk-ds")
+    state, sc, request, _s = _env(tmp_path, deepseek=ds)
+    charged = _enable_billing(state, sc, tmp_path)
+    fake_ds.fail = True
+
+    out = _run(routes_galgame.galgame_tts(
+        routes_galgame.GalgameTtsBody(session_id="sid1", text="「你好。」"),
+        request))
+
+    assert fake_ds.last is not None
+    assert _FakeTtsClient.last == ("「你好。」", "S_BOUND")
+    assert out["speaker"] == "S_BOUND"
+    assert out["voice_source"] == "character"
+    assert out["url"].endswith(".mp3")
+
+    # 回退成功同样按 DeepSeek 字符单价计费
+    assert charged == [pytest.approx(0.003)]
+    row = _ledger(tmp_path)[0]
+    assert row["engine"] == "doubao" and row["kind"] == "tts"
+    assert row["quantity"] == 10
+    assert row["cost"] == pytest.approx(0.003)
+
+
+def test_tts_deepseek_failure_without_doubao_key_400(
+        tmp_path, fake_ds):
+    ds = DeepSeekSettings(api_key="sk-ds")
+    tts = TtsSettings(api_key="", default_speaker="d", min_level=0)
+    state, sc, request, _s = _env(tmp_path, tts=tts, deepseek=ds)
+    charged = _enable_billing(state, sc, tmp_path)
+    fake_ds.fail = True
+
+    with pytest.raises(HTTPException) as ei:
+        _run(routes_galgame.galgame_tts(
+            routes_galgame.GalgameTtsBody(session_id="sid1", text="x"),
+            request))
+    assert ei.value.status_code == 400
+    assert "调用失败" in ei.value.detail
+    assert charged == []
+    assert not (tmp_path / "data" / "u1" / "usage.jsonl").exists()
+
+
+def test_tts_engine_doubao_skips_configured_deepseek(
+        tmp_path, fake_ds, fake_tts):
+    tts = TtsSettings(engine="doubao", api_key="k",
+                      default_speaker="S_DEFAULT", min_level=0)
+    ds = DeepSeekSettings(api_key="sk-ds")
+    state, sc, request, _s = _env(tmp_path, tts=tts, deepseek=ds)
+    _enable_billing(state, sc, tmp_path)
+
+    out = _run(routes_galgame.galgame_tts(
+        routes_galgame.GalgameTtsBody(session_id="sid1", text="嗨"), request))
+
+    assert fake_ds.last is None
+    assert out["speaker"] == "S_BOUND"
+    assert _ledger(tmp_path)[0]["engine"] == "doubao"
+
+
+def test_tts_insufficient_balance_402_before_synthesis(
+        tmp_path, fake_ds):
+    ds = DeepSeekSettings(api_key="sk-ds")
+    state, sc, request, _s = _env(tmp_path, deepseek=ds)
+    _enable_billing(state, sc, tmp_path, total=0.0)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(routes_galgame.galgame_tts(
+            routes_galgame.GalgameTtsBody(session_id="sid1", text="「你好。」"),
+            request))
+    assert ei.value.status_code == 402
+    assert fake_ds.last is None

@@ -105,7 +105,12 @@ def test_build_system_prompt_with_character_and_world():
 
 
 def test_build_system_prompt_without_lore():
-    assert build_system_prompt(None, None, "你是一个助手。") == "你是一个助手。"
+    from flyai.lore.query import GENERAL_ASSISTANT_PROMPT
+
+    assert (
+        build_system_prompt(None, None, "你是一个助手。")
+        == GENERAL_ASSISTANT_PROMPT + "\n\n你是一个助手。"
+    )
 
 
 def test_character_prompt_requirements_override_builtin():

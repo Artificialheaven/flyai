@@ -82,6 +82,32 @@ _GLOBAL_FLAGS = {
     "mcp": ("mcp", False),
 }
 
+# 类别 → 专属权限门槛字段名；其余非 base 类别统一受 agent_min_level 约束
+ACCESS_FIELDS = {
+    "browser": "browser_min_level",
+    "pixiv": "pixiv_min_level",
+    "galgame": "galgame_min_level",
+}
+
+
+def required_level_for(category: str, cfg, is_admin: bool = False) -> int:
+    """该功能类别的最低权限等级；0 表示不限制。
+
+    admin 恒过（按 uid 判定，不依赖 level 数值）；base 类始终不受限。
+    browser/pixiv/galgame 用专属阈值，其余非 base 类别用 agent_min_level，
+    避免同一工具被两个门槛重复拦截。
+    """
+    if is_admin or category == "base":
+        return 0
+    access = getattr(cfg, "access", None)
+    if access is None:
+        return 0
+    field = ACCESS_FIELDS.get(category)
+    if field is not None:
+        return int(getattr(access, field, 0) or 0)
+    return int(getattr(access, "agent_min_level", 0) or 0)
+
+
 # 类别 → UserSettings 上的覆盖字段名
 _USER_FLAGS = {
     "web": "web_enabled",
@@ -185,7 +211,8 @@ def base_tool_names(registry) -> Set[str]:
 
 
 def allowed_tool_names(registry, cfg, user_settings, disabled=None,
-                       extra_names: Optional[Set[str]] = None) -> Optional[Set[str]]:
+                       extra_names: Optional[Set[str]] = None,
+                       level: int = 0, is_admin: bool = False) -> Optional[Set[str]]:
     """该用户请求中允许暴露给模型的工具名集合。
 
     返回 None 表示不过滤（理论上不会走到：这里总是显式计算）。
@@ -194,6 +221,7 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
     不能突破类别级功能开关/权限。
     extra_names：请求级工具名（P1 自定义函数工具 custom__*），仅在
     custom_tools 类别开启时并入——它们不在全局注册表里，需要显式放行。
+    level/is_admin：管理员配置的功能权限门槛；base 类不受限，admin 恒过。
     """
     tools = effective_tool_settings(cfg, user_settings)
     if not tools.enabled:
@@ -203,8 +231,11 @@ def allowed_tool_names(registry, cfg, user_settings, disabled=None,
     for category in ("web", "browser", "pixiv", "image", "galgame", "tts",
                      "sandbox", "custom_tools", "loop", "self_memory",
                      "proactor", "mcp"):
-        if feature_enabled(category, cfg, user_settings):
-            on_categories.add(category)
+        if not feature_enabled(category, cfg, user_settings):
+            continue
+        if level < required_level_for(category, cfg, is_admin):
+            continue
+        on_categories.add(category)
 
     allowed = set()
     for tool in registry.all():

@@ -1,3 +1,4 @@
+import { useTranslate } from '../../i18n/index.js'
 import { memo, useEffect, useMemo, useReducer, useState } from 'react'
 import Prism from 'prismjs'
 import {
@@ -23,18 +24,19 @@ const CodeInfoRow = ({
   showDiagram: boolean
   onToggleDiagram?: () => void
 }) => {
+  const t = useTranslate()
   const [copied, setCopied] = useState(false)
   return (
     <div className={styles.container}>
       {onToggleDiagram ? (
-        <div className="md-code-block-switch" aria-label="图表/代码切换">
+        <div className="md-code-block-switch" aria-label={t('mermaidSwitchLabel')}>
           <button
             type="button"
             className={styles.button}
             aria-pressed={showDiagram}
             onClick={() => !showDiagram && onToggleDiagram()}
           >
-            图表
+            {t('mermaidDiagram')}
           </button>
           <button
             type="button"
@@ -42,7 +44,7 @@ const CodeInfoRow = ({
             aria-pressed={!showDiagram}
             onClick={() => showDiagram && onToggleDiagram()}
           >
-            代码
+            {t('mermaidCode')}
           </button>
         </div>
       ) : (
@@ -53,7 +55,7 @@ const CodeInfoRow = ({
         className={styles.button}
         onClick={async () => {
           if (!(await copyText(code))) {
-            showToast('复制失败', true)
+            showToast({ key: 'copyFailed' })
             return
           }
           setCopied(true)
@@ -61,7 +63,7 @@ const CodeInfoRow = ({
         }}
       >
         {copied ? <IconCheckOutline16 /> : <IconCopyOutline16 />}
-        <span>{copied ? '已复制' : '复制'}</span>
+        <span>{t(copied ? 'copied' : 'copy')}</span>
       </button>
     </div>
   )

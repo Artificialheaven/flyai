@@ -60,9 +60,59 @@ def list_sessions(request: Request):
     out = []
     for s in sc.store.list():
         d = _session_dict(s)
-        d["message_count"] = len(s.messages)
+        d["message_count"] = s.message_count
         out.append(d)
     return {"sessions": out}
+
+
+@router.get("/sessions/search")
+def search_sessions(request: Request, q: str = "", limit: int = 50):
+    """会话全文搜索：标题 + 消息正文（用户 / AI / 墓碑原文）。
+
+    纯内存扫描，不返回消息体与图片，只给标题与命中片段，前端据此跳转。
+    """
+    query = (q or "").strip()
+    if not query:
+        return {"query": query, "results": []}
+    needle = query.casefold()
+    try:
+        limit = max(1, min(200, int(limit)))
+    except (TypeError, ValueError):
+        limit = 50
+    sc = request.app.state.flyai.user(request)
+    hits = []
+    for s in sc.store.list():
+        count = 0
+        snippet = ""
+        title_hit = needle in (s.title or "").casefold()
+        if title_hit:
+            count += 1
+            snippet = s.title or ""
+        for m in s.messages:
+            texts = [m.content or ""]
+            if m.tombstone and m.tombstone.content:
+                texts.append(m.tombstone.content)
+            if m.name:
+                texts.append(m.name)
+            for text in texts:
+                low = text.casefold()
+                pos = low.find(needle)
+                if pos < 0:
+                    continue
+                count += low.count(needle)
+                if not snippet:
+                    start = max(0, pos - 40)
+                    end = min(len(text), pos + len(query) + 40)
+                    snippet = text[start:end].replace("\n", " ").strip()
+        if count:
+            d = _session_dict(s)
+            d["match_count"] = count
+            d["snippet"] = snippet
+            hits.append(d)
+    # 最近更新优先（updated_at 为 ISO 字符串），再让置顶项浮到最前
+    hits.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    hits.sort(key=lambda item: bool(item.get("pinned")), reverse=True)
+    return {"query": query, "results": hits[:limit]}
 
 
 @router.post("/sessions")
@@ -97,6 +147,15 @@ def update_session(sid: str, req: SessionUpdate, request: Request):
     if req.world_id is not None and req.world_id and not sc.lore.get_world(req.world_id):
         raise HTTPException(400, "世界观不存在")
     if req.character_id is not None:
+        old_card_id = s.character_id or ""
+        if req.character_id != old_card_id and old_card_id:
+            # 旧形态会话（顶层 messages）换卡：先按旧卡 id 落标旧对白，
+            # 自动回忆按角色 id 过滤时不会把旧卡的历史算给新卡
+            for msg in s.messages:
+                if msg.role == "assistant" and not (
+                    msg.character_id or ""
+                ).strip():
+                    msg.character_id = old_card_id
         s.character_id = req.character_id
         # 重新绑定主卡时清掉旧会话副本，避免遮蔽新卡
         s.character_override = None
@@ -220,13 +279,34 @@ def _must_get_session(sc, sid):
     return s
 
 
+def _single_ai_seat(s):
+    """房间形态下唯一的 AI 座位；多人群聊或旧形态返回 None。
+
+    会话副本的真实载体是 member.override（压缩/对话都读它），顶层
+    character_override 仅作兼容镜像同步，保证导出与 effective_character 一致。
+    """
+    ais = [m for m in s.members if not m.is_user]
+    return ais[0] if len(ais) == 1 else None
+
+
 @router.post("/sessions/{sid}/character/fork")
 def session_fork(sid: str, request: Request):
     """把当前有效角色复制为会话专属副本（不碰库主卡）。"""
     sc = request.app.state.flyai.user(request)
     s = _must_get_session(sc, sid)
+    from ..lore.models import Character
+
+    m = _single_ai_seat(s)
     try:
-        copy = fork_character(s, sc.lore)
+        if m is not None:
+            base = member_character(m, sc.lore)
+            if base is None:
+                raise ValueError("当前会话没有绑定角色，无法派生副本")
+            copy = Character.from_dict(base.to_dict())
+            m.override = copy.to_dict()
+            s.character_override = copy.to_dict()
+        else:
+            copy = fork_character(s, sc.lore)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     sc.store.save(s)
@@ -240,7 +320,11 @@ def session_set_character(sid: str, body: CharacterBody, request: Request):
     s = _must_get_session(sc, sid)
     from ..lore.models import Character
 
-    set_character_override(s, Character.from_dict(body.character or {}))
+    char = Character.from_dict(body.character or {})
+    m = _single_ai_seat(s)
+    if m is not None:
+        m.override = char.to_dict()
+    set_character_override(s, char)
     sc.store.save(s)
     eff = effective_character(s, sc.lore)
     return {"character": eff.to_dict() if eff else None, "scoped": True}
@@ -251,6 +335,9 @@ def session_clear_override(sid: str, request: Request):
     """还原为库主卡（删除会话副本）。"""
     sc = request.app.state.flyai.user(request)
     s = _must_get_session(sc, sid)
+    m = _single_ai_seat(s)
+    if m is not None:
+        m.override = None
     clear_character_override(s)
     sc.store.save(s)
     eff = effective_character(s, sc.lore)
@@ -262,7 +349,8 @@ def session_publish(sid: str, request: Request):
     """把会话所用角色发布为新角色卡（供其他对话用）。"""
     sc = request.app.state.flyai.user(request)
     s = _must_get_session(sc, sid)
-    eff = effective_character(s, sc.lore)
+    m = _single_ai_seat(s)
+    eff = member_character(m, sc.lore) if m is not None else effective_character(s, sc.lore)
     if eff is None:
         raise HTTPException(400, "会话未绑定角色")
     new = eff.to_dict()
@@ -278,7 +366,8 @@ def session_character_export(sid: str, request: Request):
     """将会话所用的角色以其标准卡格式下载。"""
     sc = request.app.state.flyai.user(request)
     s = _must_get_session(sc, sid)
-    eff = effective_character(s, sc.lore)
+    m = _single_ai_seat(s)
+    eff = member_character(m, sc.lore) if m is not None else effective_character(s, sc.lore)
     if eff is None:
         raise HTTPException(404, "会话未绑定角色")
     body = {"type": "flyai-character", "version": 1, "name": eff.name, "data": eff.to_dict()}

@@ -16,6 +16,22 @@ from ..schemas import Message, ToolCall
 from .base import BaseProvider, StreamEvent, StreamEventType
 
 
+def _cached_tokens(usage: Dict) -> int:
+    """缓存命中的输入 token：OpenAI 在 prompt_tokens_details.cached_tokens，
+    DeepSeek 在 prompt_cache_hit_tokens；两者量级同义（已含在 prompt_tokens 内）。"""
+    details = usage.get("prompt_tokens_details") or {}
+    try:
+        hit = int(details.get("cached_tokens") or 0)
+    except (TypeError, ValueError):
+        hit = 0
+    if hit <= 0:
+        try:
+            hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+        except (TypeError, ValueError):
+            hit = 0
+    return max(0, hit)
+
+
 def _content_is_tool_echo(content: str, calls: List[ToolCall]) -> bool:
     """正文是否只是工具调用的回声（参数被厂商重复写进 content 的情况）。
 
@@ -89,6 +105,7 @@ class OpenAICompatProvider(BaseProvider):
         deep_thinking: bool = False,
         max_tokens: Optional[int] = None,
         extra_params: Optional[Dict] = None,
+        session_id: str = "",
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
@@ -122,6 +139,7 @@ class OpenAICompatProvider(BaseProvider):
         elif getattr(self.cfg, "thinking_off_params", None):
             body.update(self.cfg.thinking_off_params)
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
+        headers.update(self._gateway_headers(session_id))
 
         # stream_options 拿 token 用量；个别兼容厂商不认该字段（400），去掉重试一次
         try:
@@ -170,6 +188,7 @@ class OpenAICompatProvider(BaseProvider):
                         usage={
                             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                             "completion_tokens": int(usage.get("completion_tokens") or 0),
+                            "cached_tokens": _cached_tokens(usage),
                         },
                     )
                 choices = obj.get("choices") or []

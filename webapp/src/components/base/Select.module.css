@@ -10,8 +10,8 @@
   padding: 0 42px 0 14px;
   border: none;
   border-radius: 18px;
-  background: var(--fly-specific-selector);
-  color: var(--fly-alias-label-primary);
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 14px;
   line-height: 22px;
@@ -19,19 +19,19 @@
   cursor: pointer;
   outline: none;
   transition:
-    background-color var(--fly-transition-duration) var(--fly-ease-in-out),
-    color var(--fly-transition-duration) var(--fly-ease-in-out);
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    color var(--ds-transition-duration) var(--ds-ease-in-out);
 
   &:hover:not(:disabled) {
-    background: var(--fly-alias-interactive-bg-hover-accent);
+    background: var(--dsw-alias-interactive-bg-hover-accent);
   }
 
   &:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--fly-alias-brand-primary);
+    box-shadow: inset 0 0 0 2px var(--dsw-alias-brand-primary);
   }
 
   &:disabled {
-    color: var(--fly-alias-label-caption);
+    color: var(--dsw-alias-label-caption);
     cursor: default;
   }
 
@@ -42,11 +42,11 @@
 }
 
 .open {
-  color: var(--fly-alias-label-tertiary);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .placeholder {
-  color: var(--fly-alias-label-tertiary);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .arrow {
@@ -54,7 +54,7 @@
   top: 50%;
   right: 14px;
   display: flex;
-  color: var(--fly-alias-label-secondary);
+  color: var(--dsw-alias-label-secondary);
   transform: translateY(-50%);
   pointer-events: none;
 }
@@ -69,8 +69,8 @@
   overscroll-behavior: contain;
   padding: 4px;
   border-radius: 12px;
-  border: 1px solid var(--fly-alias-border-inverted);
-  background: var(--fly-specific-menu);
+  border: 1px solid var(--dsw-alias-border-inverted);
+  background: var(--dsw-specific-menu);
   box-shadow:
     0 0 1px 0 rgba(0, 0, 0, 0.2),
     0 0 4px 0 rgba(0, 0, 0, 0.02),
@@ -88,13 +88,13 @@
   border-radius: 10px;
   font-size: 14px;
   line-height: 22px;
-  color: var(--fly-alias-label-primary);
+  color: var(--dsw-alias-label-primary);
   white-space: normal;
   cursor: pointer;
   user-select: none;
-  transition: background-color var(--fly-transition-duration) var(--fly-ease-in-out);
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
   &:hover {
-    background: var(--fly-alias-interactive-bg-hover);
+    background: var(--dsw-alias-interactive-bg-hover);
   }
 }

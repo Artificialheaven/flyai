@@ -20,6 +20,14 @@ def _norm_name(s: str) -> str:
     return (s or "").strip().casefold()
 
 
+def _count_messages(data: Dict) -> int:
+    """列表摘要用：房间形态数各窗口消息；旧形态退回顶层 messages。"""
+    threads = data.get("threads") or []
+    if threads:
+        return sum(len(t.get("messages") or []) for t in threads)
+    return len(data.get("messages") or [])
+
+
 def migrate_actor_ids(session: Session) -> bool:
     """旧群聊消息没有 actor_id（2026-10 前的数据）：按 assistant 消息持久化的
     name 精确匹配当前 AI 座位名补归属；tool 结果按 tool_call_id 跟随发起调用的
@@ -183,6 +191,8 @@ class JsonSessionStore(SessionStore):
                     messages=[],
                     pinned=bool(data.get("pinned", False)),
                     mode=data.get("mode", "normal") or "normal",
+                    token_usage=dict(data.get("token_usage") or {}),
+                    message_count=_count_messages(data),
                 )
             except Exception:
                 continue

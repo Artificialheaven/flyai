@@ -82,6 +82,23 @@ export const IconDataOutline16 = () => (
   </svg>
 )
 
+export const IconLibraryOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M2.1 2.25a.7.7 0 0 1 .7-.7h3.2a.7.7 0 0 1 .7.7v11.5a.7.7 0 0 1-.7.7H2.8a.7.7 0 0 1-.7-.7V2.25Zm1.4.7v10.1h1.8V2.95H3.5Z"
+      fill="currentColor"
+    />
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M8.6 2.25a.7.7 0 0 1 .7-.7h2.2a.7.7 0 0 1 .7.7v11.5a.7.7 0 0 1-.7.7h-2.2a.7.7 0 0 1-.7-.7V2.25Zm1.4.7v10.1h1.2V2.95H10Z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
 export const IconUploadOutline14 = () => (
   <svg width={14} height={14} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path
@@ -358,6 +375,46 @@ export const IconBrowseWarningOutline16 = () => (
   </svg>
 )
 
+export const IconAtOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M10.1 8a2.1 2.1 0 1 1-4.2 0 2.1 2.1 0 0 1 4.2 0Zm0 0c0 1.2.7 2 1.6 2 1 0 1.6-.9 1.6-2A5.3 5.3 0 1 0 8 13.3c.9 0 1.7-.2 2.4-.5"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+    />
+  </svg>
+)
+
+export const IconUsersOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx={6} cy={5.4} r={2.4} stroke="currentColor" strokeWidth={1.3} />
+    <path
+      d="M1.8 13.2c.4-2.2 1.9-3.5 4.2-3.5s3.8 1.3 4.2 3.5"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+    />
+    <path
+      d="M10.4 3.3a2.2 2.2 0 0 1 0 4.2M11.6 9.9c1.6.4 2.5 1.5 2.8 3.1"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+    />
+  </svg>
+)
+
+export const IconPlusOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M8 3.2v9.6M3.2 8h9.6"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+    />
+  </svg>
+)
+
 export const IconCheckedOutline14 = () => (
   <svg width={14} height={14} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path
@@ -520,6 +577,51 @@ export const IconToastError16 = () => (
     <path
       d="M7.383 8.4c.013.406.222.61.624.61.388 0 .587-.204.597-.61l.11-3.373a.603.603 0 0 0-.194-.492.728.728 0 0 0-.527-.202.718.718 0 0 0-.52.195.622.622 0 0 0-.188.5l.098 3.371zM7.424 11.098a.849.849 0 0 0 .583.215.83.83 0 0 0 .569-.215.7.7 0 0 0 .243-.548.7.7 0 0 0-.243-.548.815.815 0 0 0-.569-.215.834.834 0 0 0-.583.222.701.701 0 0 0-.236.54c0 .218.079.4.236.549z"
       fill="currentColor"
+    />
+  </svg>
+)
+
+/** 用量/统计图标：柱状图，颜色跟随 currentColor */
+export const IconChartOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M2.5 2.167a.667.667 0 0 1 .667.666v9.334h10.666a.667.667 0 0 1 0 1.333H2.5a.667.667 0 0 1-.667-.667V2.833A.667.667 0 0 1 2.5 2.167z"
+      fill="currentColor"
+    />
+    <path
+      d="M5.75 6.5c.345 0 .625.28.625.625v2.542a.625.625 0 1 1-1.25 0V7.125c0-.345.28-.625.625-.625zM8.75 4.167c.345 0 .625.28.625.625v4.875a.625.625 0 1 1-1.25 0V4.792c0-.345.28-.625.625-.625zM11.75 6.75c.345 0 .625.28.625.625v2.292a.625.625 0 1 1-1.25 0V7.375c0-.345.28-.625.625-.625z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
+export const IconLockOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect
+      x="3.1"
+      y="6.9"
+      width="9.8"
+      height="7"
+      rx="1.6"
+      stroke="currentColor"
+      strokeWidth="1.3"
+    />
+    <path
+      d="M5.3 6.9V5.2a2.7 2.7 0 0 1 5.4 0v1.7"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+    />
+  </svg>
+)
+
+export const IconBoltOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M9.2 1.6 3.7 8.9h3.1l-.8 5.5 5.3-7.3H8.2l1-5.5Z"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
     />
   </svg>
 )

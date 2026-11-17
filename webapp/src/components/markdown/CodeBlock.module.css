@@ -8,8 +8,8 @@
 
 .name {
   margin-left: 8px;
-  color: var(--fly-alias-label-primary);
-  font-family: var(--fly-font-family-code);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
   font-size: 12px;
   line-height: 18px;
 }
@@ -23,7 +23,7 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: var(--fly-alias-label-secondary);
+  color: var(--dsw-alias-label-secondary);
   font: inherit;
   font-size: 13px;
   line-height: 20px;
@@ -31,12 +31,12 @@
   user-select: none;
 
   &:active {
-    background-color: var(--fly-alias-interactive-bg-hover);
+    background-color: var(--dsw-alias-interactive-bg-hover);
   }
 
   @media (hover: hover) {
     &:hover {
-      background-color: var(--fly-alias-interactive-bg-hover);
+      background-color: var(--dsw-alias-interactive-bg-hover);
     }
   }
 

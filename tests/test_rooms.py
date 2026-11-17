@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import pytest
 
 from flyai.lore.models import Character, World
-from flyai.lore.query import build_member_system_prompt
+from flyai.lore.query import GENERAL_ASSISTANT_PROMPT, build_member_system_prompt
 from flyai.providers.base import StreamEvent, StreamEventType
 from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore
@@ -148,9 +148,9 @@ def test_member_prompt_includes_memory_attrs_audience():
     assert "魔法世界" in p
 
 
-def test_member_prompt_without_lore_returns_base():
+def test_member_prompt_without_lore_uses_general_assistant():
     p = build_member_system_prompt(name="x", memory="", attributes=None, audience=None, base="你是助手。")
-    assert p == "你是助手。"
+    assert p == GENERAL_ASSISTANT_PROMPT + "\n\n你是助手。"
 
 
 # ---- R8：用户扮演自设（persona）----

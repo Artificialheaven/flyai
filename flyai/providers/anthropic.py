@@ -32,6 +32,7 @@ class AnthropicProvider(BaseProvider):
         deep_thinking: bool = False,
         max_tokens: Optional[int] = None,
         extra_params: Optional[Dict] = None,
+        session_id: str = "",
     ) -> AsyncIterator[StreamEvent]:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/v1/messages"
@@ -68,6 +69,7 @@ class AnthropicProvider(BaseProvider):
             "anthropic-version": _ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
+        headers.update(self._gateway_headers(session_id))
 
         async with self._client.stream("POST", url, json=body, headers=headers) as resp:
             if resp.status_code >= 400:
@@ -91,6 +93,8 @@ class AnthropicProvider(BaseProvider):
         has_tool_use = False
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
 
         async for raw in resp.aiter_lines():
             line = raw.rstrip("\r")
@@ -110,6 +114,11 @@ class AnthropicProvider(BaseProvider):
                 if event_name == "message_start":
                     u = (obj.get("message") or {}).get("usage") or {}
                     input_tokens = int(u.get("input_tokens") or input_tokens)
+                    # 缓存命中/写入的输入 token 与 input_tokens 并列返回，需分别计入
+                    cache_read_tokens = int(
+                        u.get("cache_read_input_tokens") or cache_read_tokens)
+                    cache_creation_tokens = int(
+                        u.get("cache_creation_input_tokens") or cache_creation_tokens)
                 elif event_name == "content_block_start":
                     block = obj.get("content_block") or {}
                     btype = block.get("type")
@@ -155,12 +164,15 @@ class AnthropicProvider(BaseProvider):
                     if u.get("output_tokens") is not None:
                         output_tokens = int(u.get("output_tokens"))
 
-        if input_tokens or output_tokens:
+        if input_tokens or output_tokens or cache_read_tokens or cache_creation_tokens:
+            # 统一口径：prompt_tokens 覆盖全部输入（未命中 + 缓存命中 + 缓存写入），
+            # cached_tokens 只标命中部分，供按 token 计费拆分单价
             yield StreamEvent(
                 StreamEventType.USAGE,
                 usage={
-                    "prompt_tokens": input_tokens,
+                    "prompt_tokens": input_tokens + cache_read_tokens + cache_creation_tokens,
                     "completion_tokens": output_tokens,
+                    "cached_tokens": cache_read_tokens,
                 },
             )
 

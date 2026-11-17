@@ -22,6 +22,7 @@ from flyai.api.routes_room import (
 from flyai.lore.character_memory import CharacterMemoryStore
 from flyai.lore.models import Character
 from flyai.sessions.json_store import JsonSessionStore
+from flyai.schemas import Message
 from flyai.sessions.models import RoomMember, Session, Thread
 
 
@@ -166,9 +167,10 @@ def test_update_member_provider_validation(tmp_path):
     body = MemberUpdate(provider_id="ghost")
     with pytest.raises(HTTPException) as ei:
         update_member(s.id, ais[0].id, body, request)
-    assert ei.value.status_code == 400
+    assert ei.value.status_code == 403
 
-    state.config.providers = [SimpleNamespace(id="p1")]
+    # 仅共享且等级达标的模型可选
+    state.config.providers = [SimpleNamespace(id="p1", shared=True, min_level=0)]
     body = MemberUpdate(provider_id="p1")
     out = update_member(s.id, ais[0].id, body, request)
     assert out["provider_id"] == "p1"
@@ -297,6 +299,27 @@ def test_persona_switch_does_not_touch_top_level(tmp_path):
     update_member(s.id, user_seat.id, MemberUpdate(character_id="c2"), request)
     s2 = store.get(s.id)
     assert s2.character_id == "c1"
+
+
+def test_switch_card_backstamps_old_messages(tmp_path):
+    """换卡时旧卡对白补记旧卡 id：自动回忆据此只收新卡自己的历史。"""
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    thread = s.threads[0]
+    old_msg = Message(role="assistant", content="旧卡台词", actor_id=m.id)
+    other_msg = Message(role="assistant", content="别人的台词", actor_id="other")
+    user_msg = Message(role="user", content="问")
+    thread.messages.extend([user_msg, old_msg, other_msg])
+    store.save(s)
+    update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    s2 = store.get(s.id)
+    msgs = s2.threads[0].messages
+    assert msgs[1].character_id == "c1"  # 旧卡对白落到旧卡
+    assert msgs[2].character_id is None  # 其他座位不动
+    assert msgs[0].character_id is None  # 用户消息不算 AI 归属
+    # 已标注的消息不被二次换卡覆盖
+    update_member(s.id, m.id, MemberUpdate(character_id="c1"), request)
+    s3 = store.get(s.id)
+    assert s3.threads[0].messages[1].character_id == "c1"
 
 
 # ---- Galgame 房间 ----

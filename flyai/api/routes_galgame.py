@@ -13,11 +13,15 @@ from typing import Optional
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
+from ..deepseek_tools import DeepSeekToolsClient, usable
+from ..errors import DeepSeekError
 from ..galgame.savepoints import SavePointStore
+from ..metering import billable_chars, make_usage_meter, tts_cost
 from ..sessions.json_store import session_from_dict, session_to_dict
 from ..sessions.resolve import member_character
 from ..tts import DoubaoTtsClient
 from ..tts.protocol import TtsError
+from ..user import ADMIN_UID
 
 logger = logging.getLogger("flyai.galgame.api")
 
@@ -59,7 +63,23 @@ def _galgame_session(state, sc, session_id: str):
         raise HTTPException(404, "会话不存在")
     if getattr(s, "mode", "normal") != "galgame":
         raise HTTPException(400, "该会话不是 Galgame 模式")
+    # 功能权限门槛：admin 恒过；其余用户按配置的最低等级拦截（先于 TTS 缓存）
+    access = getattr(getattr(state, "config", None), "access", None)
+    required = int(getattr(access, "galgame_min_level", 0) or 0) if access else 0
+    level = int(getattr(sc, "level", 0) or 0)
+    if sc.uid != ADMIN_UID and level < required:
+        raise HTTPException(
+            403,
+            "权限等级不足（Galgame 需要 Lv%d，当前 Lv%d）" % (required, level),
+        )
     return s
+
+
+def _tts_price(ds) -> float:
+    try:
+        return max(0.0, float(getattr(ds, "tts_price", 3.0)))
+    except (TypeError, ValueError):
+        return 3.0
 
 
 def _galgame_character(sc, session):
@@ -104,38 +124,78 @@ async def galgame_tts(body: GalgameTtsBody, request: Request):
             "权限等级不足（语音合成需要 Lv%d，当前 Lv%d）"
             % (required_level, user_level),
         )
-    if not (tts.api_key or "").strip():
-        raise HTTPException(400, "未配置豆包语音 API Key，请联系管理员")
+
+    ds = getattr(state.config, "deepseek", None)
+    meter = make_usage_meter(state, sc)
+    price = _tts_price(ds)
+    cost = tts_cost(billable_chars(text), price)
+    if cost > 0 and not meter.available():
+        raise HTTPException(402, "余额不足，请充值")
 
     char, _member = _galgame_character(sc, session)
     bound_voice = getattr(char, "voice", "") or ""
-    speaker = (bound_voice or tts.default_speaker or "").strip()
-    voice_source = "character" if bound_voice else "default"
-    if not speaker:
-        raise HTTPException(400, "未配置默认音色（default_speaker）")
+    engine = ""
+    ds_error = ""
 
-    try:
-        result = await asyncio.wait_for(
-            DoubaoTtsClient(tts).synthesize(text, speaker),
-            timeout=tts.timeout_seconds,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "语音合成超时（%d 秒）" % tts.timeout_seconds)
-    except TtsError as exc:
-        logger.warning("Galgame TTS 服务错误: %s %s", exc.code, exc.message)
-        raise HTTPException(502, "语音合成失败：%s" % (exc.message or exc.code))
-    except Exception as exc:  # 传输层错误
-        logger.exception("Galgame TTS 调用失败")
-        raise HTTPException(502, "语音合成失败：%s: %s"
-                           % (type(exc).__name__, exc))
+    if getattr(tts, "engine", "deepseek") == "deepseek" and usable(ds, "tts"):
+        default_voice = getattr(ds, "tts_voice", "stella")
+        if bound_voice in ("stella", "tide"):
+            speaker, voice_source = bound_voice, "character"
+        else:
+            speaker = default_voice if default_voice in ("stella", "tide") else "stella"
+            voice_source = "default"
+        try:
+            content = await asyncio.wait_for(
+                DeepSeekToolsClient(ds).tts(text, speaker, "wav"),
+                timeout=float(getattr(ds, "timeout_seconds", 60) or 60),
+            )
+        except (DeepSeekError, asyncio.TimeoutError) as exc:
+            logger.warning("Galgame DeepSeek TTS 失败，回退豆包: %s", exc)
+            ds_error = str(exc) or type(exc).__name__
+        else:
+            engine = "deepseek"
+            audio_format = "wav"
+            ext = ".wav"
+            sample_rate = 24000
 
-    audio_format = (tts.format or "mp3").strip()
-    ext = _FORMAT_EXT.get(audio_format, ".mp3")
-    content = result.audio
-    if audio_format == "pcm":
-        from ..tools.tts_tool import pcm_to_wav
+    if not engine:
+        # 回退豆包：只有走这条路才要求豆包 Key
+        if not (tts.api_key or "").strip():
+            raise HTTPException(
+                400,
+                "语音合成不可用：DeepSeek %s，且未配置豆包语音 API Key"
+                % ("调用失败（%s）" % ds_error if ds_error
+                   else "未启用或未配置 Key"),
+            )
+        speaker = (bound_voice or tts.default_speaker or "").strip()
+        voice_source = "character" if bound_voice else "default"
+        if not speaker:
+            raise HTTPException(400, "未配置默认音色（default_speaker）")
 
-        content = pcm_to_wav(content, int(tts.sample_rate))
+        try:
+            result = await asyncio.wait_for(
+                DoubaoTtsClient(tts).synthesize(text, speaker),
+                timeout=tts.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "语音合成超时（%d 秒）" % tts.timeout_seconds)
+        except TtsError as exc:
+            logger.warning("Galgame TTS 服务错误: %s %s", exc.code, exc.message)
+            raise HTTPException(502, "语音合成失败：%s" % (exc.message or exc.code))
+        except Exception as exc:  # 传输层错误
+            logger.exception("Galgame TTS 调用失败")
+            raise HTTPException(502, "语音合成失败：%s: %s"
+                               % (type(exc).__name__, exc))
+
+        engine = "doubao"
+        audio_format = (tts.format or "mp3").strip()
+        ext = _FORMAT_EXT.get(audio_format, ".mp3")
+        content = result.audio
+        sample_rate = int(tts.sample_rate)
+        if audio_format == "pcm":
+            from ..tools.tts_tool import pcm_to_wav
+
+            content = pcm_to_wav(content, sample_rate)
 
     services = {
         "upload_dir": sc.upload_dir,
@@ -148,10 +208,13 @@ async def galgame_tts(body: GalgameTtsBody, request: Request):
         "voice_source": voice_source,
         "text_len": len(text),
         "format": audio_format,
-        "sample_rate": int(tts.sample_rate),
+        "sample_rate": sample_rate,
         "galgame": True,
     }
     saved = save_generated_audio(services, content, ext, audio_meta)
+    # 回退豆包同样按 DeepSeek 字符单价计费
+    meter.charge("tts", billable_chars(text), "字符", cost, engine,
+                 session_id=session.id)
     # 记入进程内 overlay：由 drive 在其保存点合并落盘。端点不能直接 save：
     # 它持有的是磁盘旧实例，会覆盖 drive 内存中尚未落盘的助理内容
     state.galgame_tts_overlay.setdefault(session.id, {})[text] = saved["url"]

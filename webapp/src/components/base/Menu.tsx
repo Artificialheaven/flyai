@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPosition, useDismiss } from './anchored.js'
+import { useOverlayClose } from './overlayStack.js'
 import styles from './Menu.module.css'
 
 export type MenuOption = {
@@ -28,6 +29,7 @@ export const Menu = ({
     { align: 'start', alignOffset: -5, offset: 4 }
   )
   useDismiss(open, [anchorRef, floatingRef], close)
+  useOverlayClose(open, close)
 
   return (
     <>

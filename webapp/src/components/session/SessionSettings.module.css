@@ -1,0 +1,193 @@
+.dialog {
+  --modal-header-gap: 7px;
+  width: 620px;
+  max-height: calc(100vh - 64px);
+  padding: 19px 24px 20px;
+}
+
+.content {
+  display: flex;
+  /* 卡片只有 max-height 没有固定高度：flex-basis 必须按内容撑开，
+     否则内容区被压成 0 高，会话设置看起来是空白。 */
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin-right: -24px;
+  padding: 4px 24px 0;
+  overflow-y: auto;
+}
+
+.section {
+  padding: 10px 0 14px;
+  box-shadow: inset 0 1px 0 0 var(--dsw-alias-border-l2-darkmode-thin);
+}
+
+.section:first-child {
+  box-shadow: none;
+}
+
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 8px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.hint {
+  padding-top: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fieldRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.fieldLabel {
+  flex-shrink: 0;
+  width: 92px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.fieldControl {
+  flex: 1;
+  min-width: 0;
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-bg-primary);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+
+  &:focus-visible {
+    border-color: var(--dsw-alias-button-primary-fill);
+  }
+}
+
+.character {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 8px;
+}
+
+.avatar {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  object-fit: cover;
+}
+
+.avatarFallback {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 16px;
+}
+
+.characterInfo {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.characterName {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.characterSub {
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 2px;
+}
+
+.error {
+  padding-top: 6px;
+  color: var(--dsw-alias-label-error, #e5484d);
+  font-size: 12px;
+  line-height: 18px;
+  word-break: break-word;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.spacer {
+  flex: 1;
+}
+
+@media (max-width: 768px) {
+  .dialog {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+    padding: 16px 16px 18px;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .content {
+    margin-right: -16px;
+    padding: 4px 16px 0;
+  }
+
+  .fieldRow {
+    flex-wrap: wrap;
+  }
+
+  .fieldLabel {
+    width: auto;
+  }
+}

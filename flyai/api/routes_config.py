@@ -2,8 +2,8 @@
 
 - GET /api/config：按当前用户权限过滤不可见模型。
 - PUT /api/config：仅管理员（全局配置）。
-- /api/models/...：每用户自建模型 CRUD（仅可操作归属自己的条目；
-  共享设置仅管理员）。
+- /api/config/test/deepseek：管理员校验 DeepSeek Key（轻量 TTS 探测）。
+- /api/config/providers/...：模型 CRUD 仅管理员（用户只能选择共享模型）。
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
 from ..config import (
+    AccessSettings,
     AppConfig,
+    DeepSeekSettings,
     EmbeddingsConfig,
     ImageGenSettings,
     ImageModelConfig,
@@ -35,16 +37,18 @@ from ..config import (
     MoodSettings,
     ExtTriggerSettings,
     ProactorSettings,
+    RegistrationSettings,
     SelfMemorySettings,
     WatcherSettings,
     mask_api_key,
     save_config,
 )
-from ..models_access import model_visible, visible_image_models, visible_providers
+from ..models_access import visible_image_models, visible_providers
+from ..deepseek_tools import DeepSeekToolsClient
 from ..auth_sessions import resolve_uid
 from ..ids import InvalidName, check_model_id
 from ..user import ADMIN_UID
-from ..errors import ProviderError  # noqa: F401
+from ..errors import DeepSeekError, ProviderError  # noqa: F401
 
 router = APIRouter(prefix="/api", tags=["config"])
 
@@ -66,6 +70,8 @@ class ProviderPayload(BaseModel):
     min_level: Optional[int] = None
     # 计费倍率（普通用户每轮扣 1×rate）；None=不改
     rate: Optional[float] = None
+    # 按 token 计费配置（每 1M token 的点数+时段）；None=不改，{}=关闭
+    pricing: Optional[dict] = None
 
 
 class ImageModelPayload(BaseModel):
@@ -110,6 +116,12 @@ class ConfigPayload(BaseModel):
     mcp: Optional[dict] = None
     ext_trigger: Optional[dict] = None
     watchers: Optional[dict] = None
+    # 功能权限门槛（无密钥，整段读写）
+    access: Optional[dict] = None
+    # DeepSeek 官方服务（含独立 Key，仅 admin 可见/可改）
+    deepseek: Optional[dict] = None
+    # 邀请码注册设置（仅 admin 可见/可改）
+    registration: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -117,6 +129,15 @@ class TestPayload(BaseModel):
 
 
 # ---- 视图 ----
+
+def _merge_pricing(payload_pricing, current):
+    """None=保留原值；空 dict=关闭（回到每轮 rate 计费）；否则写入。"""
+    if payload_pricing is None:
+        return current
+    if not payload_pricing:
+        return None
+    return payload_pricing
+
 
 def _masked_provider(p: ProviderConfig) -> dict:
     d = p.dict()
@@ -137,6 +158,7 @@ def _public_provider(p: ProviderConfig) -> dict:
         "model": p.model,
         "vision": p.vision,
         "rate": p.rate,
+        "pricing": p.pricing.dict() if p.pricing is not None else None,
         "min_level": p.min_level,
     }
 
@@ -168,17 +190,17 @@ def _masked_config(state, uid: Optional[str] = None):
         providers = []
         image_models = []
 
-    # 模型视图：管理员全量；普通用户对「本人自建」拿到可编辑视图（含自己的
-    # base_url/掩码 key），对「他人共享」只拿精简视图（无 URL/归属/key/参数）
+    # 模型视图：管理员全量（可编辑视图）；普通用户只拿共享模型的精简视图
+    # （无 base_url/归属/key/参数），自建模型能力已下线
     provider_views = []
     for p in providers:
-        if uid == ADMIN_UID or p.owner == uid:
+        if uid == ADMIN_UID:
             provider_views.append(_masked_provider(p))
         else:
             provider_views.append(_public_provider(p))
     image_views = []
     for m in image_models:
-        if uid == ADMIN_UID or m.owner == uid:
+        if uid == ADMIN_UID:
             image_views.append(_masked_image_model(m))
         else:
             image_views.append(_public_image_model(m))
@@ -211,6 +233,8 @@ def _masked_config(state, uid: Optional[str] = None):
         # P4：mcp/watchers 不含密钥，同策略对所有登录用户可见
         "mcp": cfg.mcp.dict(),
         "watchers": cfg.watchers.dict(),
+        # 权限门槛不含密钥，对所有登录用户可见（前端据此提示不可用功能）
+        "access": cfg.access.dict(),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -222,6 +246,13 @@ def _masked_config(state, uid: Optional[str] = None):
         ext["token_set"] = bool(ext.get("token"))
         ext["token"] = ""
         out["ext_trigger"] = ext
+        # DeepSeek 独立 Key 仅 admin 可见；普通用户视图完全不含该段
+        ds = cfg.deepseek.dict()
+        ds["key_set"] = bool(ds.get("api_key"))
+        ds["api_key"] = mask_api_key(ds.get("api_key") or "")
+        out["deepseek"] = ds
+        # 注册默认额度仅 admin 可见
+        out["registration"] = cfg.registration.dict()
     return out
 
 
@@ -232,8 +263,14 @@ def _masked_tts(cfg: AppConfig) -> dict:
 
 
 def _credit_key(incoming: str, existing: str) -> str:
-    """若 incoming 是掩码串（用户未改 key），保留原 key。"""
-    if incoming and incoming == mask_api_key(existing) and existing:
+    """若 incoming 为空或掩码串（用户未改 key），保留原 key。
+
+    空串不能当作「清空 key」：前端未编辑 key 时不会回传明文，早先按空串处理
+    会把已保存的 key 抹掉（编辑模型的其它字段也会误伤）。
+    """
+    if not (incoming or "").strip():
+        return existing
+    if incoming == mask_api_key(existing) and existing:
         return existing
     return incoming
 
@@ -266,7 +303,7 @@ def get_config(request: Request):
 def put_config(payload: ConfigPayload, request: Request):
     uid = _uid(request)
     if uid != ADMIN_UID:
-        raise HTTPException(403, "全局配置仅管理员可修改，请使用「我的模型」管理自建模型")
+        raise HTTPException(403, "全局配置仅管理员可修改")
     state = request.app.state.flyai
     cfg = state.config
 
@@ -397,6 +434,20 @@ def put_config(payload: ConfigPayload, request: Request):
         if watcher_mgr is not None:
             watcher_mgr.ext_settings = cfg.ext_trigger
 
+    if payload.access is not None:
+        # 等级由模型校验器统一 clamp 到 0..255
+        cfg.access = AccessSettings.parse_obj(dict(payload.access))
+
+    if payload.deepseek is not None:
+        dd = dict(payload.deepseek)
+        dd["api_key"] = _credit_key(
+            dd.get("api_key", ""), cfg.deepseek.api_key)
+        cfg.deepseek = DeepSeekSettings.parse_obj(dd)
+
+    if payload.registration is not None:
+        # 注册接口每次读 cfg.registration，保存后立即生效
+        cfg.registration = RegistrationSettings.parse_obj(dict(payload.registration))
+
     _persist(state)
     if scheduler_changed:
         # 调度器开关/周期/时区热生效：在运行循环内安排重启
@@ -427,11 +478,35 @@ def activate_provider(provider_id: str, request: Request):
 
 @router.post("/config/test")
 async def test_connection(payload: TestPayload, request: Request):
+    _require_admin(request)
     state = request.app.state.flyai
     provider = state.get_provider(payload.provider_id)
     if provider is None:
         raise HTTPException(400, "提供商不可用")
     return {"ok": True, "message": "连通性检测（v1 简化为状态可用）"}
+
+
+@router.post("/config/test/deepseek")
+async def test_deepseek_key(request: Request):
+    """管理员校验「DeepSeek 服务」里保存的 Key：极短 TTS 探测，不写用量账本。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    ds = getattr(state.config, "deepseek", None)
+    if not (getattr(ds, "api_key", "") or "").strip():
+        return {"ok": False, "message": "未配置 DeepSeek API Key"}
+    try:
+        audio = await DeepSeekToolsClient(ds).tts("好", "stella", "pcm")
+    except DeepSeekError as exc:
+        msg = str(exc) or type(exc).__name__
+        if exc.status_code in (401, 403):
+            msg += "（请到设置 → DeepSeek 服务更新 API Key）"
+        return {"ok": False, "message": "Key 不可用：%s" % msg[:300]}
+    except Exception as exc:  # noqa: BLE001 - 探测失败一律回显原因
+        return {
+            "ok": False,
+            "message": "检测失败：%s: %s" % (type(exc).__name__, str(exc)[:300]),
+        }
+    return {"ok": True, "message": "Key 可用（已合成 %d 字节音频）" % len(audio)}
 
 
 # ---- 用户个人设置（data/{uid}/settings.json，所有登录用户可用）----
@@ -550,20 +625,27 @@ def get_my_quota(request: Request):
 
 # ---- 自建 LLM 提供商 CRUD ----
 
+def _require_admin(request: Request) -> str:
+    """模型管理仅管理员可用；普通用户只能选择已共享的模型。"""
+    uid = _uid(request)
+    if uid != ADMIN_UID:
+        raise HTTPException(403, "模型管理仅管理员可用")
+    return uid
+
+
 def _find_provider(cfg, mid):
     return next((p for p in cfg.providers if p.id == mid), None)
 
 
-def _can_operate(item, uid) -> None:
+def _require_item(item):
     if item is None:
         raise HTTPException(404, "模型不存在")
-    if item.owner != uid and uid != ADMIN_UID:
-        raise HTTPException(403, "只能操作归属自己的模型")
+    return item
 
 
 @router.post("/models/providers")
 def create_provider_model(payload: ProviderPayload, request: Request):
-    uid = _uid(request)
+    uid = _require_admin(request)
     state = request.app.state.flyai
     mid = (payload.id or "").strip() or uuid.uuid4().hex
     try:
@@ -588,6 +670,7 @@ def create_provider_model(payload: ProviderPayload, request: Request):
         shared=False,
         min_level=0,
         rate=(payload.rate if payload.rate is not None else 1.0),
+        pricing=_merge_pricing(payload.pricing, None),
     )
     state.config.providers.append(item)
     _persist(state)
@@ -596,10 +679,9 @@ def create_provider_model(payload: ProviderPayload, request: Request):
 
 @router.put("/models/providers/{mid}")
 def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
-    uid = _uid(request)
+    _require_admin(request)
     state = request.app.state.flyai
-    item = _find_provider(state.config, mid)
-    _can_operate(item, uid)
+    item = _require_item(_find_provider(state.config, mid))
     data = _masked_provider(item)
     merged = {
         "id": item.id,
@@ -615,6 +697,7 @@ def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
         "shared": item.shared,
         "min_level": item.min_level,
         "rate": (payload.rate if payload.rate is not None else item.rate),
+        "pricing": _merge_pricing(payload.pricing, item.pricing),
     }
     new_item = ProviderConfig.parse_obj(merged)
     idx = state.config.providers.index(item)
@@ -625,10 +708,9 @@ def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
 
 @router.delete("/models/providers/{mid}")
 def delete_provider_model(mid: str, request: Request):
-    uid = _uid(request)
+    _require_admin(request)
     state = request.app.state.flyai
-    item = _find_provider(state.config, mid)
-    _can_operate(item, uid)
+    item = _require_item(_find_provider(state.config, mid))
     state.config.providers.remove(item)
     _persist(state)
     return {"ok": True}
@@ -657,7 +739,7 @@ def _find_image_model(cfg, mid):
 
 @router.post("/models/images")
 def create_image_model(payload: ImageModelPayload, request: Request):
-    uid = _uid(request)
+    uid = _require_admin(request)
     state = request.app.state.flyai
     mid = (payload.id or "").strip() or uuid.uuid4().hex
     try:
@@ -685,10 +767,9 @@ def create_image_model(payload: ImageModelPayload, request: Request):
 
 @router.put("/models/images/{mid}")
 def update_image_model(mid: str, payload: ImageModelPayload, request: Request):
-    uid = _uid(request)
+    _require_admin(request)
     state = request.app.state.flyai
-    item = _find_image_model(state.config, mid)
-    _can_operate(item, uid)
+    item = _require_item(_find_image_model(state.config, mid))
     merged = {
         "id": item.id,
         "name": payload.name if payload.name else item.name,
@@ -708,10 +789,9 @@ def update_image_model(mid: str, payload: ImageModelPayload, request: Request):
 
 @router.delete("/models/images/{mid}")
 def delete_image_model(mid: str, request: Request):
-    uid = _uid(request)
+    _require_admin(request)
     state = request.app.state.flyai
-    item = _find_image_model(state.config, mid)
-    _can_operate(item, uid)
+    item = _require_item(_find_image_model(state.config, mid))
     state.config.image_models.remove(item)
     _persist(state)
     return {"ok": True}

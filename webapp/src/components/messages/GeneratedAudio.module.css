@@ -1,0 +1,117 @@
+.audios {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+  margin: 4px 0 12px;
+}
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-bg-layer-2);
+
+  audio {
+    display: none;
+  }
+}
+
+.play {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-brand-primary);
+  color: #fff;
+  cursor: pointer;
+
+  &:hover {
+    opacity: 0.9;
+  }
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.speaker {
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.time {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress {
+  width: 100%;
+  height: 4px;
+  margin: 0;
+  appearance: none;
+  border-radius: 2px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  cursor: pointer;
+  accent-color: var(--dsw-alias-brand-primary);
+
+  &::-webkit-slider-thumb {
+    width: 10px;
+    height: 10px;
+    appearance: none;
+    border-radius: 50%;
+    background-color: var(--dsw-alias-brand-primary);
+  }
+}
+
+.download {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-bg-skeleton);
+    color: var(--dsw-alias-label-primary);
+  }
+}
+
+@media not all and (min-width: 768px) {
+  .audios {
+    max-width: none;
+  }
+}

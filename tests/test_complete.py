@@ -44,6 +44,23 @@ def test_complete_concats_content_ignores_thinking():
     assert out == "大家好，世界"
 
 
+def test_complete_forwards_max_tokens_and_session_id():
+    class _Capture:
+        def __init__(self):
+            self.kwargs = None
+
+        async def stream_chat(self, messages, tool_specs, **kwargs):
+            self.kwargs = dict(kwargs)
+            yield StreamEvent(StreamEventType.CONTENT_DELTA, "ok")
+
+    p = _Capture()
+    out = _run(complete(p, [Message(role="user", content="hi")],
+                        max_tokens=32, session_id="s1"))
+    assert out == "ok"
+    assert p.kwargs["max_tokens"] == 32
+    assert p.kwargs["session_id"] == "s1"
+
+
 def test_extract_json_object():
     assert _extract_json('{"a": 1}') == {"a": 1}
 

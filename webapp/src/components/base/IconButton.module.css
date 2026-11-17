@@ -9,32 +9,32 @@
   background-color: transparent;
   cursor: pointer;
   font-size: 16px;
-  transition: background-color var(--fly-transition-duration) var(--fly-ease-in-out);
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
   outline: none;
 
   &:active:not(:disabled) {
-    background-color: var(--fly-alias-interactive-bg-hover);
+    background-color: var(--dsw-alias-interactive-bg-hover);
   }
 
   @media (hover: hover) {
     &:hover:not(:disabled) {
-      background-color: var(--fly-alias-interactive-bg-hover);
+      background-color: var(--dsw-alias-interactive-bg-hover);
     }
   }
 
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--fly-alias-button-primary-fill);
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
   }
 
   &:disabled {
     cursor: not-allowed;
-    color: var(--fly-alias-label-caption);
+    color: var(--dsw-alias-label-caption);
   }
 }
 
 .xs {
-  width: var(--fly-control-height-xs);
-  height: var(--fly-control-height-xs);
+  width: var(--ds-control-height-xs);
+  height: var(--ds-control-height-xs);
 }
 
 .m {
@@ -43,14 +43,14 @@
 }
 
 .xl {
-  width: var(--fly-control-height-xl);
-  height: var(--fly-control-height-xl);
+  width: var(--ds-control-height-xl);
+  height: var(--ds-control-height-xl);
 }
 
 .tertiary {
-  color: var(--fly-alias-label-tertiary);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .primary {
-  color: var(--fly-alias-label-primary);
+  color: var(--dsw-alias-label-primary);
 }

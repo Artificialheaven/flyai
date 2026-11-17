@@ -1,12 +1,11 @@
 import clsx from 'clsx'
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { useTranslate } from '../../i18n/index.js'
 import { IconCloseOutline16 } from './icons.js'
 import { IconButton } from './IconButton.js'
+import { isTopOverlay, pushOverlay } from './overlayStack.js'
 import styles from './Modal.module.css'
-
-/** 当前打开的弹窗，后打开的在末尾；叠放时 Esc 只关闭最上层 */
-const openModals: object[] = []
 
 /** 遮罩 + 居中卡片，Esc / 点遮罩关闭 */
 export const Modal = ({
@@ -28,20 +27,22 @@ export const Modal = ({
   mainClassName?: string
   onClose: () => void
 }) => {
+  const t = useTranslate()
   const titleId = useId()
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
   useEffect(() => {
-    const token = {}
-    openModals.push(token)
+    const close = () => onCloseRef.current()
+    // Esc 与 Android 返回键共用同一套叠层栈：只关最上层
+    const pop = pushOverlay(close)
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && openModals.at(-1) === token) {
-        onCloseRef.current()
+      if (event.key === 'Escape' && isTopOverlay(close)) {
+        close()
       }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => {
-      openModals.splice(openModals.indexOf(token), 1)
+      pop()
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [])
@@ -66,7 +67,7 @@ export const Modal = ({
               className={styles.close}
               tone="primary"
               icon={<IconCloseOutline16 />}
-              aria-label="关闭"
+              aria-label={t('close')}
               onClick={onClose}
             />
           ) : null}

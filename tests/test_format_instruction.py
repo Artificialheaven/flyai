@@ -42,6 +42,9 @@ def test_format_disabled_omits_instruction():
 
 
 def test_no_card_no_format():
-    # 无角色卡时退化为纯通用助手，不注入格式规则
+    # 无角色卡时退化为通用 AI 助手，不注入格式规则
+    from flyai.lore.query import GENERAL_ASSISTANT_PROMPT
+
     prompt = build_system_prompt(None, None, "你是一个助手。", roleplay=_rp())
-    assert prompt == "你是一个助手。"
+    assert prompt == GENERAL_ASSISTANT_PROMPT + "\n\n你是一个助手。"
+    assert "内置格式规则 Z" not in prompt

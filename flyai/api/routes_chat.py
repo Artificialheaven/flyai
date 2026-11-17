@@ -8,7 +8,7 @@ import binascii
 import logging
 import random
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -35,8 +35,9 @@ from ..proactor.integrate import (
 )
 from ..proactor.live_ctx import had_pending_announce, render_for_turn
 from ..providers.base import StreamEventType
+from ..providers.complete import complete
 from ..tools.loop_tools import LoopFinishTool
-from .. import billing, feature_prefs
+from .. import billing, feature_prefs, metering
 from ..models_access import visible_image_models, visible_providers
 from ..errors import ProviderError
 from ..ids import InvalidName, check_safe_name
@@ -120,7 +121,8 @@ _COMPACT_DIRECTIVE = (
 
 
 async def _summarize_for_compact(provider, head_text: str,
-                                 directive: Optional[str] = None) -> str:
+                                 directive: Optional[str] = None,
+                                 session_id: str = "") -> str:
     """用当前提供商做一次无工具便宜调用归纳头部历史；失败不阻断长跑。"""
     msgs = [
         Message(role="system", content=directive or _COMPACT_DIRECTIVE),
@@ -129,7 +131,8 @@ async def _summarize_for_compact(provider, head_text: str,
     parts: List[str] = []
     try:
         async for ev in provider.stream_chat(
-            msgs, [], deep_thinking=False, max_tokens=800, extra_params=None
+            msgs, [], deep_thinking=False, max_tokens=800, extra_params=None,
+            session_id=session_id,
         ):
             if ev.type == StreamEventType.CONTENT_DELTA:
                 parts.append(ev.text)
@@ -179,7 +182,8 @@ def _loop_extras(custom_extras: list, loop_ctx: Optional[LoopContext]) -> list:
 
 
 def _install_loop_services(services: dict, state, sc, loop_ctx: Optional[LoopContext],
-                           provider, *, loop_starter=None) -> None:
+                           provider, *, loop_starter=None,
+                           session_id: str = "") -> None:
     """把长跑工具服务与引擎钩子注入 services（同一 dict 也给 ToolContext）。
 
     功能开启即注入 loop_manager/settings/starter（普通对话里 AI 也能提交申请）；
@@ -205,7 +209,9 @@ def _install_loop_services(services: dict, state, sc, loop_ctx: Optional[LoopCon
             registry.render("compact") if registry is not None
             else _COMPACT_DIRECTIVE
         )
-        return await _summarize_for_compact(provider, head_text, directive)
+        return await _summarize_for_compact(
+            provider, head_text, directive, session_id=session_id
+        )
 
     services["loop_state"] = _state_hook
     services["loop_compact"] = _compact_hook
@@ -332,14 +338,39 @@ def _keep_start(messages, keep_turns) -> int:
     return positions[-keep_turns]
 
 
+def _belongs_to_speaker(m, member, char_id) -> bool:
+    """该历史消息是否属于本轮发言角色（自动回忆只收本角色的旧对话）。
+
+    用户消息恒算——用户是同一个人，且当前窗口必有该角色在场。
+    AI 消息优先按消息级角色卡 id 归属（换卡后旧消息仍归旧卡）；
+    旧数据无 character_id 时回落座位 actor_id，再回落持久化名字。
+    member=None（旧单聊兼容路径）且无 character_id 时保持旧行为全收。
+    """
+    if m.role == "user":
+        return True
+    cid = (getattr(m, "character_id", "") or "").strip()
+    if cid:
+        return bool(char_id) and cid == char_id
+    if member is not None:
+        actor = (getattr(m, "actor_id", "") or "").strip()
+        if actor:
+            return actor == member.id
+        name = (m.name or "").strip()
+        if name and (member.name or "").strip():
+            return name == member.name.strip()
+    return True
+
+
 async def build_auto_recall_block(*, state, sc, char_id, history, member,
-                                  query, cache_namespace) -> str:
+                                  query, cache_namespace) -> Tuple[str, list]:
     """按用户设置自动召回与本轮相关的旧事实，返回 (注入文本, 条目清单)。
 
     无召回时返回 ("", [])。条目清单元素为 {"source": 来源前缀, "text": 文本}，
     供前端「已召回 N 段记忆」折叠组展示。
-    来源：角色跨会话记忆簿（挂载可见时）+ 当前历史全部消息；
-    与 keep_turns 保留窗去重（窗内已有的消息/事实不重复注入）；
+    来源只限当前窗口（history）中**属于该角色**的旧消息
+    （用户消息 + 本座位/AI 本卡的发言；其它角色的台词不进入候选池）；
+    其它聊天窗口的对话与跨会话记忆簿均不参与自动回忆；
+    与 keep_turns 保留窗去重（窗内已有的消息不重复注入）；
     上限 auto_recall_max 条、合计 _AUTO_RECALL_BUDGET 字。
     """
     settings = getattr(sc, "user_settings", None)
@@ -351,19 +382,6 @@ async def build_auto_recall_block(*, state, sc, char_id, history, member,
 
     from ..memory.recall import Candidate, hybrid_rank
     from ..tools.memory_cache import item_identity
-    from ..tools.memory_tool import (
-        _book_read_mode, _memory_owner,
-    )
-
-    owner = _memory_owner(member) if member is not None else char_id
-    mode = _book_read_mode(member) if member is not None else "ro"
-    book_entries = []
-    if mode in ("rw", "ro"):
-        store = getattr(sc, "char_memory", None)
-        if store is not None:
-            book_entries = [
-                e for e in store.load_book(owner).entries if not e.superseded
-            ]
 
     keep_turns = getattr(settings, "keep_turns", 0) or 0
     start = _keep_start(history, keep_turns)
@@ -373,12 +391,10 @@ async def build_auto_recall_block(*, state, sc, char_id, history, member,
 
     cands = []
     p = 0
-    for e in book_entries:
-        cands.append(Candidate(text=e.text, kind="book", position=p,
-                               importance=e.importance, entry_id=e.id, obj=e))
-        p += 1
     for idx, m in enumerate(history):
         if m.role not in ("user", "assistant") or m.hidden:
+            continue
+        if not _belongs_to_speaker(m, member, char_id):
             continue
         text = (m.content or "").strip()
         if not text:
@@ -409,11 +425,11 @@ async def build_auto_recall_block(*, state, sc, char_id, history, member,
     items = []
     used = 0
     for cand, _score in ranked:
-        if cand.kind == "message" and cand.obj >= start:
+        if cand.obj >= start:
             continue  # 保留窗内，模型本轮已经看得到
         if cand.text[:24] and cand.text[:24] in window_text:
             continue  # 与保留窗内容重复
-        prefix = "记忆簿" if cand.kind == "book" else "旧对话·" + cand.who
+        prefix = "旧对话·" + cand.who
         line = "- （{0}）{1}".format(prefix, cand.text)
         if used + len(line) > _AUTO_RECALL_BUDGET:
             continue
@@ -522,6 +538,122 @@ def _schedule_extraction(state, sc, char_id, marker_key, history, member,
     except RuntimeError:
         pass
 
+
+# ---- 首轮自动标题 ----
+# 首条用户消息后，后台让当前 AI 拟一个短标题替换「新会话/消息前缀」。
+# 不阻塞回复、不计费、失败静默；生成期间用户若改过标题则放弃覆盖。
+_AUTO_TITLE_PROMPT = (
+    "你是会话标题生成器。根据用户的第一条消息，为这段对话拟一个简短标题。"
+    "要求：概括主题或意图，不超过 20 个字，使用与用户消息相同的语言；"
+    "只输出标题本身，不要引号、书名号、句末标点或任何解释。"
+    "消息只有图片或内容极少时，输出「图片分享」。"
+)
+_AUTO_TITLE_MAX_CHARS = 20
+_AUTO_TITLE_MAX_TOKENS = 64
+_AUTO_TITLE_WRAPPERS = ("「」", "『』", "“”", "\"\"", "《》", "【】", "''")
+_AUTO_TITLE_TAIL_PUNCT = "。．.!！?？~～…、，,;；:："
+
+
+def _is_default_title(title: str) -> bool:
+    """标题仍是系统默认值（未由用户显式命名）。"""
+    t = (title or "").strip()
+    return not t or t == "新会话" or t.startswith("群聊·")
+
+
+def _count_user_messages(session) -> int:
+    """会话内可见（非 hidden）用户消息数；群聊跨全部窗口统计。"""
+    threads = getattr(session, "threads", None) or []
+    source = []
+    if threads:
+        for t in threads:
+            source.extend(t.messages)
+    else:
+        source = list(session.messages)
+    return sum(
+        1 for m in source
+        if m.role == "user" and not getattr(m, "hidden", False)
+    )
+
+
+def _clean_auto_title(text: str) -> str:
+    """取模型输出的第一行，剥成对引号/书名号与句末标点，截断到上限。"""
+    for line in (text or "").splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        for prefix in ("标题：", "标题:"):
+            if t.startswith(prefix):
+                t = t[len(prefix):].strip()
+        for pair in _AUTO_TITLE_WRAPPERS:
+            if len(t) >= 2 and t[0] == pair[0] and t[-1] == pair[1]:
+                t = t[1:-1].strip()
+                break
+        t = t.rstrip(_AUTO_TITLE_TAIL_PUNCT)
+        t = " ".join(t.split())
+        return t[:_AUTO_TITLE_MAX_CHARS].strip()
+    return ""
+
+
+def _title_provider(state, sc, speakers, req, provider):
+    """首轮标题调用用哪个提供商：首个座位专属模型 > 请求默认。
+
+    默认模型缺失/不可见时静默返回 None（标题是可选增强，不能影响请求本身）。
+    """
+    spk = speakers[0] if speakers else None
+    try:
+        if spk is not None and (spk.provider_id or "").strip():
+            return _resolve_visible_provider(state, sc, spk.provider_id)
+        if provider is not None:
+            return provider
+        return _resolve_visible_provider(
+            state, sc, getattr(req, "provider_id", None)
+        )
+    except HTTPException:
+        return None
+
+
+def _schedule_auto_title(*, sc, run, session_id: str, provider,
+                         first_text: str, expected_title: str) -> None:
+    """后台生成首轮标题并落库；仅在标题仍等于 expected_title 时覆盖。
+
+    store.get() → set_title → save() 之间不得有 await：单事件循环线程内
+    该片段相对 drive 的同步落盘是原子的，避免把生成期间的编辑覆盖掉。
+    不能用 save_merged（title 属合并字段，会被磁盘旧值还原）。
+    """
+    if provider is None or not session_id:
+        return
+    seed = (first_text or "").strip() or "（用户发送了一张图片）"
+
+    async def _job():
+        try:
+            raw = await complete(
+                provider,
+                [Message(role="user", content=seed)],
+                system_prompt=_AUTO_TITLE_PROMPT,
+                max_tokens=_AUTO_TITLE_MAX_TOKENS,
+                session_id=session_id,
+            )
+            title = _clean_auto_title(raw)
+            if not title:
+                return
+            fresh = sc.store.get(session_id)
+            if fresh is None or fresh.title != expected_title:
+                return  # 会话已删或标题已被用户改过：不覆盖
+            fresh.set_title(title)
+            sc.store.save(fresh)
+            if run is not None and run.status == "running":
+                await run.emit("session_title", {
+                    "session_id": session_id,
+                    "title": title,
+                })
+        except Exception:
+            logger.exception("自动标题生成失败 sid=%s", session_id)
+
+    try:
+        asyncio.create_task(_job())
+    except RuntimeError:
+        pass
+
 # 图片输入约束
 _ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 _MAX_IMAGES = 4
@@ -614,6 +746,20 @@ def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
     if exists:
         raise HTTPException(403, "你的权限等级不足以使用该模型")
     raise HTTPException(400, "未配置可用提供商，请在设置中添加")
+
+
+def _billing_tzname(state) -> str:
+    """计费时段/流水日期使用的时区（与定时任务一致）。"""
+    try:
+        return state.config.scheduler.timezone or "Asia/Shanghai"
+    except AttributeError:
+        return "Asia/Shanghai"
+
+
+def _usage_ledger(sc):
+    """该用户的用量流水文件；简易测试里没有 settings_path 时返回 None。"""
+    base = getattr(sc, "settings_path", None)
+    return base.parent / "usage.jsonl" if base is not None else None
 
 
 # 跳过语外层壳对（剥到稳定为止）
@@ -862,6 +1008,8 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
             extra_names={t.name for t in loop_extras},
+            level=getattr(sc, "level", 0),
+            is_admin=(sc.uid == ADMIN_UID),
         )
         if hasattr(_registry, "all") else None
     )
@@ -885,6 +1033,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     # TTS：角色卡绑定音色 + 当前用户等级（工具内解析/鉴权）
     services["tts_voice"] = getattr(character, "voice", "") or ""
     services["user_level"] = getattr(sc, "level", 0)
+    # DeepSeek 官方服务配置 + 按量计费（搜索/抓取/TTS 工具使用）
+    services["deepseek_settings"] = getattr(state.config, "deepseek", None)
+    services["usage_meter"] = metering.make_usage_meter(state, sc)
     if character or world:
         services["lore"] = _get_querier(sc, character, world)
     # 图生图自动取参考图：让工具扫历史
@@ -917,7 +1068,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         services["chromium_search"] = _get_sb() if _get_sb else None
     # 角色卡自带属性时即启用（不再受全局开关限制）；
     # 旧卡回退全局 list 的逻辑在 resolve_attribute_defs 内已含开关判断
-    attr_defs = resolve_attribute_defs(character, eff_roleplay)
+    attr_defs = resolve_attribute_defs(character, eff_roleplay) if character is not None else []
     if attr_defs:
         services["attributes"] = AttributeManager(session, attr_defs)
     # P2 长跑：功能开启即注入工具服务；loop_ctx 存在时再加引擎四个钩子
@@ -925,6 +1076,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         _install_loop_services(
             services, state, sc, loop_ctx, provider,
             loop_starter=_make_loop_starter(state, sc, run_manager),
+            session_id=session.id,
         )
     # P3 自我记忆/承诺工具服务（按各自开关）
     _install_proactor_services(services, state, sc)
@@ -937,9 +1089,16 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     try:
         # 图片参数先校验（非法直接 400，不能消耗对话次数），再扣费
         images = _build_images(req)
-        # 计费：先扣本轮费用（管理员免扣）；余额不足抛 402，随 except 释放会话锁
-        cost = billing.provider_rate(provider)
-        billing.charge_or_402(state, sc.uid, cost)
+        # 计费：按 token 计费的模型开轮前只要求余额 > 0，回复完成后按实际
+        # 用量结算；其余模型沿用每轮固定扣费（管理员免扣）。余额不足抛 402，
+        # 随 except 释放会话锁
+        token_billed = billing.has_pricing(provider)
+        cost = 0.0
+        if token_billed:
+            billing.precheck_or_402(state, sc.uid)
+        else:
+            cost = billing.provider_rate(provider)
+            billing.charge_or_402(state, sc.uid, cost)
         # 追加用户消息；首条用户消息自动设为标题
         session.messages.append(
             Message(
@@ -959,6 +1118,13 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         run.mark_failed()
         run_manager.unlock_session(session.id, run)
         raise
+
+    # 首轮自动标题：标题此刻是消息前缀（上面刚设），AI 结果仅在未被改动时覆盖
+    if user_count == 1:
+        _schedule_auto_title(
+            sc=sc, run=run, session_id=session.id, provider=provider,
+            first_text=req.message or "", expected_title=session.title,
+        )
 
     async def drive():
         try:
@@ -1065,9 +1231,21 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
+                    if token_billed:
+                        # 按实际 token 结算并写用量流水（失败/取消未到 done，不扣）
+                        billing.settle_usage(
+                            state, sc.uid, provider, data.get("usage"),
+                            session_id=session.id,
+                            ledger_path=_usage_ledger(sc),
+                            tzname=_billing_tzname(state),
+                        )
                     done_data = data
                 else:
                     await run.emit(ev, data)
+            # 本轮 assistant 落角色卡 id（旧单聊路径；自动回忆按角色过滤用）
+            for m in session.messages[recall_head:]:
+                if m.role == "assistant":
+                    m.character_id = session.character_id or ""
             # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
             _attach_recall(session.messages, recall_head, "", recall_items)
             # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
@@ -1251,6 +1429,17 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
 
     world = effective_world(session, sc.lore)
     is_galgame = getattr(session, "mode", "normal") == "galgame"
+    # Galgame 等级门槛：admin 恒过；低于门槛的用户不能通过已有房间继续玩
+    if is_galgame and sc.uid != ADMIN_UID:
+        _access = getattr(state.config, "access", None)
+        _required = int(getattr(_access, "galgame_min_level", 0) or 0) if _access else 0
+        _level = int(getattr(sc, "level", 0) or 0)
+        if _level < _required:
+            raise HTTPException(
+                403,
+                "权限等级不足（Galgame 需要 Lv%d，当前 Lv%d）"
+                % (_required, _level),
+            )
 
     # 用户功能偏好与全局默认合并（工具/扮演/各功能开关）；管理员无覆盖字段
     _us = getattr(sc, "user_settings", None)
@@ -1271,6 +1460,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 | set(getattr(session, "disabled_tools", None) or [])
             ),
             extra_names={t.name for t in loop_extras},
+            level=getattr(sc, "level", 0),
+            is_admin=(sc.uid == ADMIN_UID),
         )
         if hasattr(_registry, "all") else None
     )
@@ -1312,13 +1503,13 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     # 否则错误会埋成后台 SSE error，发起请求只拿到 200。
     # 顺带按最终使用的提供商收集每个座位的计费倍率（群聊逐个累计）。
     speaker_rates = {}
+    speaker_priced = {}
     for pre in speakers:
         if (pre.provider_id or "").strip():
             # 显式指定座位 provider：不存在/不可见在这里直接 4xx（保持原预检语义）
             pre_provider = _resolve_visible_provider(state, sc, pre.provider_id)
-            speaker_rates[pre.id] = billing.provider_rate(pre_provider)
         elif provider is not None:
-            speaker_rates[pre.id] = billing.provider_rate(provider)
+            pre_provider = provider
         else:
             # 房间默认 provider 仍是懒解析（drive 内才报 400/403；全部座位自带
             # provider 时允许没有默认）。这里只静默取倍率，取不到按 1.0，
@@ -1328,13 +1519,23 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 or getattr(state.config, "active_provider", "")
                 or ""
             ).strip()
-            cfg = next(
+            pre_provider = next(
                 (p for p in visible_providers(state.config, sc.uid, sc.level)
                  if p.id == wanted),
                 None,
             )
-            speaker_rates[pre.id] = getattr(cfg, "rate", 1.0) if cfg else 1.0
-    total_cost = sum(speaker_rates.values())
+        speaker_rates[pre.id] = (
+            billing.provider_rate(pre_provider)
+            if pre_provider is not None else 1.0
+        )
+        speaker_priced[pre.id] = (
+            pre_provider is not None and billing.has_pricing(pre_provider)
+        )
+    # 按 token 计费的座位不预扣（事后按实际用量结算），只有旧费率座位计入
+    total_cost = sum(
+        rate for mid, rate in speaker_rates.items() if not speaker_priced[mid]
+    )
+    any_priced = any(speaker_priced.values())
 
     # 权威 check-and-set：独占会话后再落用户消息；抢锁失败时未做任何变更
     run = run_manager.create(sc.uid, session.id, thread.id)
@@ -1375,9 +1576,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             if resume_call_id not in known_calls:
                 raise HTTPException(400, "对应的选项调用不存在或已失效")
 
-        # 计费：校验通过后一次性预扣全部发言座位的费用；
-        # 跳过/失败/取消的座位在 drive 内退回
-        billing.charge_or_402(state, sc.uid, total_cost)
+        # 计费：校验通过后一次性预扣旧费率座位的费用（跳过/失败/取消在
+        # drive 内退回）；有按 token 计费的座位时只要求余额 > 0，事后结算
+        if any_priced:
+            billing.precheck_or_402(state, sc.uid)
+        if total_cost > 0:
+            billing.charge_or_402(state, sc.uid, total_cost)
 
         if edit_id:
             mode = versions.MODE_EDIT
@@ -1425,6 +1629,16 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             # 修复此前因重启中断、失去 tool 响应的 assistant（否则直接 400）
             history[:] = _heal_dangling_tool_calls(history)
             sc.store.save_merged(session)
+            # 首轮自动标题：会话内第一条可见用户消息且标题仍是系统默认值时
+            # 才让 AI 拟标题（用户给房间起过名的保持原样）
+            if (_count_user_messages(session) == 1
+                    and _is_default_title(session.title)):
+                _schedule_auto_title(
+                    sc=sc, run=run, session_id=session.id,
+                    provider=_title_provider(state, sc, speakers, req, provider),
+                    first_text=req.message or "",
+                    expected_title=session.title,
+                )
     except Exception:
         run.mark_failed()
         run_manager.unlock_session(session.id, run)
@@ -1500,6 +1714,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 services["watcher_manager"] = getattr(state, "watcher_manager", None)
                 services["tts_voice"] = getattr(char, "voice", "") or ""
                 services["user_level"] = getattr(sc, "level", 0)
+                # DeepSeek 官方服务配置 + 按量计费（搜索/抓取/TTS 工具使用）
+                services["deepseek_settings"] = getattr(
+                    state.config, "deepseek", None
+                )
+                services["usage_meter"] = metering.make_usage_meter(state, sc)
                 if char or world:
                     services["lore"] = _get_querier(sc, char, world)
                 # 图生图自动取参考图：让工具能扫该窗口历史
@@ -1538,6 +1757,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         loop_ctx if spk is speakers[0] else None,
                         spk_provider,
                         loop_starter=_make_loop_starter(state, sc, run_manager),
+                        session_id=session.id,
                     )
                 # P3 自我记忆/承诺工具服务（按各自开关；member 取本座位）
                 _install_proactor_services(services, state, sc, spk)
@@ -1554,8 +1774,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 if feature_prefs.feature_enabled("web", state.config, _us):
                     _get_sb = getattr(state, "get_search_browser", None)
                     services["chromium_search"] = _get_sb() if _get_sb else None
-                # 属性跟踪：该 AI 角色卡定义了属性即启用，值落在 member.attributes
-                member_attr_defs = resolve_attribute_defs(char, eff_roleplay)
+                # 属性跟踪：该 AI 角色卡定义了属性即启用，值落在 member.attributes；
+                # 无角色卡的座位不挂属性管理器（无提示词说明，挂载只会造成失控写入）
+                member_attr_defs = resolve_attribute_defs(char, eff_roleplay) if char is not None else []
                 if member_attr_defs:
                     services["attributes"] = AttributeManager(spk, member_attr_defs)
                 # Galgame：资产库 / 场景态 / 选项撮合等专用上下文
@@ -1647,6 +1868,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 只有显式回「略」等跳过关字，才算真正的需要跳过。
                 head_snapshot = len(history)
                 done_data = None
+                # 重试会真实消耗 token：按座位累计每轮 attempt 的用量
+                usage_acc = {"prompt_tokens": 0, "completion_tokens": 0,
+                             "cached_tokens": 0}
                 retry_nudge = ""
                 attempts = 0
                 skipped = False
@@ -1709,12 +1933,22 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     ):
                         if ev == "done":
                             done_data = data
+                            attempt_usage = (data or {}).get("usage") or {}
+                            for ukey in usage_acc:
+                                try:
+                                    usage_acc[ukey] += int(
+                                        attempt_usage.get(ukey) or 0)
+                                except (TypeError, ValueError):
+                                    pass
                         else:
                             await run.emit(ev, data)
                     # 给本轮追加的 assistant 回复打上发言者标记（含中间的工具步）。
+                    # character_id 落盘：座位换卡后旧消息仍归旧卡，自动回忆
+                    # 按角色 id 过滤时不会把旧卡的对白算给新卡。
                     for m in history[before:]:
                         if m.role == "assistant":
                             m.name = spk.name
+                            m.character_id = spk.character_id or ""
                     ender = history[before:][-1] if history[before:] else None
                     ender_txt = (
                         (ender.content or "").strip()
@@ -1750,12 +1984,21 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
                 if not skipped:
                     _attach_recall(history, head_snapshot, spk.id, recall_items)
-                # 结算本座位：跳过（回复「略」）的退回其费用，正常完成的仅从 unspent 移除
-                if skipped:
-                    billing.refund(state, sc.uid, speaker_rates[spk.id])
-                unspent -= speaker_rates[spk.id]
-                if done_data:
-                    session.add_usage(done_data.get("usage"))
+                # 结算本座位：旧费率座位跳过（回复「略」）的退回其费用，正常完成的
+                # 仅从 unspent 移除；按 token 计费的座位用累计实际用量结算
+                if any(usage_acc.values()):
+                    session.add_usage(usage_acc)
+                    if speaker_priced.get(spk.id):
+                        billing.settle_usage(
+                            state, sc.uid, spk_provider, usage_acc,
+                            session_id=session.id,
+                            ledger_path=_usage_ledger(sc),
+                            tzname=_billing_tzname(state),
+                        )
+                if not speaker_priced.get(spk.id):
+                    if skipped:
+                        billing.refund(state, sc.uid, speaker_rates[spk.id])
+                    unspent -= speaker_rates[spk.id]
                 # 每个 AI 之后发一个 done（terminal=False，前端只记录用量不收尾）；
                 # 最后一位发言者的 done 才结束整个运行
                 fan_done = dict(done_data or {"reason": "stop", "iterations": attempts})
@@ -2008,6 +2251,9 @@ async def memory_snapshot(rid: str, request: Request,
             # 存档动作：即使座位未挂载/只读，也强制写进角色记忆簿
             services["book_force_write"] = True
             services["llm_provider"] = spk_provider
+            # DeepSeek 官方服务配置 + 按量计费（快照里的工具调用同样计费）
+            services["deepseek_settings"] = getattr(state.config, "deepseek", None)
+            services["usage_meter"] = metering.make_usage_meter(state, sc)
             _get_emb = getattr(state, "get_embedder", None)
             services["embedder"] = _get_emb() if _get_emb else None
 

@@ -1,4 +1,4 @@
-"""配置接口：key 遮蔽显示、掩码串兑现、按权限过滤、自建模型 CRUD。"""
+"""配置接口：key 遮蔽显示、掩码串兑现、按权限过滤、管理员模型 CRUD。"""
 
 import os
 import sys
@@ -28,9 +28,11 @@ from flyai.api.routes_config import (
 )
 from flyai.config import (
     AppConfig,
+    DeepSeekSettings,
     EmbeddingsConfig,
     ImageModelConfig,
     ProviderConfig,
+    TtsSettings,
     load_config,
     mask_api_key,
 )
@@ -254,7 +256,8 @@ def test_user_low_level_get_filtered(tmp_path):
     assert mids == {"img-open"}  # img-gated 完全消失
     # 他人共享模型：只露必要字段，不下发 base_url/归属/api_key/参数
     p = view["providers"][0]
-    assert set(p.keys()) == {"id", "model", "vision", "rate", "min_level"}
+    assert set(p.keys()) == {"id", "model", "vision", "rate", "pricing",
+                             "min_level"}
     assert p["model"] == "deepseek-chat"
     m = view["image_models"][0]
     assert set(m.keys()) == {"id", "name", "model", "min_level"}
@@ -264,23 +267,6 @@ def test_user_low_level_get_filtered(tmp_path):
     assert view["galgame"]["enabled"] is True
 
 
-def test_user_sees_full_fields_for_own_models(tmp_path):
-    """本人自建模型仍可拿到 base_url/掩码 key（编辑自己的模型不受影响）。"""
-    state = _mkstate(tmp_path)
-    state.user_store.add("u10", level=10)
-    state.config.providers.append(
-        ProviderConfig(id="mine", base_url="https://mine.example/v1",
-                       api_key="my-secret", model="my-model",
-                       owner="u10", shared=False)
-    )
-    view = get_config(_req(state, "u10"))
-    mine = next(p for p in view["providers"] if p["id"] == "mine")
-    assert mine["base_url"] == "https://mine.example/v1"
-    assert mine["owner"] == "u10"
-    assert mine["api_key"] == mask_api_key("my-secret")
-    # 管理员的共享模型在同一视图里仍脱敏
-    shared = next(p for p in view["providers"] if p["id"] == "deepseek")
-    assert "base_url" not in shared and "owner" not in shared
 
 
 def test_user_boundary_level_sees_gated(tmp_path):
@@ -317,16 +303,33 @@ def test_unknown_uid_rejected(tmp_path):
     assert ei.value.status_code == 401
 
 
-# ---- 普通用户：自建 LLM CRUD ----
+# ---- 模型管理：仅管理员可 CRUD ----
 
-def test_user_provider_crud(tmp_path):
+def test_user_provider_crud_forbidden(tmp_path):
+    """用户自建模型能力已下线：普通用户无法新建/修改/删除任何模型。"""
     state = _mkstate(tmp_path)
     state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        create_provider_model(ProviderPayload(
+            base_url="https://mine.example/v1", api_key="my-key", model="my-model",
+        ), _req(state, "u10"))
+    assert ei.value.status_code == 403
+    with pytest.raises(HTTPException) as ei:
+        update_provider_model("deepseek", ProviderPayload(model="x"),
+                              _req(state, "u10"))
+    assert ei.value.status_code == 403
+    with pytest.raises(HTTPException) as ei:
+        delete_provider_model("deepseek", _req(state, "u10"))
+    assert ei.value.status_code == 403
+
+
+def test_admin_provider_crud(tmp_path):
+    state = _mkstate(tmp_path)
     created = create_provider_model(ProviderPayload(
         base_url="https://mine.example/v1", api_key="my-key",
         model="my-model", vision=True,
-    ), _req(state, "u10"))
-    assert created["owner"] == "u10"
+    ), _req(state))
+    assert created["owner"] == ADMIN_UID
     assert created["shared"] is False
     assert created["api_key"] == mask_api_key("my-key")
     item = next(p for p in state.config.providers if p.id == created["id"])
@@ -336,13 +339,27 @@ def test_user_provider_crud(tmp_path):
     updated = update_provider_model(item.id, ProviderPayload(
         base_url="https://mine.example/v1", api_key=mask_api_key("my-key"),
         model="my-model-2",
-    ), _req(state, "u10"))
+    ), _req(state))
     assert updated["model"] == "my-model-2"
     assert next(p for p in state.config.providers if p.id == item.id).api_key == "my-key"
 
     # 删除
-    assert delete_provider_model(item.id, _req(state, "u10"))["ok"]
+    assert delete_provider_model(item.id, _req(state))["ok"]
     assert all(p.id != item.id for p in state.config.providers)
+
+
+def test_update_provider_blank_key_keeps_existing(tmp_path):
+    """未填 key（空串）不能抹掉已保存的 key——编辑其它字段也走同一路径。"""
+    state = _mkstate(tmp_path)
+    created = create_provider_model(ProviderPayload(
+        base_url="https://mine.example/v1", api_key="my-key", model="my-model",
+    ), _req(state))
+    update_provider_model(created["id"], ProviderPayload(
+        base_url="https://mine.example/v1", api_key="", model="my-model-2",
+    ), _req(state))
+    item = next(p for p in state.config.providers if p.id == created["id"])
+    assert item.api_key == "my-key"
+    assert item.model == "my-model-2"
 
 
 @pytest.mark.parametrize("bad_id", [
@@ -350,39 +367,43 @@ def test_user_provider_crud(tmp_path):
 ])
 def test_create_provider_bad_id_rejected(tmp_path, bad_id):
     state = _mkstate(tmp_path)
-    state.user_store.add("u10", level=10)
     with pytest.raises(HTTPException) as ei:
         create_provider_model(ProviderPayload(
             id=bad_id, base_url="https://x", api_key="k", model="m",
-        ), _req(state, "u10"))
+        ), _req(state))
     assert ei.value.status_code == 400
 
 
 def test_create_image_model_bad_id_rejected(tmp_path):
     state = _mkstate(tmp_path)
-    state.user_store.add("u10", level=10)
     with pytest.raises(HTTPException) as ei:
         create_image_model(ImageModelPayload(
             id="a/b", name="x", base_url="https://x", api_key="k", model="m",
-        ), _req(state, "u10"))
+        ), _req(state))
     assert ei.value.status_code == 400
 
 
 def test_user_cannot_touch_other_users_model(tmp_path):
+    """旧归属模型（历史上由普通用户创建）现仅管理员能改。"""
     state = _mkstate(tmp_path)
     state.user_store.add("u10", level=10)
     state.user_store.add("u20", level=20)
-    created = create_provider_model(ProviderPayload(
-        base_url="https://mine.example/v1", api_key="k", model="m",
-    ), _req(state, "u10"))
+    state.config.providers.append(ProviderConfig(
+        id="mine", base_url="https://mine.example/v1", api_key="k",
+        model="m", owner="u10", shared=False,
+    ))
     with pytest.raises(HTTPException) as ei:
-        update_provider_model(created["id"], ProviderPayload(
+        update_provider_model("mine", ProviderPayload(
             base_url="https://mine.example/v1", api_key="k", model="m2",
         ), _req(state, "u20"))
     assert ei.value.status_code == 403
     with pytest.raises(HTTPException) as ei:
-        delete_provider_model(created["id"], _req(state, "u20"))
+        delete_provider_model("mine", _req(state, "u20"))
     assert ei.value.status_code == 403
+    # 管理员仍可管理既有条目
+    assert update_provider_model("mine", ProviderPayload(model="m3"),
+                                 _req(state))["model"] == "m3"
+    assert delete_provider_model("mine", _req(state))["ok"]
 
 
 def test_share_only_admin(tmp_path):
@@ -408,27 +429,44 @@ def test_share_clamps_level(tmp_path):
     assert out["min_level"] == 255
 
 
-# ---- 普通用户：自建行生图模型 CRUD ----
+# ---- 生图模型：仅管理员可 CRUD ----
 
-def test_user_image_model_crud(tmp_path):
+def test_user_image_model_crud_forbidden(tmp_path):
     state = _mkstate(tmp_path)
     state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        create_image_model(ImageModelPayload(
+            name="我的生图", base_url="https://mine.ark/v3",
+            api_key="my-img-key", model="seedream-x",
+        ), _req(state, "u10"))
+    assert ei.value.status_code == 403
+    with pytest.raises(HTTPException) as ei:
+        update_image_model("img-open", ImageModelPayload(name="x"),
+                           _req(state, "u10"))
+    assert ei.value.status_code == 403
+    with pytest.raises(HTTPException) as ei:
+        delete_image_model("img-open", _req(state, "u10"))
+    assert ei.value.status_code == 403
+
+
+def test_admin_image_model_crud(tmp_path):
+    state = _mkstate(tmp_path)
     created = create_image_model(ImageModelPayload(
         name="我的生图", base_url="https://mine.ark/v3",
         api_key="my-img-key", model="seedream-x",
-    ), _req(state, "u10"))
-    assert created["owner"] == "u10" and created["shared"] is False
+    ), _req(state))
+    assert created["owner"] == ADMIN_UID and created["shared"] is False
     mid = created["id"]
 
     updated = update_image_model(mid, ImageModelPayload(
         name="我的生图2", base_url="https://mine.ark/v3",
         api_key=mask_api_key("my-img-key"), model="seedream-y",
-    ), _req(state, "u10"))
+    ), _req(state))
     assert updated["name"] == "我的生图2" and updated["model"] == "seedream-y"
     item = next(m for m in state.config.image_models if m.id == mid)
     assert item.api_key == "my-img-key"
 
-    assert delete_image_model(mid, _req(state, "u10"))["ok"]
+    assert delete_image_model(mid, _req(state))["ok"]
     assert all(m.id != mid for m in state.config.image_models)
 
 
@@ -450,6 +488,27 @@ def test_activate_visibility_check(tmp_path):
     with pytest.raises(HTTPException) as ei:
         activate_provider("gated", _req(state, "u10"))
     assert ei.value.status_code == 404
+
+
+def test_user_seat_provider_must_be_visible(tmp_path):
+    """群聊座位不能指向对本人不可见的模型（含等级门槛与未共享）。"""
+    from flyai.api.routes_room import _apply_member_seat_settings
+
+    state = _mkstate(tmp_path)
+    sc = SimpleNamespace(uid="u10", level=10)
+    seat = SimpleNamespace(provider_id=None)
+    with pytest.raises(HTTPException) as ei:
+        _apply_member_seat_settings(state, sc, seat, "gated", None, None)
+    assert ei.value.status_code == 403
+    _apply_member_seat_settings(state, sc, seat, "deepseek", None, None)
+    assert seat.provider_id == "deepseek"
+    # 未共享模型即使归属本人也不可用（自建能力已下线）
+    state.config.providers.append(ProviderConfig(
+        id="mine", base_url="x", model="m", owner="u10", shared=False,
+    ))
+    with pytest.raises(HTTPException) as ei:
+        _apply_member_seat_settings(state, sc, seat, "mine", None, None)
+    assert ei.value.status_code == 403
 
 
 # ---- 保存配置后工具热重建（无需重启）----
@@ -627,3 +686,225 @@ def test_ext_trigger_section_hidden_from_non_admin(tmp_path):
     # 无密钥的 mcp/watchers 段仍对所有登录用户下发
     assert view["mcp"]["enabled"] is False
     assert view["watchers"]["max_per_session"] == 5
+
+
+# ---- 权限门槛：不含密钥，对所有用户下发；等级 clamp ----
+
+def test_access_section_roundtrip_visible_to_all(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(access={
+        "browser_min_level": 50,
+        "pixiv_min_level": 30,
+        "galgame_min_level": 20,
+        "agent_min_level": 60,
+    }), _req(state))
+    assert state.config.access.browser_min_level == 50
+    assert state.config.access.agent_min_level == 60
+    on_disk = load_config(tmp_path / "config.json")
+    assert on_disk.access.pixiv_min_level == 30
+
+    # 普通用户也能读到门槛（前端据此禁用入口）
+    state.user_store.add("u10", level=10)
+    view = get_config(_req(state, "u10"))
+    assert view["access"]["galgame_min_level"] == 20
+    assert view["access"]["browser_min_level"] == 50
+
+
+def test_access_levels_clamped(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(access={
+        "browser_min_level": 999,
+        "pixiv_min_level": -5,
+        "galgame_min_level": "x",
+        "agent_min_level": 255,
+    }), _req(state))
+    acc = state.config.access
+    assert acc.browser_min_level == 255
+    assert acc.pixiv_min_level == 0
+    assert acc.galgame_min_level == 0
+    assert acc.agent_min_level == 255
+
+
+# ---- DeepSeek Key：仅 admin 可见，掩码下发，空 Key 保留 ----
+
+def test_deepseek_admin_only_masked(tmp_path):
+    state = _mkstate(tmp_path)
+    state.config.deepseek = DeepSeekSettings(api_key="sk-ds-secret",
+                                             base_url="https://ds.example")
+    view = get_config(_req(state))
+    ds = view["deepseek"]
+    assert ds["api_key"] == mask_api_key("sk-ds-secret")
+    assert ds["api_key"] != "sk-ds-secret"
+    assert ds["key_set"] is True
+    assert ds["base_url"] == "https://ds.example"
+    assert "sk-ds-secret" not in str(view)
+
+    # 未配置 Key 时 key_set=False、api_key 为空串
+    state2 = _mkstate(tmp_path / "s2")
+    view2 = get_config(_req(state2))
+    assert view2["deepseek"]["key_set"] is False
+    assert view2["deepseek"]["api_key"] == ""
+
+
+def test_deepseek_section_hidden_from_non_admin(tmp_path):
+    state = _mkstate(tmp_path)
+    state.config.deepseek = DeepSeekSettings(api_key="sk-ds-secret",
+                                             search_price=8.0)
+    state.user_store.add("u10", level=10)
+    view = get_config(_req(state, "u10"))
+    assert "deepseek" not in view
+    assert "sk-ds-secret" not in str(view)
+
+
+def test_deepseek_put_roundtrip_and_key_credit(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(deepseek={
+        "enabled": True,
+        "api_key": "sk-ds-secret",
+        "base_url": "https://api.deepseek.com/",
+        "proxy": " http://127.0.0.1:7897 ",
+        "timeout_seconds": 500,
+        "search_enabled": False,
+        "search_price": 8.0,
+        "tts_price": 4.5,
+        "tts_voice": "tide",
+    }), _req(state))
+    ds = state.config.deepseek
+    assert ds.api_key == "sk-ds-secret"
+    assert ds.base_url == "https://api.deepseek.com"  # 尾斜杠被去掉
+    assert ds.proxy == "http://127.0.0.1:7897"  # strip
+    assert ds.timeout_seconds == 300  # clamp 上限
+    assert ds.search_enabled is False
+    assert ds.search_price == 8.0
+    assert ds.tts_price == 4.5
+    assert ds.tts_voice == "tide"
+    assert load_config(tmp_path / "config.json").deepseek.api_key == "sk-ds-secret"
+
+    # 再次保存时前端下发掩码串 → 兑现回真实 Key
+    put_config(ConfigPayload(deepseek={
+        "enabled": True,
+        "api_key": mask_api_key("sk-ds-secret"),
+        "search_price": 6.0,
+    }), _req(state))
+    assert state.config.deepseek.api_key == "sk-ds-secret"
+    assert state.config.deepseek.search_price == 6.0
+
+    # 空 Key 保存同样保留原 Key（编辑其它字段）
+    put_config(ConfigPayload(deepseek={"enabled": True, "api_key": "",
+                                       "search_price": 7.0}), _req(state))
+    assert state.config.deepseek.api_key == "sk-ds-secret"
+    assert state.config.deepseek.search_price == 7.0
+
+
+# ---- DeepSeek Key 探测（设置 → DeepSeek 服务的「测试」按钮）----
+
+def test_deepseek_test_admin_only(tmp_path):
+    import asyncio
+
+    from flyai.api.routes_config import test_deepseek_key
+
+    state = _mkstate(tmp_path)
+    state.config.deepseek = DeepSeekSettings(api_key="sk-ds-secret")
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(test_deepseek_key(_req(state, "u10")))
+    assert ei.value.status_code == 403
+
+
+def test_deepseek_test_without_key(tmp_path):
+    import asyncio
+
+    from flyai.api.routes_config import test_deepseek_key
+
+    state = _mkstate(tmp_path)
+    out = asyncio.run(test_deepseek_key(_req(state)))
+    assert out["ok"] is False and "未配置" in out["message"]
+
+
+def test_deepseek_test_ok_and_failure(tmp_path, monkeypatch):
+    import asyncio
+
+    import flyai.api.routes_config as rc
+
+    state = _mkstate(tmp_path)
+    state.config.deepseek = DeepSeekSettings(api_key="sk-ds-secret")
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        async def tts(self, text, voice, fmt):
+            calls.append((text, voice, fmt))
+            return b"\x00\x01" * 10
+
+    monkeypatch.setattr(rc, "DeepSeekToolsClient", _FakeClient)
+    out = asyncio.run(rc.test_deepseek_key(_req(state)))
+    assert out["ok"] is True and "20" in out["message"]
+    assert calls == [("好", "stella", "pcm")]
+
+    class _BadClient(_FakeClient):
+        async def tts(self, text, voice, fmt):
+            raise rc.DeepSeekError("Authentication Fails, invalid key",
+                                   status_code=401)
+
+    monkeypatch.setattr(rc, "DeepSeekToolsClient", _BadClient)
+    out = asyncio.run(rc.test_deepseek_key(_req(state)))
+    assert out["ok"] is False
+    assert "Key 不可用" in out["message"] and "Authentication" in out["message"]
+    assert "DeepSeek 服务" in out["message"]
+
+
+def test_deepseek_bad_url_and_voice_sanitized(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(deepseek={
+        "api_key": "k", "base_url": "ftp://bad", "tts_voice": "ghost",
+        "search_price": -3,
+    }), _req(state))
+    ds = state.config.deepseek
+    assert ds.base_url == "https://api.deepseek.com"
+    assert ds.tts_voice == "stella"
+    assert ds.search_price == 0.0
+
+
+# ---- TTS 引擎选择持久化 ----
+
+def test_tts_engine_persisted(tmp_path):
+    state = _mkstate(tmp_path)
+    assert state.config.tts.engine == "deepseek"  # 默认 DeepSeek
+    put_config(ConfigPayload(tts={
+        "enabled": True, "api_key": "k", "engine": "doubao",
+    }), _req(state))
+    assert state.config.tts.engine == "doubao"
+    assert load_config(tmp_path / "config.json").tts.engine == "doubao"
+    view = get_config(_req(state))
+    assert view["tts"]["engine"] == "doubao"
+
+    # 非法值回落到 deepseek
+    put_config(ConfigPayload(tts={"engine": "ghost"}), _req(state))
+    assert state.config.tts.engine == "deepseek"
+
+
+# ---- 邀请码注册默认额度 ----
+
+def test_registration_default_quota_admin_only(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(registration={"default_quota": 12}), _req(state))
+    assert state.config.registration.default_quota == 12
+    view = get_config(_req(state))
+    assert view["registration"] == {"default_quota": 12}
+    # 落盘后重新加载仍保留
+    assert load_config(tmp_path / "config.json").registration.default_quota == 12
+
+    state.user_store.add("u10", level=0)
+    assert "registration" not in get_config(_req(state, "u10"))
+
+
+def test_registration_default_quota_normalized(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(registration={"default_quota": -5}), _req(state))
+    assert state.config.registration.default_quota == 0
+    put_config(ConfigPayload(registration={"default_quota": -1}), _req(state))
+    assert state.config.registration.default_quota == -1
+    put_config(ConfigPayload(registration={"default_quota": "oops"}), _req(state))
+    assert state.config.registration.default_quota == 0

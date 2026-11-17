@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import uuid
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, Dict, List, Optional
 
 import httpx
 
 from ..config import ProviderConfig
 from ..errors import ProviderError
 from ..schemas import Message, ToolCall
+
+
+def gateway_headers(base_url: str, session_id: str = "") -> Dict[str, str]:
+    """网关类中转（base_url 含 opencode）要求的会话头。
+
+    ``x-opencode-session`` 标识同一段对话，上游据此做会话粘滞；
+    没有 FlyAI 会话 ID 的旁路调用（摘要、生图参数生成等）退回一次性 ID。
+    """
+    if "opencode" not in (base_url or "").lower():
+        return {}
+    return {"x-opencode-session": session_id or uuid.uuid4().hex}
 
 
 class StreamEventType(str, Enum):
@@ -58,9 +70,20 @@ class BaseProvider(ABC):
         )
 
     def _assert_key_ascii(self) -> None:
-        """HTTP 头不允许非 ASCII，提前给出清晰错误而非底层崩溃。"""
-        if any(ord(c) > 127 for c in self.cfg.api_key):
+        """校验 API Key：空 key 会让 ``Authorization: Bearer `` 触发 httpx
+        LocalProtocolError，非 ASCII 同样不是合法头值，提前给出清晰错误。"""
+        key = self.cfg.api_key or ""
+        if not key.strip():
+            raise ProviderError(
+                "该模型未配置 API Key，请在「模型设置」中填写后重试",
+                status_code=400,
+            )
+        if any(ord(c) > 127 for c in key):
             raise ProviderError("API Key 含非 ASCII 字符，请在设置中检查", status_code=400)
+
+    def _gateway_headers(self, session_id: str = "") -> Dict[str, str]:
+        """按 base_url 判断是否需要网关专属请求头（当前仅 opencode）。"""
+        return gateway_headers(self.cfg.base_url, session_id)
 
     async def aclose(self) -> None:
         await self._client.aclose()

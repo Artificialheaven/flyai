@@ -20,3 +20,11 @@ class ConfigError(FlyAIError):
 
 class ToolError(FlyAIError):
     """工具执行时的参数错误，由 registry 捕获后转为失败 ToolResult。"""
+
+
+class DeepSeekError(FlyAIError):
+    """DeepSeek 官方接口错误；调用方通常据此回退现有实现。"""
+
+    def __init__(self, message, status_code: int = None):
+        super().__init__(message)
+        self.status_code = status_code

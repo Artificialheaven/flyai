@@ -1,10 +1,11 @@
 """联网工具：web_search 检索 + web_fetch 抓页面，由当前会话 AI 自主编排。
 
-- web_search(query)：向 Bing 请求结果（国内直连 cn.bing.com；配了代理走
-  www.bing.com），解析出标题 / 真实 URL / 摘要，以编号列表返回。
-  不抓取正文、不开子线程。
-- web_fetch(url)：抓取单个网页，编码探测 + HTML 提纯为 markdown 文本，
-  截断到配置的 max_page_chars。
+- web_search(query)：优先走 DeepSeek 官方搜索接口；未配置/失败时回退 Bing
+  （国内直连 cn.bing.com；配了代理走 www.bing.com），解析出标题 / 真实 URL /
+  摘要，以编号列表返回。不抓取正文、不开子线程。
+- web_fetch(url)：优先走 DeepSeek 官方抓取接口；未配置/失败时回退 httpx
+  直抓，编码探测 + HTML 提纯为 markdown 文本，截断到配置的 max_page_chars。
+- 两者成功后按 DeepSeek 单价计费（回退实现同样计费）；缓存分页命中免费。
 
 主 AI 自己阅读搜索摘要、判断相关性，决定对哪些 URL（通常 1~3 条）调用
 web_fetch，然后基于抓取到的内容作答。
@@ -26,6 +27,9 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from ..config import WebSearchSettings
+from ..deepseek_tools import DeepSeekToolsClient, usable
+from ..errors import DeepSeekError
+from ..metering import per_success_cost
 from ..netguard import (
     BlockedHost,
     is_blocked_host,
@@ -77,16 +81,49 @@ class WebSearchTool(Tool):
         if not query:
             return ToolResult(ok=False, output="[参数错误] 请提供搜索关键词（query）")
 
+        services = ctx.services or {}
+        ds = services.get("deepseek_settings")
+        meter = services.get("usage_meter")
+        price = _price(ds, "search_price", 5.0)
+        if meter is not None and price > 0 and not meter.available():
+            return ToolResult(ok=False, output="[余额不足，请充值]")
+
+        # DeepSeek 官方搜索优先；失败/未配置时回退现有 Bing/Chromium 实现
+        if usable(ds, "search"):
+            result = await self._run_deepseek(query, ds)
+            if result is not None:
+                _charge(meter, "search", price, "deepseek")
+                return result
+
         if getattr(self.settings, "engine", "chromium") == "chromium":
-            return await self._run_chromium(query, ctx)
-        if getattr(self.settings, "search_engine", "bing") == "baidu":
-            return ToolResult(
+            result = await self._run_chromium(query, ctx)
+        elif getattr(self.settings, "search_engine", "bing") == "baidu":
+            result = ToolResult(
                 ok=False,
                 output="[参数错误] 百度搜索仅支持 Chromium 引擎：请在设置中把"
                        "「搜索方式」改为 Chromium，或把搜索引擎改回 Bing",
             )
+        else:
+            result = await self._run_http(query)
+        if result.ok:
+            # 回退实现同样按 DeepSeek 搜索单价计费
+            _charge(meter, "search", price, "fallback")
+        return result
 
-        return await self._run_http(query)
+    async def _run_deepseek(self, query: str, ds) -> Optional[ToolResult]:
+        """DeepSeek 搜索；不可用/无结果返回 None，由调用方回退。"""
+        count = max(3, min(int(self.settings.results_num or 8), 10))
+        try:
+            raw = await DeepSeekToolsClient(ds).search(query, count)
+        except DeepSeekError as exc:
+            logger.warning("DeepSeek 搜索失败，回退: %s", exc)
+            return None
+        results = _normalize_deepseek_results(raw)
+        if not results:
+            logger.info("DeepSeek 搜索无结果，回退")
+            return None
+        logger.info("web_search(deepseek) 完成: results=%d", len(results))
+        return ToolResult(ok=True, output=_format_results(query, results))
 
     async def _run_chromium(self, query: str, ctx: ToolContext) -> ToolResult:
         """真实浏览器打开搜索引擎；百度遇验证码自动回退 Bing。"""
@@ -278,50 +315,65 @@ class WebFetchTool(Tool):
         cache = services.get("page_cache")
         page_size = int(self.settings.max_page_chars or 6000)
 
-        # 缓存命中（同一段正文 10 分钟内）：直接分页，不重复下载
+        # 缓存命中（同一段正文 10 分钟内）：直接分页，不重复下载（不计费）
         entry = cache.get(url) if cache is not None else None
         if entry is None:
-            proxy = (self.settings.proxy or "").strip() or None
-            started = time.monotonic()
-            logger.info("web_fetch 开始: url=%s proxy=%s", url, proxy or "直连")
+            ds = services.get("deepseek_settings")
+            meter = services.get("usage_meter")
+            price = _price(ds, "fetch_price", 5.0)
+            if meter is not None and price > 0 and not meter.available():
+                return ToolResult(ok=False, output="[余额不足，请充值]")
 
-            # follow_redirects=False：手动跟随重定向，逐跳检查目标主机（防重定向 SSRF）
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0),
-                follow_redirects=False,
-                proxy=proxy,
-            ) as client:
+            # DeepSeek 官方抓取优先；失败/未配置时回退 httpx 直抓
+            fetched = await self._fetch_deepseek(url, ds) if usable(ds, "fetch") else None
+            if fetched is not None:
+                kind, title, final_url, full_text = fetched
+                engine = "deepseek"
+            else:
+                proxy = (self.settings.proxy or "").strip() or None
+                logger.info("web_fetch 开始: url=%s proxy=%s", url, proxy or "直连")
+
+                # follow_redirects=False：手动跟随重定向，逐跳检查目标主机（防重定向 SSRF）
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(30.0),
+                    follow_redirects=False,
+                    proxy=proxy,
+                ) as client:
+                    try:
+                        resp, final_url = await _fetch_with_redirect_checks(client, url)
+                    except Exception as exc:
+                        logger.warning("网页抓取失败: %s: %s", type(exc).__name__, exc)
+                        return ToolResult(
+                            ok=False,
+                            output=f"[工具错误] 网页抓取失败: {type(exc).__name__}: {exc}",
+                        )
+
+                    if resp.status_code >= 400:
+                        logger.info("web_fetch %s -> HTTP %d", url, resp.status_code)
+                        return ToolResult(
+                            ok=False, output=f"[工具错误] 网页返回 HTTP {resp.status_code}"
+                        )
+                    ctype = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                    if len(resp.content) > _MAX_FETCH_BYTES:
+                        return ToolResult(ok=False, output="[工具错误] 内容过大（超过 10MB）")
+
                 try:
-                    resp, final_url = await _fetch_with_redirect_checks(client, url)
-                except Exception as exc:
-                    logger.warning("网页抓取失败: %s: %s", type(exc).__name__, exc)
-                    return ToolResult(
-                        ok=False,
-                        output=f"[工具错误] 网页抓取失败: {type(exc).__name__}: {exc}",
-                    )
-
-                if resp.status_code >= 400:
-                    logger.info("web_fetch %s -> HTTP %d", url, resp.status_code)
-                    return ToolResult(
-                        ok=False, output=f"[工具错误] 网页返回 HTTP {resp.status_code}"
-                    )
-                ctype = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-                if len(resp.content) > _MAX_FETCH_BYTES:
-                    return ToolResult(ok=False, output="[工具错误] 内容过大（超过 10MB）")
-
-            try:
-                kind, title, full_text, enc = _convert_payload(resp, ctype)
-            except ValueError as exc:
-                return ToolResult(ok=False, output=f"[工具错误] {exc}")
-            if not full_text:
-                return ToolResult(ok=False, output="[工具错误] 没有可提取的正文内容")
+                    kind, title, full_text, enc = _convert_payload(resp, ctype)
+                except ValueError as exc:
+                    return ToolResult(ok=False, output=f"[工具错误] {exc}")
+                if not full_text:
+                    return ToolResult(ok=False, output="[工具错误] 没有可提取的正文内容")
+                engine = "fallback"
 
             # 以最终 URL 缓存完整正文（redirect 之后的地址）
             if cache is not None:
                 cache.put(final_url, full_text)
+            if meter is not None:
+                # 回退抓取同样按 DeepSeek 抓取单价计费
+                meter.charge("fetch", 1, "次", per_success_cost(price), engine)
             logger.info(
-                "web_fetch 抓取完成: %s -> %s, 全文 %d 字符 (enc=%s, %.1fs)",
-                final_url, kind, len(full_text), enc, time.monotonic() - started,
+                "web_fetch 抓取完成(%s): %s -> %s, 全文 %d 字符",
+                engine, final_url, kind, len(full_text),
             )
         else:
             # 翻页：从缓存取，kind/title 用默认网页标签即可
@@ -354,6 +406,57 @@ class WebFetchTool(Tool):
         logger.info("web_fetch 分页: %s offset=%d 返 %d 字 / 共 %d",
                     final_url, offset, len(chunk), total)
         return ToolResult(ok=True, output=output)
+
+    async def _fetch_deepseek(
+        self, url: str, ds
+    ) -> Optional[Tuple[str, str, str, str]]:
+        """DeepSeek 抓取；失败/无正文返回 None，由调用方回退 httpx 直抓。"""
+        try:
+            page = await DeepSeekToolsClient(ds).fetch(url)
+        except DeepSeekError as exc:
+            logger.warning("DeepSeek 抓取失败，回退: %s", exc)
+            return None
+        content = (page.get("content") or "").strip()
+        if not content:
+            logger.info("DeepSeek 抓取无正文，回退")
+            return None
+        return "html", page.get("title") or "", url, content
+
+
+def _price(ds, attr: str, default: float) -> float:
+    """DeepSeek 单价；未注入配置段时用默认价。"""
+    try:
+        return max(0.0, float(getattr(ds, attr, default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _charge(meter, kind: str, price_per_1000: float, engine: str) -> None:
+    """计费失败不影响工具结果，只记日志。"""
+    if meter is None:
+        return
+    try:
+        meter.charge(kind, 1, "次", per_success_cost(price_per_1000), engine)
+    except Exception:  # noqa: BLE001 - 计量是旁路，不能打断搜索结果
+        logger.warning("按次计费失败: kind=%s", kind, exc_info=True)
+
+
+def _normalize_deepseek_results(raw: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """兼容 DeepSeek 返回的常见字段名。"""
+    out: List[Dict[str, str]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or "").strip()
+        url = str(item.get("url") or item.get("link") or "").strip()
+        snippet = str(
+            item.get("snippet") or item.get("content")
+            or item.get("description") or ""
+        ).strip()
+        if not title and not url:
+            continue
+        out.append({"title": title or url, "url": url, "snippet": snippet})
+    return out
 
 
 # ---- Bing 搜索 ----

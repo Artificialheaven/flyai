@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPosition, useDismiss } from './anchored.js'
 import { IconCheckOutline16, IconChevronDownOutline14 } from './icons.js'
+import { useOverlayClose } from './overlayStack.js'
 import styles from './Select.module.css'
 
 export type SelectOption<T extends string> = { value: T; label: string; lang?: string }
@@ -37,6 +38,7 @@ export const Select = <T extends string>({
   >(open, { align: 'end', maxHeight: 320, minSpace: 160 })
   // Esc 只关菜单，不让外层弹窗一起关闭
   useDismiss(open, [anchorRef, floatingRef], () => setOpen(false), { captureEscape: true })
+  useOverlayClose(open, () => setOpen(false))
 
   return (
     <>

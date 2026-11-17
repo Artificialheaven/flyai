@@ -65,6 +65,8 @@ class Message:
     thinking: Optional[str] = None
     # 提供商原生思考块（Anthropic 带 signature，多轮工具调用回放必需）
     thinking_blocks: Optional[List[Dict[str, Any]]] = None
+    # 本轮思考总用时（秒）：历史回读据此展示「已思考（用时 N 秒）」；旧数据为 None
+    thinking_secs: Optional[float] = None
     # assistant 消息的工具调用列表
     tool_calls: Optional[List[ToolCall]] = None
     # role=tool 时对应的调用 id
@@ -78,6 +80,10 @@ class Message:
     # 群聊发言座位 id：该消息（含同一回合的工具调用/结果）由哪个 AI 座位产生。
     # 必须落盘：刷新/重启后 _actor_view 靠它把别人的工具回合与思考隔离开
     actor_id: Optional[str] = None
+    # 产生该 AI 消息的角色卡 id：座位换卡后旧消息仍归属旧卡，
+    # 自动回忆据此按角色 id 过滤（同座位不同卡不互相串回忆）。
+    # 旧数据可能为空，消费方需回落到 actor_id / name 判断
+    character_id: Optional[str] = None
     # 本轮自动召回的记忆条目（仅前端折叠组展示用；发给模型时各适配器忽略，
     # 召回正文已在当时拼进系统提示词）
     recall: Optional[List[Dict[str, Any]]] = None
@@ -98,12 +104,14 @@ class Message:
             "content": self.content,
             "thinking": self.thinking,
             "thinking_blocks": self.thinking_blocks,
+            "thinking_secs": self.thinking_secs,
             "tool_calls": [c.to_dict() for c in self.tool_calls] if self.tool_calls else None,
             "tool_call_id": self.tool_call_id,
             "name": self.name,
             "ok": self.ok,
             "hidden": self.hidden,
             "actor_id": self.actor_id,
+            "character_id": self.character_id,
             "recall": self.recall,
             "images": [i.to_dict() for i in self.images] if self.images else None,
             "tombstone": self.tombstone,
@@ -118,6 +126,7 @@ class Message:
             content=data.get("content"),
             thinking=data.get("thinking"),
             thinking_blocks=data.get("thinking_blocks"),
+            thinking_secs=data.get("thinking_secs"),
             tool_calls=[ToolCall.from_dict(c) for c in calls] if calls else None,
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
@@ -125,6 +134,7 @@ class Message:
             # 保留 None：from_dict→to_dict 必须幂等，heal 用签名比对识别孤儿消息
             hidden=data.get("hidden"),
             actor_id=data.get("actor_id"),
+            character_id=data.get("character_id"),
             recall=data.get("recall"),
             images=(
                 [ImageAttachment.from_dict(i) for i in data.get("images")]

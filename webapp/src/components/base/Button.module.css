@@ -16,11 +16,11 @@
   user-select: none;
   outline: none;
   transition:
-    background-color var(--fly-transition-duration) var(--fly-ease-in-out),
-    opacity var(--fly-transition-duration) var(--fly-ease-in-out);
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    opacity var(--ds-transition-duration) var(--ds-ease-in-out);
 
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--fly-alias-button-primary-fill);
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
   }
 
   &:disabled {
@@ -30,11 +30,11 @@
 }
 
 .l {
-  height: var(--fly-control-height-l);
+  height: var(--ds-control-height-l);
 }
 
 .m {
-  height: var(--fly-control-height-m);
+  height: var(--ds-control-height-m);
   gap: 4px;
 
   svg {
@@ -44,7 +44,7 @@
 }
 
 .s {
-  height: var(--fly-control-height-s);
+  height: var(--ds-control-height-s);
   min-width: 58px;
 }
 
@@ -53,45 +53,45 @@
 }
 
 .primary {
-  color: var(--fly-alias-label-primary-foreground);
-  background-color: var(--fly-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+  background-color: var(--dsw-alias-button-primary-fill);
 
   &:hover:not(:disabled) {
-    background-color: var(--fly-alias-button-primary-hover);
+    background-color: var(--dsw-alias-button-primary-hover);
   }
 }
 
 .outlined {
-  color: var(--fly-alias-label-primary);
+  color: var(--dsw-alias-label-primary);
   background-color: transparent;
-  border-color: var(--fly-alias-border-l2);
+  border-color: var(--dsw-alias-border-l2);
   font-weight: 400;
 
   &:hover:not(:disabled) {
-    background-color: var(--fly-alias-interactive-bg-hover);
+    background-color: var(--dsw-alias-interactive-bg-hover);
   }
 }
 
 .danger {
-  color: var(--fly-static-neutral-bluish-00);
-  background-color: var(--fly-alias-state-error-primary);
+  color: var(--dsw-static-neutral-bluish-00);
+  background-color: var(--dsw-alias-state-error-primary);
 
   &:hover:not(:disabled) {
-    background-color: var(--fly-alias-state-error-secondary);
+    background-color: var(--dsw-alias-state-error-secondary);
   }
 }
 
 .dangerOutlined {
-  color: var(--fly-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
   background-color: transparent;
-  border-color: var(--fly-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-primary);
   font-weight: 400;
 
   &:hover:not(:disabled) {
-    background-color: var(--fly-alias-interactive-bg-hover-danger);
+    background-color: var(--dsw-alias-interactive-bg-hover-danger);
   }
 
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--fly-alias-state-error-primary);
+    box-shadow: 0 0 0 2px var(--dsw-alias-state-error-primary);
   }
 }

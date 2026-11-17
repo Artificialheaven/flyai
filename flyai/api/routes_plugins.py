@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from .. import feature_prefs
+from ..user import ADMIN_UID
 
 router = APIRouter(prefix="/api", tags=["plugins"])
 
@@ -35,7 +36,13 @@ def list_tools(request: Request):
     # 输入框「⋯ → 工具」清单以此为准，前端不重复权限规则
     sc = state.user(request)
     _us = getattr(sc, "user_settings", None)
-    allowed = feature_prefs.allowed_tool_names(state.registry, state.config, _us)
+    allowed = feature_prefs.allowed_tool_names(
+        state.registry,
+        state.config,
+        _us,
+        level=getattr(sc, "level", 0),
+        is_admin=(sc.uid == ADMIN_UID),
+    )
     return {
         "tools": [
             {

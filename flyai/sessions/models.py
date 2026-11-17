@@ -132,6 +132,8 @@ class Session:
     max_tokens: int = 0
     # 本窗口禁用的工具注册名（与请求级 disabled_tools 取并集，服务端强制）
     disabled_tools: List[str] = field(default_factory=list)
+    # 仅列表摘要使用（不落盘）：所有窗口消息数之和
+    message_count: int = 0
 
     def __post_init__(self):
         if not self.id:
@@ -147,13 +149,15 @@ class Session:
         p = int(usage.get("prompt_tokens") or 0)
         c = int(usage.get("completion_tokens") or 0)
         t = int(usage.get("total_tokens") or (p + c))
-        if not (p or c or t):
+        hit = int(usage.get("cached_tokens") or 0)
+        if not (p or c or t or hit):
             return
         cur = self.token_usage or {}
         self.token_usage = {
             "prompt_tokens": int(cur.get("prompt_tokens") or 0) + p,
             "completion_tokens": int(cur.get("completion_tokens") or 0) + c,
             "total_tokens": int(cur.get("total_tokens") or 0) + t,
+            "cached_tokens": int(cur.get("cached_tokens") or 0) + hit,
         }
 
     def member(self, mid: str) -> Optional[RoomMember]:
@@ -202,4 +206,13 @@ def bootstrap_room(session: Session) -> Thread:
     )
     session.threads = [thread]
     session.messages = []
+    # 旧消息都是这个唯一 AI 生成的：补记座位与角色卡归属，
+    # 之后换卡/自动回忆按角色 id 过滤时不会把旧卡对白算给新卡
+    for msg in thread.messages:
+        if msg.role != "assistant":
+            continue
+        if not (msg.actor_id or "").strip():
+            msg.actor_id = ai.id
+        if not (msg.character_id or "").strip():
+            msg.character_id = session.character_id or ""
     return thread

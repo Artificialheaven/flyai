@@ -192,6 +192,28 @@ class UserStore:
         u.quota_used = max(0.0, u.quota_used - max(0.0, float(cost)))
         self._save()
 
+    def add_quota(self, uid: str, amount: float) -> float:
+        """增加额度（CDK 兑换）：无限额度保持 -1；返回归一后的总额。"""
+        u = self._users.get(uid)
+        if u is None:
+            raise ValueError("用户不存在")
+        amount = max(0.0, float(amount))
+        if u.quota_total != -1:
+            u.quota_total += amount
+            self._save()
+        return u.quota_total
+
+    def add_used(self, uid: str, cost: float) -> None:
+        """按 token 实际用量的结算：直接累加 used（调用方已做余额预检）。"""
+        u = self._users.get(uid)
+        if u is None:
+            return
+        cost = max(0.0, float(cost))
+        if cost <= 0:
+            return
+        u.quota_used += cost
+        self._save()
+
 
 @dataclass
 class UserSettings:

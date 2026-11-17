@@ -33,14 +33,16 @@ HISTORY_TAIL = 10
 
 
 async def _complete_capped(provider, messages: List[Message],
-                           system_prompt: str, max_tokens: int) -> str:
+                           system_prompt: str, max_tokens: int,
+                           session_id: str = "") -> str:
     request_messages: List[Message] = []
     if system_prompt:
         request_messages.append(Message(role="system", content=system_prompt))
     request_messages.extend(messages)
     parts: List[str] = []
     async for ev in provider.stream_chat(
-        request_messages, tool_specs=[], max_tokens=max_tokens
+        request_messages, tool_specs=[], max_tokens=max_tokens,
+        session_id=session_id,
     ):
         if ev.type == StreamEventType.CONTENT_DELTA and ev.text:
             parts.append(ev.text)
@@ -127,7 +129,8 @@ async def fire(state, uid: str, session_id: str, *, kind: str, brief: str,
                 "background": kind,
             })
             text = await _complete_capped(
-                provider, messages, system_prompt, int(max_tokens)
+                provider, messages, system_prompt, int(max_tokens),
+                session_id=session.id,
             )
             text = (text or "").strip()
             silent = allow_silent and text.startswith(SILENT_MARKER)
@@ -138,6 +141,7 @@ async def fire(state, uid: str, session_id: str, *, kind: str, brief: str,
                 await run.emit("content_delta", {"text": text})
                 thread.messages.append(Message(
                     role="assistant", content=text, actor_id=speaker.id,
+                    character_id=speaker.character_id or "",
                 ))
             sc.store.save(session)
             await run.emit("done", {

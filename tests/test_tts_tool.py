@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import pytest
 
-from flyai.config import TtsSettings
+from flyai.config import DeepSeekSettings, TtsSettings
+from flyai.errors import DeepSeekError
+from flyai.tools import tts_tool as tts_mod
 from flyai.tools.base import ToolContext
 from flyai.tools.tts_tool import TextToSpeechTool, pcm_to_wav
 
@@ -313,3 +315,170 @@ def test_pcm_to_wav_header():
     data_size = struct.unpack("<I", wav[40:44])[0]
     assert data_size == len(pcm)
     assert wav[44:] == pcm
+
+
+# ---- DeepSeek 主路径 / 回退 / 计费 ----
+
+_WAV = b"RIFFFAKE-DS-WAV"
+
+
+class _FakeDsClient:
+    calls = []
+    fail = False
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    async def tts(self, text, voice, fmt):
+        _FakeDsClient.calls.append((text, voice, fmt))
+        if _FakeDsClient.fail:
+            raise DeepSeekError("upstream down", status_code=502)
+        return _WAV
+
+
+@pytest.fixture
+def fake_ds(monkeypatch):
+    _FakeDsClient.calls = []
+    _FakeDsClient.fail = False
+    monkeypatch.setattr(tts_mod, "DeepSeekToolsClient", _FakeDsClient)
+    return _FakeDsClient
+
+
+class _Meter:
+    def __init__(self, available=True):
+        self._available = available
+        self.charges = []
+
+    def available(self):
+        return self._available
+
+    def charge(self, kind, quantity, unit, cost, engine="", session_id=""):
+        self.charges.append((kind, quantity, unit, cost, engine))
+        return cost
+
+
+def _ds(**kw):
+    kw.setdefault("api_key", "sk-ds")
+    return DeepSeekSettings(**kw)
+
+
+def _meta(result):
+    return json.loads(
+        re.search(r"^\[语音参数\] (\{.*\})$", result.output, re.M).group(1)
+    )
+
+
+def test_deepseek_success_saves_wav_and_bills(tmp_path, fake_ds):
+    tool = _tool(default_speaker="S_DEFAULT")
+    captured = _patch_synthesize(tool, returns=_tts_result())
+    meter = _Meter()
+    ctx = _ctx(tmp_path, deepseek_settings=_ds(tts_voice="tide"),
+              usage_meter=meter)
+    result = asyncio.run(tool.run({"text": "「你好。」"}, ctx))
+
+    assert result.ok
+    assert fake_ds.calls == [("「你好。」", "tide", "wav")]
+    assert "speaker" not in captured  # 未走豆包
+    m = re.fullmatch(
+        r"\[语音已生成] (/uploads/u/tts_.+\.wav)",
+        result.output.splitlines()[0],
+    )
+    assert m
+    assert (tmp_path / os.path.basename(m.group(1))).read_bytes() == _WAV
+    info = _meta(result)
+    assert info["speaker"] == "tide" and info["voice_source"] == "default"
+    assert info["format"] == "wav" and info["sample_rate"] == 24000
+    # 10 计费字符 × 3 元/万字符
+    assert meter.charges == [("tts", 10, "字符", pytest.approx(0.003),
+                              "deepseek")]
+
+
+def test_deepseek_voice_mapping(tmp_path, fake_ds):
+    tool = _tool(default_speaker="S_DEFAULT")
+    ds = _ds(tts_voice="tide")
+
+    # 显式参数合法 → arg
+    asyncio.run(tool.run(
+        {"text": "你好", "speaker": "stella"},
+        _ctx(tmp_path, deepseek_settings=ds)))
+    # 参数非法 → 角色卡绑定 tide
+    asyncio.run(tool.run(
+        {"text": "你好", "speaker": "S_ARG"},
+        _ctx(tmp_path, deepseek_settings=ds, tts_voice="tide")))
+    # 参数与绑定都非法 → 默认 tide
+    result = asyncio.run(tool.run(
+        {"text": "你好"},
+        _ctx(tmp_path, deepseek_settings=ds, tts_voice="S_BOUND")))
+
+    assert [(c[1],) for c in fake_ds.calls] == [
+        ("stella",), ("tide",), ("tide",)]
+    assert _meta(result)["voice_source"] == "default"
+
+
+def test_deepseek_failure_falls_back_to_doubao_and_bills(
+        tmp_path, fake_ds):
+    tool = _tool(default_speaker="S_DEFAULT")
+    captured = _patch_synthesize(tool, returns=_tts_result())
+    fake_ds.fail = True
+    meter = _Meter()
+    result = asyncio.run(tool.run(
+        {"text": "你好"},
+        _ctx(tmp_path, deepseek_settings=_ds(), usage_meter=meter,
+             tts_voice="S_BOUND")))
+
+    assert result.ok
+    assert captured["speaker"] == "S_BOUND"  # 豆包继续走原音色解析
+    assert _meta(result)["format"] == "mp3"
+    # 回退成功同样按 DeepSeek 字符单价计费
+    assert meter.charges == [("tts", 4, "字符", pytest.approx(0.0012),
+                              "doubao")]
+
+
+def test_deepseek_failure_reason_surfaces_when_doubao_fails(
+        tmp_path, fake_ds):
+    """回退豆包也失败时，错误里带上 DeepSeek 的失败原因（便于判断修哪个 Key）。"""
+    from flyai.tts.protocol import TtsError
+
+    tool = _tool(default_speaker="S_DEFAULT")
+    _patch_synthesize(
+        tool, raises=TtsError("speaker permission denied", code=45000000))
+    fake_ds.fail = True
+    result = asyncio.run(tool.run(
+        {"text": "你好"}, _ctx(tmp_path, deepseek_settings=_ds())))
+    assert not result.ok
+    assert "音色未授权" in result.output
+    assert "DeepSeek 优先调用失败" in result.output
+    assert "upstream down" in result.output
+
+
+def test_deepseek_available_without_doubao_key(tmp_path, fake_ds):
+    # DeepSeek 可用时不得因豆包 Key 为空提前报错
+    tool = TextToSpeechTool(TtsSettings(api_key="", engine="deepseek"))
+    result = asyncio.run(tool.run(
+        {"text": "你好"}, _ctx(tmp_path, deepseek_settings=_ds())))
+    assert result.ok
+    assert fake_ds.calls and _meta(result)["format"] == "wav"
+
+
+def test_doubao_engine_skips_deepseek(tmp_path, fake_ds):
+    tool = _tool(engine="doubao", default_speaker="S_DEFAULT")
+    captured = _patch_synthesize(tool, returns=_tts_result())
+    meter = _Meter()
+    result = asyncio.run(tool.run(
+        {"text": "你好"},
+        _ctx(tmp_path, deepseek_settings=_ds(), usage_meter=meter)))
+    assert result.ok
+    assert fake_ds.calls == []
+    assert captured["speaker"] == "S_DEFAULT"
+    assert meter.charges[0][4] == "doubao"
+
+
+def test_insufficient_balance_blocks_before_synthesis(tmp_path, fake_ds):
+    tool = _tool(default_speaker="S_DEFAULT")
+    captured = _patch_synthesize(tool, returns=_tts_result())
+    meter = _Meter(available=False)
+    result = asyncio.run(tool.run(
+        {"text": "你好"},
+        _ctx(tmp_path, deepseek_settings=_ds(), usage_meter=meter)))
+    assert not result.ok and "余额不足" in result.output
+    assert fake_ds.calls == [] and "speaker" not in captured

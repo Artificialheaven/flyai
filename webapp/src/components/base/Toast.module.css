@@ -10,18 +10,18 @@
   margin: 0 auto;
   padding: 12px 18px;
   border-radius: 12px;
-  border: 1px solid var(--fly-alias-border-inverted);
+  border: 1px solid var(--dsw-alias-border-inverted);
   font-size: 14px;
   line-height: 22px;
   text-align: center;
   word-break: break-word;
   white-space: pre-wrap;
-  color: var(--fly-static-neutral-100);
-  background-color: var(--fly-alias-toast-bg);
+  color: var(--dsw-static-neutral-100);
+  background-color: var(--dsw-alias-toast-bg);
   box-shadow:
     0 0 4px 2px rgba(0, 0, 0, 0.04),
     0 4px 16px 0 rgba(0, 0, 0, 0.1);
-  animation: enter 0.2s var(--fly-ease-in-out);
+  animation: enter 0.2s var(--ds-ease-in-out);
   pointer-events: none;
 }
 
@@ -39,12 +39,12 @@
   margin-right: 7px;
   /* 与首行文字居中：(22 - 16) / 2 */
   margin-top: 3px;
-  color: var(--fly-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
 }
 
 /* 整条提示不拦截点击，只有链接可点 */
 .link {
-  color: var(--fly-static-blue-400);
+  color: var(--dsw-static-blue-400);
   text-decoration: none;
   pointer-events: auto;
 

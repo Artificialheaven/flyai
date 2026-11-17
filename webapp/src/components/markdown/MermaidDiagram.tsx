@@ -1,3 +1,4 @@
+import { useTranslate } from '../../i18n/index.js'
 import { memo, useEffect, useRef, useState } from 'react'
 import { useTheme } from '../../app/theme.js'
 import { renderMermaid } from '../../services/markdown/mermaid.js'
@@ -10,6 +11,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   code: string
   loading: boolean
 }) {
+  const t = useTranslate()
   const dark = useTheme() === 'dark'
   const [result, setResult] = useState({ svg: '', failedCode: null as string | null })
   const latestCodeRef = useRef(code)
@@ -78,10 +80,10 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     return (
       <div className="md-mermaid-status" role="status">
         {!loading && !code.trim()
-          ? '图表内容为空'
+          ? t('mermaidEmpty')
           : !loading && result.failedCode === code
-            ? '图表渲染失败'
-            : '图表渲染中…'}
+            ? t('mermaidRenderFail')
+            : t('mermaidLoading')}
       </div>
     )
   }

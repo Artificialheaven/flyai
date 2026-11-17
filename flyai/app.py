@@ -26,6 +26,7 @@ from .config import (
 )
 from .auth_sessions import AuthSessionStore, LoginRateLimiter, resolve_uid
 from .errors import ConfigError
+from .updates import APK_MIME
 from .providers.base import BaseProvider
 from .providers.factory import create_provider
 from .tools.attributes_tool import UpdateAttributesTool
@@ -61,6 +62,8 @@ class AppState:
     loader: PluginLoader = None
     data_dir: Path = None
     user_store: UserStore = None
+    # 邀请码库（注册用）；未启用时为 None
+    invite_store: Optional[Any] = None
     # AI 浏览器会话管理（Playwright 可选依赖；未启用时为 None）
     browser: Optional["BrowserSessionManager"] = None
     # 浏览器搜索引擎（ChromiumSearcher，浏览器进程懒启动；不用时为 None）
@@ -473,6 +476,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
         state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
         state.user_store = UserStore(data_dir)
+        # 邀请码库（注册）：每个用户（含 admin）同一时间只有一个有效码
+        from .invites import InviteStore
+
+        state.invite_store = InviteStore(data_dir)
+        # CDK 兑换码库（额度充值）
+        from .cdk import CdkStore
+
+        state.cdk_store = CdkStore(data_dir, tzname)
         # 公共市场（跨用户）：条目元数据 + 快照载荷，目录由 store 自建
         state.market = MarketStore(data_dir / "market")
         # P4 watcher：依赖用户库做全量 reconcile，故在 user_store 就绪后创建
@@ -566,12 +577,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # 路由
     from .api.routes_agentdb import router as agentdb_router
+    from .api.routes_app import router as app_router
     from .api.routes_auth import router as auth_router
+    from .api.routes_cdk import router as cdk_router
     from .api.routes_ext import router as ext_router
     from .api.routes_chat import router as chat_router
     from .api.routes_config import router as config_router
     from .api.routes_galgame import router as galgame_router
     from .api.routes_gen import router as gen_router
+    from .api.routes_invite import router as invite_router
     from .api.routes_lore import router as lore_router
     from .api.routes_loop import router as loop_router
     from .api.routes_market import router as market_router
@@ -581,14 +595,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_proactor import router as proactor_router
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
+    from .api.routes_speech import router as speech_router
+    from .api.routes_usage import router as usage_router
 
     app.include_router(agentdb_router)
+    app.include_router(app_router)
     app.include_router(auth_router)
+    app.include_router(cdk_router)
     app.include_router(chat_router)
     app.include_router(config_router)
     app.include_router(ext_router)
     app.include_router(galgame_router)
     app.include_router(gen_router)
+    app.include_router(invite_router)
     app.include_router(lore_router)
     app.include_router(loop_router)
     app.include_router(market_router)
@@ -598,6 +617,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(proactor_router)
     app.include_router(room_router)
     app.include_router(session_router)
+    app.include_router(speech_router)
+    app.include_router(usage_router)
 
     # 静态资源与头像上传目录（挂载目录需先存在；各用户上传在 /uploads/<uid>/...）
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
@@ -646,6 +667,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             raise HTTPException(404)
         if not target.is_file():
             raise HTTPException(404)
+        if target.suffix.lower() == ".apk":
+            # 本机 mimetypes 没有 .apk 映射，Starlette 会退化成 text/plain
+            return FileResponse(
+                str(target),
+                media_type=APK_MIME,
+                filename=target.name,
+            )
         return FileResponse(str(target))
 
     return app

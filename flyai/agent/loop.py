@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from ..config import ToolSettings
 from ..providers.base import StreamEventType
 from ..schemas import ImageAttachment, Message, ToolCall
-from ..tools.base import Tool, ToolContext
+from ..tools.base import Tool, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
 from .loopmode import (
     LoopContext,
@@ -332,6 +333,7 @@ async def run_agent_loop(
     # 整轮（可能含多次 LLM 调用）实际计费 token：各次调用累加
     usage_in = 0
     usage_out = 0
+    usage_hit = 0  # 其中缓存命中的输入 token（按 token 计费时单独定价）
 
     web_limit = int(web_max_iterations or settings.max_iterations)
     # 两套独立计数：非联网轮 / 联网轮（一轮混合两类调用则两边各记一次）
@@ -425,7 +427,7 @@ async def run_agent_loop(
             if loop_ctx.stop_status:
                 yield ("done", {
                     "reason": loop_ctx.stop_status, "iterations": iteration,
-                    "usage": _usage_payload(usage_in, usage_out),
+                    "usage": _usage_payload(usage_in, usage_out, usage_hit),
                 })
                 return
             if interrupt_hub is not None:
@@ -474,7 +476,7 @@ async def run_agent_loop(
             async for ev in provider.stream_chat(
                 report_msgs, [],
                 deep_thinking=deep_thinking, max_tokens=max_tokens,
-                extra_params=extra_params,
+                extra_params=extra_params, session_id=session_id,
             ):
                 if ev.type == StreamEventType.CONTENT_DELTA:
                     report_parts.append(ev.text)
@@ -482,6 +484,7 @@ async def run_agent_loop(
                 elif ev.type == StreamEventType.USAGE and ev.usage:
                     usage_in += int(ev.usage.get("prompt_tokens") or 0)
                     usage_out += int(ev.usage.get("completion_tokens") or 0)
+                    usage_hit += int(ev.usage.get("cached_tokens") or 0)
             report_text = "".join(report_parts).strip()
             history.append(_tag_actor(
                 Message(role="assistant",
@@ -496,14 +499,27 @@ async def run_agent_loop(
         content_parts: List[str] = []
         calls: Optional[List[ToolCall]] = None
         overflow_retries = 0
+        # 思考计时：正文/工具调用到达即视为当前思考段结束，按段累加总用时。
+        # 落库后历史回读才能还原「已思考（用时 N 秒）」，不必等前端本地状态。
+        think_secs = 0.0
+        think_since: Optional[float] = None
         while True:
             try:
                 async for ev in provider.stream_chat(
                     request_messages, tool_specs,
                     deep_thinking=deep_thinking, max_tokens=max_tokens,
-                    extra_params=extra_params,
+                    extra_params=extra_params, session_id=session_id,
                 ):
+                    if ev.type in (
+                        StreamEventType.CONTENT_DELTA,
+                        StreamEventType.CONTENT_REPLACE,
+                        StreamEventType.TOOL_CALLS,
+                    ) and think_since is not None:
+                        think_secs += time.monotonic() - think_since
+                        think_since = None
                     if ev.type == StreamEventType.THINKING_DELTA:
+                        if think_since is None:
+                            think_since = time.monotonic()
                         thinking_parts.append(ev.text)
                         yield ("thinking_delta", {"text": ev.text})
                     elif ev.type == StreamEventType.THINKING_BLOCKS and ev.blocks:
@@ -520,12 +536,19 @@ async def run_agent_loop(
                     elif ev.type == StreamEventType.USAGE and ev.usage:
                         usage_in += int(ev.usage.get("prompt_tokens") or 0)
                         usage_out += int(ev.usage.get("completion_tokens") or 0)
+                        usage_hit += int(ev.usage.get("cached_tokens") or 0)
+                if think_since is not None:
+                    think_secs += time.monotonic() - think_since
+                    think_since = None
                 break
             except (asyncio.CancelledError, GeneratorExit):
                 # 用户点停止：把已经流式产出的半截回复补进历史（drive finally 会保存），
                 # 不再像旧版那样中止后答案整段消失
                 partial_text = "".join(content_parts)
                 partial_think = "".join(thinking_parts).strip()
+                if think_since is not None:
+                    think_secs += time.monotonic() - think_since
+                    think_since = None
                 if partial_text or partial_think or calls:
                     history.append(
                         _tag_actor(
@@ -534,6 +557,7 @@ async def run_agent_loop(
                                 content=partial_text or None,
                                 thinking=partial_think or None,
                                 thinking_blocks=thinking_blocks,
+                                thinking_secs=round(think_secs, 1) or None,
                                 tool_calls=calls,
                             ),
                             actor,
@@ -566,6 +590,7 @@ async def run_agent_loop(
             thinking="".join(thinking_parts).strip() or None,
             # Anthropic signature 块：仅在确实开了思考时存在；后续工具轮原样回放
             thinking_blocks=thinking_blocks,
+            thinking_secs=round(think_secs, 1) or None,
             tool_calls=calls,
         )
         history.append(_tag_actor(assistant, actor))
@@ -573,7 +598,7 @@ async def run_agent_loop(
         if not calls:
             if loop_ctx is None:
                 yield ("done", {"reason": "stop", "iterations": iteration,
-                                "usage": _usage_payload(usage_in, usage_out)})
+                                "usage": _usage_payload(usage_in, usage_out, usage_hit)})
                 return
             # P2 长跑：无工具轮计入空转，连续达阈值才判定任务结束；
             # 未达阈值则下一轮带空转引导继续（最终回复已在 history 中）
@@ -584,7 +609,7 @@ async def run_agent_loop(
                     "reason": "idle", "iterations": iteration,
                     "idle_turns": loop_ctx.idle_turns,
                     "finish_text": _IDLE_FINISH_TEXT,
-                    "usage": _usage_payload(usage_in, usage_out),
+                    "usage": _usage_payload(usage_in, usage_out, usage_hit),
                 })
                 return
             idle_nudge_next = True
@@ -626,7 +651,7 @@ async def run_agent_loop(
                     actor))
             yield ("error", {"message": cap_message, "fatal": False})
             yield ("done", {"reason": cap_reason, "iterations": iteration,
-                            "usage": _usage_payload(usage_in, usage_out)})
+                            "usage": _usage_payload(usage_in, usage_out, usage_hit)})
             return
 
         # 有工具调用：逐个串行执行，结果回灌历史后继续下一轮
@@ -643,7 +668,15 @@ async def run_agent_loop(
                     "status_text": _render_status(call),
                 },
             )
-            if extra_tools:
+            blocked = (allowed_tools is not None
+                       and call.name not in allowed_tools)
+            if blocked:
+                # 模型可能从历史/幻觉回放未开放工具，执行期必须再校验一次
+                result = ToolResult(
+                    ok=False,
+                    output="[权限不足] 该工具未对当前用户开放（功能开关或权限等级限制）",
+                )
+            elif extra_tools:
                 result = await registry.execute(call, ctx, extras=extra_tools)
             else:
                 result = await registry.execute(call, ctx)
@@ -706,14 +739,15 @@ async def run_agent_loop(
                 loop_ctx.finished = True
                 yield ("done", {
                     "reason": "loop_finish", "iterations": iteration,
-                    "usage": _usage_payload(usage_in, usage_out),
+                    "usage": _usage_payload(usage_in, usage_out, usage_hit),
                 })
                 return
 
 
-def _usage_payload(usage_in: int, usage_out: int) -> Dict[str, int]:
+def _usage_payload(usage_in: int, usage_out: int, usage_hit: int = 0) -> Dict[str, int]:
     return {
         "prompt_tokens": usage_in,
         "completion_tokens": usage_out,
         "total_tokens": usage_in + usage_out,
+        "cached_tokens": usage_hit,
     }

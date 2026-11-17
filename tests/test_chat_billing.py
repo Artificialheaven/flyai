@@ -22,6 +22,7 @@ from flyai.agent.runs import ChatRunManager
 from flyai.config import (
     ProviderConfig,
     RoleplaySettings,
+    TokenPricing,
     ToolSettings,
 )
 from flyai.errors import ProviderError
@@ -47,16 +48,19 @@ class _FakeLore:
 
 
 class _Provider:
-    """脚本化 provider：默认回「好」；可配跳过/报错。cfg 带计费倍率。"""
+    """脚本化 provider：默认回「好」；可配跳过/报错/用量上报。cfg 带计费倍率。"""
 
-    def __init__(self, cfg, content="好", fail=False):
+    def __init__(self, cfg, content="好", fail=False, usage=None):
         self.cfg = cfg
         self._content = content
         self._fail = fail
+        self._usage = usage
 
     async def stream_chat(self, messages, tool_specs, **kwargs):
         if self._fail:
             raise ProviderError("模型接口 500")
+        if self._usage:
+            yield StreamEvent(StreamEventType.USAGE, usage=dict(self._usage))
         yield StreamEvent(StreamEventType.CONTENT_DELTA, self._content)
 
 
@@ -260,5 +264,94 @@ def test_admin_not_charged(tmp_path):
         await _drain(resp)
         # 管理员额度视图为 None；普通用户 bob 的额度未被动用
         assert quota_view(state.user_store, u.id)["used"] == 0
+
+    _run(body())
+
+
+# ---- 按 token 计费 ----
+
+_USAGE = {"prompt_tokens": 1000, "cached_tokens": 200,
+          "completion_tokens": 500}
+# 每 1M：命中 0.5、未命中 1、输出 2 → 200*0.5 + 800*1 + 500*2 = 1900 → 0.0019
+_USAGE_COST = 0.0019
+
+
+def _enable_pricing(cfg, **kw):
+    prices = {"cache_hit_input": 0.5, "input": 1.0, "output": 2.0}
+    prices.update(kw)
+    cfg.pricing = TokenPricing(**prices)
+
+
+def test_priced_dm_settles_actual_usage(tmp_path):
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0], quota=1)
+        s, members, _ = _room(store)
+        cfg = state.config.providers[0]
+        _enable_pricing(cfg)
+        state.get_provider = lambda pid: _Provider(cfg, usage=_USAGE)
+        resp = await _chat_in_thread(
+            state, sc, s, _req(s.threads[0].id)
+        )
+        await _drain(resp)
+        assert quota_view(state.user_store, u.id)["remaining"] == \
+            pytest.approx(1 - _USAGE_COST)
+        assert s.token_usage["cached_tokens"] == 200
+
+    _run(body())
+
+
+def test_priced_dm_zero_balance_402(tmp_path):
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0], quota=0)
+        s, members, _ = _room(store)
+        cfg = state.config.providers[0]
+        _enable_pricing(cfg)
+        state.get_provider = lambda pid: _Provider(cfg, usage=_USAGE)
+        with pytest.raises(HTTPException) as ei:
+            await _chat_in_thread(state, sc, s, _req(s.threads[0].id))
+        assert ei.value.status_code == 402
+        assert "CDK" in ei.value.detail
+
+    _run(body())
+
+
+def test_priced_group_settles_each_seat(tmp_path):
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0, 1.0], quota=1)
+        s, members, group = _room(store, n=2)
+        for i, m in enumerate(members):
+            m.provider_id = "p%d" % i
+            _enable_pricing(state.config.providers[i])
+        providers = {
+            cfg.id: _Provider(cfg, usage=_USAGE)
+            for cfg in state.config.providers
+        }
+        state.get_provider = lambda pid: providers.get(pid)
+        resp = await _chat_in_thread(state, sc, s, _req(group.id))
+        await _drain(resp)
+        # 两个座位各按实际用量结算，无每轮固定预扣
+        assert quota_view(state.user_store, u.id)["remaining"] == \
+            pytest.approx(1 - 2 * _USAGE_COST)
+
+    _run(body())
+
+
+def test_mixed_group_only_rate_seat_precharged(tmp_path):
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0, 2.0], quota=10)
+        s, members, group = _room(store, n=2)
+        for i, m in enumerate(members):
+            m.provider_id = "p%d" % i
+        _enable_pricing(state.config.providers[0])  # 座位 1 按 token 计费
+        providers = {
+            cfg.id: _Provider(cfg, usage=_USAGE)
+            for cfg in state.config.providers
+        }
+        state.get_provider = lambda pid: providers.get(pid)
+        resp = await _chat_in_thread(state, sc, s, _req(group.id))
+        await _drain(resp)
+        # 只预扣旧费率座位 2，再结算 token 座位 0.0019
+        assert quota_view(state.user_store, u.id)["remaining"] == \
+            pytest.approx(10 - 2 - _USAGE_COST)
 
     _run(body())
