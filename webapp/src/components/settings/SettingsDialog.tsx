@@ -20,6 +20,10 @@ import {
 import { importSessions, removeAllSessions } from '../../services/chat/store.js'
 import { useAuth } from '../../services/flyai/auth.js'
 import { FlyApiError } from '../../services/flyai/client.js'
+import {
+  parseDeepSeekExport,
+  type ParsedDeepSeekExport,
+} from '../../services/flyai/deepseekExport.js'
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
 import {
   isChineseBrowser,
@@ -36,6 +40,7 @@ import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { CdkRedeemField } from './CdkRedeemField.js'
+import { DeepSeekImportDialog } from './DeepSeekImportDialog.js'
 import { InvitePanel } from './InvitePanel.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import { AccessPanel } from './admin/AccessPanel.js'
@@ -247,62 +252,82 @@ const SettingsContent = () => {
   )
 }
 
-/** 导入 FlyAI JSON/ZIP 或 Chatbox 备份；导入完成后列表自动刷新 */
+/** 导入 FlyAI JSON/ZIP、DeepSeek 导出或 Chatbox 备份；导入完成后列表自动刷新 */
 const ImportConversations = () => {
   const t = useTranslate()
   const [busy, setBusy] = useState(false)
+  const [archive, setArchive] = useState<ParsedDeepSeekExport | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   return (
-    <SettingCell
-      label={t('importConversations')}
-      description={t('importConversationsDescription')}
-      status={null}
-      action={
-        <>
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".json,.zip,.md,.markdown,application/json,application/zip,text/markdown"
-            hidden
-            onChange={async (event) => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              if (!file || busy) {
-                return
-              }
-              setBusy(true)
-              try {
-                const count = await importSessions(file)
-                showToast({ key: 'importedConversations', params: { count } })
-              } catch (error) {
-                const message =
-                  error instanceof FlyApiError
-                    ? error.message
-                    : error instanceof Error
+    <>
+      <SettingCell
+        label={t('importConversations')}
+        description={t('importConversationsDescription')}
+        status={null}
+        action={
+          <>
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".json,.zip,.md,.markdown,application/json,application/zip,text/markdown"
+              hidden
+              onChange={async (event) => {
+                const file = event.target.files?.[0]
+                event.target.value = ''
+                if (!file || busy) {
+                  return
+                }
+                setBusy(true)
+                try {
+                  // DeepSeek 数据导出包在前端解析，挑选会话后走普通导入接口
+                  if (file.name.toLowerCase().endsWith('.zip')) {
+                    const parsed = parseDeepSeekExport(
+                      new Uint8Array(await file.arrayBuffer())
+                    )
+                    if (parsed) {
+                      if (parsed.sessions.length === 0) {
+                        showToast({ key: 'deepSeekImportEmpty', type: 'error' })
+                      } else {
+                        setArchive(parsed)
+                      }
+                      return
+                    }
+                  }
+                  const count = await importSessions(file)
+                  showToast({ key: 'importedConversations', params: { count } })
+                } catch (error) {
+                  const message =
+                    error instanceof FlyApiError
                       ? error.message
-                      : t('unknownError')
-                showToast({
-                  key: 'importConversationsFailed',
-                  params: { message },
-                  type: 'error',
-                })
-              } finally {
-                setBusy(false)
-              }
-            }}
-          />
-          <Button
-            variant="outlined"
-            size="m"
-            className={styles.cellButton}
-            disabled={busy}
-            onClick={() => inputRef.current?.click()}
-          >
-            {t(busy ? 'importingConversations' : 'upload')}
-          </Button>
-        </>
-      }
-    />
+                      : error instanceof Error
+                        ? error.message
+                        : t('unknownError')
+                  showToast({
+                    key: 'importConversationsFailed',
+                    params: { message },
+                    type: 'error',
+                  })
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            />
+            <Button
+              variant="outlined"
+              size="m"
+              className={styles.cellButton}
+              disabled={busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {t(busy ? 'importingConversations' : 'upload')}
+            </Button>
+          </>
+        }
+      />
+      {archive ? (
+        <DeepSeekImportDialog parsed={archive} onClose={() => setArchive(null)} />
+      ) : null}
+    </>
   )
 }
 

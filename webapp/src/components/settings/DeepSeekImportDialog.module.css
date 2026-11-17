@@ -1,0 +1,120 @@
+.dialog {
+  width: 520px;
+  max-height: calc(100dvh - 32px);
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hint {
+  flex-shrink: 0;
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px;
+  margin: 0 -2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background-color: transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &.rowChecked {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &.rowMuted {
+    opacity: 0.6;
+  }
+
+  &.rowDisabled {
+    cursor: default;
+    opacity: 0.7;
+  }
+}
+
+.checkbox {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 3px 0 0;
+  accent-color: var(--dsw-alias-brand-primary);
+  cursor: inherit;
+}
+
+.rowMain {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rowTitle {
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress {
+  flex-shrink: 0;
+  height: 6px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 3px;
+  background-color: var(--dsw-alias-bg-skeleton);
+}
+
+.progressBar {
+  height: 100%;
+  border-radius: 3px;
+  background-color: var(--dsw-alias-brand-primary);
+  transition: width 0.24s var(--ds-ease-in-out);
+}
+
+.error {
+  flex-shrink: 0;
+  margin-top: 10px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}

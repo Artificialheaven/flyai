@@ -47,7 +47,7 @@ import type {
   SessionSummary as FlySummary,
   Thread,
 } from '../flyai/types.js'
-import { importSessionFile } from '../flyai/transfer.js'
+import { importFlyaiConversation, importSessionFile } from '../flyai/transfer.js'
 import * as db from './db.js'
 import {
   addDraftFiles,
@@ -1508,6 +1508,32 @@ export const importSessions = async (file: File): Promise<number> => {
     const count = await importSessionFile(file)
     await refreshSessionList()
     return count
+  } finally {
+    set({ importingHistory: false })
+  }
+}
+
+/** 导入前端已转换好的对话载荷（如 DeepSeek 导出）；逐个提交后刷新列表。 */
+export const importConversationPayloads = async (
+  payloads: unknown[],
+  onProgress?: (done: number, total: number) => void
+): Promise<number> => {
+  if (get().importingHistory) {
+    throw new Error('Import is already in progress')
+  }
+  if (payloads.length === 0) {
+    return 0
+  }
+  set({ importingHistory: true })
+  let done = 0
+  try {
+    for (const payload of payloads) {
+      await importFlyaiConversation(payload)
+      done += 1
+      onProgress?.(done, payloads.length)
+    }
+    await refreshSessionList()
+    return done
   } finally {
     set({ importingHistory: false })
   }

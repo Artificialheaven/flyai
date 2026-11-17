@@ -85,6 +85,18 @@ const upload = async (path: string, file: File): Promise<unknown> => {
   return await res.json()
 }
 
+/** 导入前端已构造好的 flyai-conversation 载荷（不经过文件上传）。 */
+export const importFlyaiConversation = async (payload: unknown): Promise<void> => {
+  const res = await fetch(apiUrl('/api/sessions/import'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    throw new FlyApiError(res.status, await readDetail(res))
+  }
+}
+
 type ImportedSessions = { sessions?: unknown[] }
 
 /** 导入单个文件：按扩展名/包类型选择 flyai JSON、ZIP 或 Chatbox 接口。返回导入会话数。 */
@@ -107,14 +119,7 @@ export const importSessionFile = async (file: File): Promise<number> => {
         ? String((parsed as { type: unknown }).type)
         : ''
     if (type === 'flyai-conversation') {
-      const res = await fetch(apiUrl('/api/sessions/import'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: text,
-      })
-      if (!res.ok) {
-        throw new FlyApiError(res.status, await readDetail(res))
-      }
+      await importFlyaiConversation(parsed)
       return 1
     }
     // Chatbox 备份 JSON（可含多个对话）
