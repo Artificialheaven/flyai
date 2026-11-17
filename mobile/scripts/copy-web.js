@@ -43,8 +43,8 @@ if (fs.existsSync(faviconSrc)) fs.copyFileSync(faviconSrc, path.join(DEST, "favi
 
 // APK 内页面源是 https://localhost，相对路径请求不会到达后端，
 // 因此 config.json 必须写死绝对后端地址（Web 站点的同名文件仍是同源空串）。
-// 本地联调：FLYAI_APP_SERVER=http://10.0.2.2:8000 覆盖，默认线上 https://fly.eastcloud.top
-const DEFAULT_SERVER = "https://fly.eastcloud.top";
+// 本地联调：FLYAI_APP_SERVER=http://10.0.2.2:8000 覆盖，默认线上 https://flyai.eastcloud.top
+const DEFAULT_SERVER = "https://flyai.eastcloud.top";
 const override = (process.env.FLYAI_APP_SERVER || "").trim();
 const apiBase = override || DEFAULT_SERVER;
 let baseConfig = {};
