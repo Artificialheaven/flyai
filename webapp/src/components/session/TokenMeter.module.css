@@ -1,13 +1,19 @@
 .meter {
   flex-shrink: 0;
   padding: 2px 8px;
+  border: 0;
   border-radius: 100px;
   background: var(--dsw-alias-bg-layer-3);
+  font-family: inherit;
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
   cursor: default;
   user-select: none;
+}
+
+.tappable {
+  cursor: pointer;
 }
 
 .detail {

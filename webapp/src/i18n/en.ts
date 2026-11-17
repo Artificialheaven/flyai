@@ -292,6 +292,11 @@ export const en = {
   tokenUsageCompletion: '{count} out',
   tokenUsageTotal: '{count} total',
   tokenUsageTooltip: 'Total tokens used in this chat',
+  tokenUsageCache: 'Cache hit {rate}% ({count})',
+  contextWarningTitle: 'This chat is getting long',
+  contextWarningBody:
+    'The context window has reached {count} characters (over {threshold}). Replies may get slower or cost more tokens. Consider compacting the history or starting a new chat.',
+  contextWarningDismiss: 'Got it',
   importConversations: 'Import chats',
   importConversationsDescription:
     'Supports FlyAI JSON / ZIP backups, DeepSeek data export ZIPs (pick chats), and Chatbox-exported JSON / Markdown files.',

@@ -19,7 +19,11 @@ from ..agent.loop import (
     _IDLE_FINISH_TEXT,
     run_agent_loop,
 )
-from ..agent.loopmode import LoopContext
+from ..agent.loopmode import (
+    CONTEXT_WARN_THRESHOLDS,
+    LoopContext,
+    history_char_size,
+)
 from ..agent.runs import ChatRun, ChatRunManager
 from ..agentdb.loop_store import (
     LOOP_DONE,
@@ -820,6 +824,32 @@ def _get_run_manager(state) -> ChatRunManager:
     return manager if manager is not None else ChatRunManager()
 
 
+async def _emit_context_warning(run, session, window_id: str, history) -> None:
+    """窗口字数跨过预警阈值时提示一次（同一阈值每个窗口只提示一次）。
+
+    只发提示事件，不压缩也不改历史；真正越过硬上限后的请求侧截断在
+    agent.loop 内完成，对用户完全不可见。
+    """
+    chars = history_char_size(history)
+    buckets = session.context_warned
+    if not isinstance(buckets, dict):
+        buckets = {}
+        session.context_warned = buckets
+    warned = buckets.setdefault(window_id or "", [])
+    fresh = [
+        t for t in CONTEXT_WARN_THRESHOLDS
+        if chars >= t and t not in warned
+    ]
+    if not fresh:
+        return
+    warned.extend(fresh)
+    await run.emit("context_warning", {
+        "chars": chars,
+        "threshold": max(fresh),
+        "thresholds": fresh,
+    })
+
+
 def _spawn_run(run: ChatRun, drive, run_manager: ChatRunManager) -> None:
     """把 drive() 协程包装为 run 的后台任务：异常/取消都收敛到 run 终态。
 
@@ -1141,6 +1171,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                     ),
                 },
             )
+            await _emit_context_warning(run, session, "", session.messages)
             recall_block, recall_items = await build_auto_recall_block(
                 state=state, sc=sc,
                 char_id=session.character_id or "",
@@ -1655,6 +1686,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 {"session_id": session.id, "thread_id": thread.id,
                  "character_id": "", "world_id": ""},
             )
+            await _emit_context_warning(run, session, thread.id, history)
             # P3：真人发起的本轮刷新主动行为活跃时间（未 opt-in 时空转）
             await _touch_proactor(state, sc, session.id)
             # 编辑/重生成：流式起点（此刻 history 末尾即锚点用户消息）

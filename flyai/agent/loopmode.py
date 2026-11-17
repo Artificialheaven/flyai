@@ -29,6 +29,11 @@ _NUM_RE = re.compile(r"(\d{3,})")
 _CHARS_PER_TOKEN = 1.5
 _COMPACT_RESERVE_OUTPUT = 30000
 
+# 普通聊天上下文护栏：达到这些窗口字数时提示用户可考虑压缩；
+# 用户不处理时，超过硬上限的请求仅转发最近的历史（落盘历史不变，对用户不可见）。
+CONTEXT_WARN_THRESHOLDS = (200_000, 400_000, 600_000, 800_000)
+CONTEXT_TRUNCATE_CHARS = 900_000
+
 
 @dataclass
 class LoopContext:

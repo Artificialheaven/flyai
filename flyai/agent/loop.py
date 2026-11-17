@@ -21,6 +21,7 @@ from ..schemas import ImageAttachment, Message, ToolCall
 from ..tools.base import Tool, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
 from .loopmode import (
+    CONTEXT_TRUNCATE_CHARS,
     LoopContext,
     compact_cut_point,
     parse_context_overflow,
@@ -226,6 +227,41 @@ def _keep_recent_turns(messages: List[Message],
     return messages[start:]
 
 
+def _message_char_size(message: Message) -> int:
+    """单条消息的窗口字数：正文 + 工具调用参数（与服务端预警口径一致）。"""
+    total = len(message.content or "")
+    for call in (message.tool_calls or []):
+        total += len(str(getattr(call, "arguments", None) or ""))
+    return total
+
+
+def _truncate_context(messages: List[Message],
+                      limit: int = CONTEXT_TRUNCATE_CHARS) -> List[Message]:
+    """请求窗口超过硬上限时只转发最近的历史，返回新列表（不修改入参）。
+
+    截断按 user 边界切分完整轮次，绝不从 tool 消息中间开始；只影响本轮发给
+    模型的消息，落盘历史保持完整，也不向前端发送任何截断事件。
+    单个最新轮次自身超限时仍保留它（否则模型连本轮输入都拿不到）。
+    """
+    if not messages or limit <= 0:
+        return list(messages)
+    sizes = [_message_char_size(m) for m in messages]
+    if sum(sizes) <= limit:
+        return list(messages)
+    user_positions = [i for i, m in enumerate(messages) if m.role == "user"]
+    if not user_positions:
+        return list(messages)
+    suffix = [0] * (len(messages) + 1)
+    for i in range(len(messages) - 1, -1, -1):
+        suffix[i] = suffix[i + 1] + sizes[i]
+    start = user_positions[-1]
+    for pos in user_positions:
+        if suffix[pos] <= limit:
+            start = pos
+            break
+    return list(messages[start:])
+
+
 def _inject_depth_blocks(messages: List[Message],
                          blocks: Optional[List[Dict[str, Any]]]) -> None:
     """把酒馆 @depth 块按距末尾的深度原地插入消息列表（system 已在 0 位）。
@@ -388,6 +424,8 @@ async def run_agent_loop(
         msgs = _keep_recent_turns(msgs, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
         msgs = [m for m in msgs if not getattr(m, "tombstone", None)]
+        # 普通聊天兜底：窗口超过硬上限时静默截断旧轮次（只影响本轮请求）
+        msgs = _truncate_context(msgs)
         if system_prompt:
             msgs.insert(0, Message(role="system", content=system_prompt))
         # 酒馆 @depth 常驻块（世界书条目/预设 prompt）：插到历史深处、PHI 之前

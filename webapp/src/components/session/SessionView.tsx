@@ -8,6 +8,7 @@ import { IconButton } from '../base/IconButton.js'
 import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
 import { RoomMembersDialog } from '../room/RoomMembersDialog.js'
+import { ContextWarningDialog } from './ContextWarningDialog.js'
 import { MobileHeader } from './MobileHeader.js'
 import { SessionSettingsDialog } from './SessionSettingsDialog.js'
 import { ThreadTabs } from './ThreadTabs.js'
@@ -35,6 +36,7 @@ export const SessionView = ({
       {isMobile ? (
         <MobileHeader
           title={title}
+          session={session}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenMembers={canManageMembers ? () => setMembersOpen(true) : undefined}
         />
@@ -68,6 +70,7 @@ export const SessionView = ({
       {membersOpen ? (
         <RoomMembersDialog sessionId={session.id} onClose={() => setMembersOpen(false)} />
       ) : null}
+      <ContextWarningDialog />
       {settingsOpen ? (
         <SessionSettingsDialog
           sessionId={session.id}

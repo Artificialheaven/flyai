@@ -280,6 +280,11 @@ export const zh = {
   tokenUsageCompletion: '输出 {count}',
   tokenUsageTotal: '合计 {count}',
   tokenUsageTooltip: '本会话累计 Token 用量',
+  tokenUsageCache: '缓存命中 {rate}%（{count}）',
+  contextWarningTitle: '对话上下文较长',
+  contextWarningBody:
+    '当前对话窗口已达 {count} 字（超过 {threshold} 字）。继续对话可能变慢或消耗更多 Token，建议压缩历史或开启新对话。',
+  contextWarningDismiss: '知道了',
   importConversations: '导入对话',
   importConversationsDescription:
     '支持 FlyAI 导出的 JSON / ZIP 备份、DeepSeek 数据导出 ZIP（可挑选会话），以及 Chatbox 导出的 JSON / Markdown 文件。',

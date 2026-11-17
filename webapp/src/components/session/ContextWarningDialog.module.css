@@ -1,0 +1,9 @@
+.body {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.body p {
+  margin: 0;
+}

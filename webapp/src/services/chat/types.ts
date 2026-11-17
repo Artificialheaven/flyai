@@ -174,8 +174,14 @@ export type Session = {
   updatedAt: number
   /** 置顶（后端列表排序用，本地操作后同步） */
   pinned?: boolean
-  /** 上下文用量：prompt/completion/total（后端 SessionDetail.token_usage） */
-  tokenUsage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  /** 上下文用量：prompt/completion/total/cached（后端 SessionDetail.token_usage） */
+  tokenUsage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+    /** 输入中命中缓存的 token 数（已含在 prompt_tokens 内，用于算缓存命中率） */
+    cached_tokens?: number
+  }
   /** 单窗口上下文上限；0 表示跟随全局默认 */
   maxTokens?: number
   /** 本会话额外禁用的工具名（会话级覆盖） */

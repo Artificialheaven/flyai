@@ -4,6 +4,7 @@ import type { MessageUsage } from '../api/types.js'
 import type { ChatModel } from '../api/types.js'
 import { useUploads } from '../attachments.js'
 import { showToast } from '../../components/base/toastState.js'
+import { useContextWarning } from './contextWarning.js'
 import { translate } from '../../i18n/index.js'
 import { useSettings } from '../settings.js'
 import { useAuth } from '../flyai/auth.js'
@@ -1918,6 +1919,12 @@ const streamReply = async (
         }
         break
       }
+      case 'context_warning':
+        useContextWarning.getState().show({
+          chars: event.chars,
+          threshold: event.threshold,
+        })
+        break
       case 'thinking_delta':
         reply = appendThinking(reply, event.text, Date.now())
         break

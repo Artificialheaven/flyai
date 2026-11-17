@@ -43,6 +43,8 @@ export type ChatStreamEvent =
   | { type: 'speaker'; name?: string; memberId?: string }
   | { type: 'speaker_skip' }
   | { type: 'recall_notice'; items: RecallItem[] }
+  /** 窗口字数跨过预警阈值（20万/40万/60万/80万），提示用户可考虑压缩 */
+  | { type: 'context_warning'; chars: number; threshold: number; thresholds: number[] }
   | { type: 'thinking_delta'; text: string }
   | { type: 'content_delta'; text: string }
   | { type: 'content_replace'; text: string }
@@ -99,6 +101,21 @@ export const decodeChatEvent = (event: string, rawData: unknown): ChatStreamEven
       return { type: 'speaker_skip' }
     case 'recall_notice':
       return { type: 'recall_notice', items: Array.isArray(d.items) ? (d.items as RecallItem[]) : [] }
+    case 'context_warning': {
+      const chars = typeof d.chars === 'number' ? d.chars : 0
+      const threshold = typeof d.threshold === 'number' ? d.threshold : 0
+      if (threshold <= 0) {
+        return null
+      }
+      return {
+        type: 'context_warning',
+        chars,
+        threshold,
+        thresholds: Array.isArray(d.thresholds)
+          ? d.thresholds.filter((value): value is number => typeof value === 'number')
+          : [threshold],
+      }
+    }
     case 'thinking_delta':
       return { type: 'thinking_delta', text: asString(d.text) }
     case 'content_delta':

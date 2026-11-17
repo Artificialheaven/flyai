@@ -5,18 +5,22 @@ import {
   IconUsersOutline16,
 } from '../base/icons.js'
 import { useTranslate } from '../../i18n/index.js'
+import type { Session } from '../../services/chat/types.js'
 import { newChat } from '../../services/chat/store.js'
 import { IconButton } from '../base/IconButton.js'
 import { openMobileSider } from '../sider/mobileSiderState.js'
+import { TokenMeter } from './TokenMeter.js'
 import styles from './MobileHeader.module.css'
 
-/** 移动端顶栏：左侧菜单打开侧边栏；会话页再显示标题、会话设置与开启新对话 */
+/** 移动端顶栏：左侧菜单打开侧边栏；会话页再显示标题、Token 用量、会话设置与开启新对话 */
 export const MobileHeader = ({
   title,
+  session,
   onOpenSettings,
   onOpenMembers,
 }: {
   title?: string
+  session?: Session
   onOpenSettings?: () => void
   onOpenMembers?: () => void
 }) => {
@@ -33,6 +37,7 @@ export const MobileHeader = ({
       {title === undefined ? null : (
         <>
           <div className={styles.title}>{title}</div>
+          {session ? <TokenMeter session={session} /> : null}
           {onOpenMembers ? (
             <IconButton
               size="xl"

@@ -94,6 +94,10 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         threads=[Thread.from_dict(t) for t in data.get("threads", [])],
         pinned=bool(data.get("pinned", False)),
         token_usage=data.get("token_usage", {}) or {},
+        context_warned={
+            str(k): [int(x) for x in (v or [])]
+            for k, v in (data.get("context_warned") or {}).items()
+        },
         mode=data.get("mode", "normal") or "normal",
         galgame=data.get("galgame", {}) or {},
         galgame_tts=data.get("galgame_tts", {}) or {},
@@ -120,6 +124,7 @@ def session_to_dict(session: Session) -> Dict:
         "threads": [t.to_dict() for t in session.threads],
         "pinned": session.pinned,
         "token_usage": session.token_usage or {},
+        "context_warned": session.context_warned or {},
         "mode": session.mode,
         "galgame": session.galgame or {},
         "galgame_tts": session.galgame_tts or {},

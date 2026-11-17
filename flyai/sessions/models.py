@@ -122,6 +122,8 @@ class Session:
     pinned: bool = False              # 置顶（侧栏排序优先）
     # 整个会话自创建以来的累计 token（跨刷新持久），各轮 done.usage 累加
     token_usage: Dict[str, int] = field(default_factory=dict)
+    # 已提示过的上下文阈值：{窗口 id: [200000, 400000, ...]}；旧会话缺省为空
+    context_warned: Dict[str, List[int]] = field(default_factory=dict)
     # normal=普通聊天；galgame=Galgame 模式（全屏视觉小说，单角色）
     mode: str = "normal"
     # Galgame 持久场景态：{"background":{"id","url"},"sprite":{"id","url"}}
