@@ -280,6 +280,107 @@ def _clamp_int(v: Any, low: int, high: int, default: int) -> int:
     return max(low, min(high, number))
 
 
+class AfdianPlanSettings(BaseModel):
+    """爱发电方案映射：基数（0 = 按订单实付金额）× 倍率 = 发放点数。"""
+    plan_id: str = ""
+    name: str = ""
+    amount: float = 0
+    ratio: float = 1
+
+    @validator("plan_id", "name", pre=True)
+    def _trim_plan_text(cls, v):  # noqa: N805
+        return str(v or "").strip()[:120]
+
+    @validator("amount", pre=True)
+    def _check_plan_amount(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(number) or math.isinf(number) or number < 0:
+            return 0.0
+        return number
+
+    @validator("ratio", pre=True)
+    def _check_plan_ratio(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return 1.0
+        if math.isnan(number) or math.isinf(number) or number < 0:
+            return 1.0
+        return number
+
+
+class AfdianSettings(BaseModel):
+    """爱发电自动发卡（webhook 触发 + query-order 权威校验）。"""
+    enabled: bool = False
+    # 爱发电开发者页的 user_id 与 API Token（秘密）
+    user_id: str = ""
+    token: str = ""
+    api_base: str = "https://afdian.com"
+    # webhook 地址里的校验令牌（秘密）；留空保存时由后台自动生成
+    webhook_token: str = ""
+    # 展示 webhook 地址用的公网前缀；空则前端用 location.origin
+    public_base_url: str = ""
+    # 累计销售额上限（元）；-1 不限。超限订单记待补发
+    max_total_amount: float = -1
+    # 未匹配到方案时的兜底：基数（0 = 按实付金额）× 倍率
+    default_amount: float = 0
+    default_ratio: float = 1
+    plans: List[AfdianPlanSettings] = []
+    # 前台「去爱发电购买」入口
+    purchase_url: str = ""
+    purchase_label: str = "去爱发电支持"
+
+    @validator("user_id", "token", "public_base_url", "purchase_url", pre=True)
+    def _trim_afdian_text(cls, v):  # noqa: N805
+        return str(v or "").strip()[:500]
+
+    @validator("api_base", pre=True)
+    def _trim_api_base(cls, v):  # noqa: N805
+        text = str(v or "").strip().rstrip("/")
+        return text or "https://afdian.com"
+
+    @validator("webhook_token", pre=True)
+    def _trim_webhook_token(cls, v):  # noqa: N805
+        return str(v or "").strip()[:200]
+
+    @validator("purchase_label", pre=True)
+    def _trim_purchase_label(cls, v):  # noqa: N805
+        return str(v or "").strip()[:40] or "去爱发电支持"
+
+    @validator("max_total_amount", pre=True)
+    def _check_max_total(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return -1.0
+        if math.isnan(number) or math.isinf(number):
+            return -1.0
+        return number if number >= 0 else -1.0
+
+    @validator("default_amount", pre=True)
+    def _check_default_amount(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(number) or math.isinf(number) or number < 0:
+            return 0.0
+        return number
+
+    @validator("default_ratio", pre=True)
+    def _check_default_ratio(cls, v):  # noqa: N805
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            return 1.0
+        if math.isnan(number) or math.isinf(number) or number < 0:
+            return 1.0
+        return number
+
+
 class HistorySettings(BaseModel):
     backend: Literal["memory", "json"] = "json"
 
@@ -1030,6 +1131,7 @@ class AppConfig(BaseModel):
     registration: RegistrationSettings = RegistrationSettings()
     announcement: AnnouncementSettings = AnnouncementSettings()
     email: EmailSettings = EmailSettings()
+    afdian: AfdianSettings = AfdianSettings()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     image_generation: ImageGenSettings = ImageGenSettings()
     image_models: List[ImageModelConfig] = []

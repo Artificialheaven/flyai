@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import uuid
 from typing import Optional
 
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 
 from ..config import (
     AccessSettings,
+    AfdianSettings,
     AnnouncementSettings,
     AppConfig,
     DeepSeekSettings,
@@ -129,6 +131,8 @@ class ConfigPayload(BaseModel):
     announcement: Optional[dict] = None
     # SMTP 邮件服务（含授权码，仅 admin 可见/可改）
     email: Optional[dict] = None
+    # 爱发电自动发卡（含 API Token/webhook Token，仅 admin 可见/可改）
+    afdian: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -274,6 +278,14 @@ def _masked_config(state, uid: Optional[str] = None):
             mask_api_key(em.get("password") or "") if em.get("password") else ""
         )
         out["email"] = em
+        # 爱发电：API Token 只给掩码；webhook Token 需在后台拼完整回调地址，
+        # 因此原样下发（仅管理员可见，保存时原样回传即保持不变）
+        af = cfg.afdian.dict()
+        af["token_set"] = bool(af.get("token"))
+        af["token"] = mask_api_key(af.get("token") or "") if af.get("token") else ""
+        af["webhook_token_set"] = bool(af.get("webhook_token"))
+        af["webhook_token"] = af.get("webhook_token") or ""
+        out["afdian"] = af
     return out
 
 
@@ -479,6 +491,16 @@ def put_config(payload: ConfigPayload, request: Request):
         ed["password"] = _credit_key(
             ed.get("password", ""), cfg.email.password)
         cfg.email = EmailSettings.parse_obj(ed)
+
+    if payload.afdian is not None:
+        # 整段替换：Token 留空/掩码=保留原值；webhook Token 留空则自动生成
+        ad = dict(payload.afdian)
+        ad["token"] = _credit_key(ad.get("token", ""), cfg.afdian.token)
+        ad["webhook_token"] = (
+            _credit_key(ad.get("webhook_token", ""), cfg.afdian.webhook_token)
+            or secrets.token_urlsafe(24)
+        )
+        cfg.afdian = AfdianSettings.parse_obj(ad)
 
     _persist(state)
     if scheduler_changed:

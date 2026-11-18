@@ -112,6 +112,33 @@ def test_redeem_adds_quota_and_rollback(tmp_path):
     assert store.check_redeem(u.id, code)["amount"] == 25
 
 
+def test_bound_uid_restricts_redeem_and_extract(tmp_path):
+    store = _store(tmp_path)
+    code = store.generate(1, 10, max_uses=1, bound_uid="u1")[0]["code"]
+    assert store.list()[0]["bound_uid"] == "u1"
+    # 绑定码不参与「取出」流程
+    assert store.extract() is None
+    # 其他用户不能兑换，绑定用户可以
+    with pytest.raises(CdkError) as ei:
+        store.check_redeem("u2", code)
+    assert "绑定其他账号" in ei.value.message
+    info = store.check_redeem("u1", code)
+    store.mark_redeemed(info["key"], "u1")
+    assert store.is_redeemed(code, "u1") is True
+    assert store.is_redeemed(code, "u2") is False
+
+
+def test_bind_is_idempotent_and_rejects_other_user(tmp_path):
+    store = _store(tmp_path)
+    code = store.generate(1, 10, 1)[0]["code"]
+    assert store.bind(code, "u1")["bound_uid"] == "u1"
+    assert store.bind(code, "u1")["bound_uid"] == "u1"
+    with pytest.raises(CdkError):
+        store.bind(code, "u2")
+    with pytest.raises(CdkError):
+        store.bind("NOPE-NOPE-NOPE", "u1")
+
+
 def test_export_contains_header_and_rows(tmp_path):
     store = _store(tmp_path)
     store.generate(2, 10, 1, "2099-12-31")

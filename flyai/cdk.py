@@ -115,6 +115,8 @@ class CdkStore:
             "expires_at": entry.get("expires_at") or "",
             "created_at": entry.get("created_at") or 0,
             "disabled": bool(entry.get("disabled")),
+            # 绑定账号（爱发电订单发卡用）；空表示所有用户都可兑换
+            "bound_uid": entry.get("bound_uid") or "",
             "status": "",
         }
 
@@ -142,12 +144,13 @@ class CdkStore:
     # ---- 管理操作 ----
 
     def generate(self, count: int, amount: float, max_uses: int,
-                 expires_at: Any = "") -> List[Dict[str, Any]]:
+                 expires_at: Any = "", bound_uid: str = "") -> List[Dict[str, Any]]:
         count = max(1, min(int(count or 1), 500))
         amount = max(0.0, float(amount or 0))
         max_uses = max(0, int(max_uses or 0))
         expires = self._normalize_expiry(expires_at)
         created = time.time()
+        bound = (bound_uid or "").strip()
         out = []
         for _ in range(count):
             code = self._new_code()
@@ -157,6 +160,7 @@ class CdkStore:
                 "expires_at": expires,
                 "created_at": created,
                 "disabled": False,
+                "bound_uid": bound,
                 "redemptions": {},
             }
             self._codes[code] = entry
@@ -212,9 +216,14 @@ class CdkStore:
         return out
 
     def extract(self) -> Optional[Dict[str, Any]]:
-        """取出一张可用 CDK（按创建顺序，先到先得）；不删除。"""
+        """取出一张可用 CDK（按创建顺序，先到先得）；不删除。
+
+        已绑定账号的码只属于该账号的订单，不参与「取出」流程。
+        """
         for code, entry in sorted(
                 self._codes.items(), key=lambda kv: float(kv[1].get("created_at") or 0)):
+            if entry.get("bound_uid"):
+                continue
             if self.status(entry) == "usable":
                 view = self._view(code, entry)
                 view["status"] = "usable"
@@ -256,6 +265,9 @@ class CdkStore:
         if not key:
             raise CdkError("CDK 不存在")
         entry = self._codes[key]
+        bound = entry.get("bound_uid") or ""
+        if bound and bound != uid:
+            raise CdkError("该 CDK 已绑定其他账号")
         if uid in (entry.get("redemptions") or {}):
             raise CdkError("你已经兑换过这张 CDK")
         if entry.get("disabled"):
@@ -280,3 +292,25 @@ class CdkStore:
             return
         (entry.get("redemptions") or {}).pop(uid, None)
         self._save()
+
+    def bind(self, code: str, uid: str) -> Dict[str, Any]:
+        """把 CDK 绑定到账号（幂等）；已是他人绑定则抛 CdkError。"""
+        key = self._find_code(code)
+        if not key:
+            raise CdkError("CDK 不存在")
+        entry = self._codes[key]
+        bound = entry.get("bound_uid") or ""
+        if bound and bound != uid:
+            raise CdkError("该 CDK 已绑定其他账号")
+        if not bound:
+            entry["bound_uid"] = uid
+            self._save()
+        view = self._view(key, entry)
+        view["status"] = self.status(entry)
+        return view
+
+    def is_redeemed(self, code: str, uid: str) -> bool:
+        key = self._find_code(code)
+        if not key:
+            return False
+        return uid in (self._codes[key].get("redemptions") or {})

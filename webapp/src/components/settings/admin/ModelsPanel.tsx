@@ -27,6 +27,7 @@ import { Button } from '../../base/Button.js'
 import { Modal } from '../../base/Modal.js'
 import { Select } from '../../base/Select.js'
 import { showToast } from '../../base/toastState.js'
+import { ModelBillingDialog } from '../ModelBillingDialog.js'
 import { errorText, PanelEmpty, PanelError, Toggle } from './AdminCommon.js'
 import styles from './AdminPanels.module.css'
 
@@ -49,6 +50,7 @@ export const ModelsPanel = () => {
   const [editingImage, setEditingImage] = useState<ImageModelView | 'new' | null>(null)
   const [sharingProvider, setSharingProvider] = useState<ProviderView | null>(null)
   const [sharingImage, setSharingImage] = useState<ImageModelView | null>(null)
+  const [billingProvider, setBillingProvider] = useState<ProviderView | null>(null)
   const [deleting, setDeleting] = useState<DeleteTarget | null>(null)
 
   const load = useCallback(async () => {
@@ -227,6 +229,13 @@ export const ModelsPanel = () => {
                     >
                       {t(active ? 'adminActive' : 'adminUse')}
                     </Button>
+                    <Button
+                      size="s"
+                      variant="outlined"
+                      onClick={() => setBillingProvider(provider)}
+                    >
+                      {t('modelsBilling')}
+                    </Button>
                     {isAdmin ? (
                       <Button
                         size="s"
@@ -365,6 +374,12 @@ export const ModelsPanel = () => {
             showToast({ key: 'adminSaved' })
             await load()
           }}
+        />
+      ) : null}
+      {billingProvider ? (
+        <ModelBillingDialog
+          provider={billingProvider}
+          onClose={() => setBillingProvider(null)}
         />
       ) : null}
       {sharingImage ? (

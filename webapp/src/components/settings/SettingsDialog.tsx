@@ -41,11 +41,13 @@ import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
+import { AfdianClaimCard } from './AfdianClaimCard.js'
 import { CdkRedeemField } from './CdkRedeemField.js'
 import { DeepSeekImportDialog } from './DeepSeekImportDialog.js'
 import { InvitePanel } from './InvitePanel.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import { AccessPanel } from './admin/AccessPanel.js'
+import { AfdianPanel } from './admin/AfdianPanel.js'
 import { AnnouncementPanel } from './admin/AnnouncementPanel.js'
 import { CdkPanel } from './admin/CdkPanel.js'
 import { DeepSeekPanel } from './admin/DeepSeekPanel.js'
@@ -134,6 +136,12 @@ const sections: {
     adminOnly: true,
   },
   {
+    value: 'afdian',
+    label: 'settingDialogAsideAfdianOptionLabel',
+    icon: <IconBoltOutline16 />,
+    adminOnly: true,
+  },
+  {
     value: 'access',
     label: 'settingDialogAsideAccessOptionLabel',
     icon: <IconLockOutline16 />,
@@ -172,6 +180,7 @@ const SettingsContent = () => {
 
   const renderData = () => (
     <>
+      <AfdianClaimCard />
       <CdkRedeemField />
       <ImportConversations />
       <SettingCell
@@ -207,6 +216,8 @@ const SettingsContent = () => {
         return isAdmin ? <IntegrationPanel /> : null
       case 'cdk':
         return isAdmin ? <CdkPanel /> : null
+      case 'afdian':
+        return isAdmin ? <AfdianPanel /> : null
       case 'access':
         return isAdmin ? <AccessPanel /> : null
       case 'deepseek':

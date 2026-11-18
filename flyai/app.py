@@ -489,6 +489,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         from .cdk import CdkStore
 
         state.cdk_store = CdkStore(data_dir, tzname)
+        # 爱发电订单流水（webhook 幂等 + 待补发记录）
+        from .afdian_orders import AfdianOrderStore
+
+        state.afdian_orders = AfdianOrderStore(data_dir)
         # 公共市场（跨用户）：条目元数据 + 快照载荷，目录由 store 自建
         state.market = MarketStore(data_dir / "market")
         # P4 watcher：依赖用户库做全量 reconcile，故在 user_store 就绪后创建
@@ -581,6 +585,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         return resp
 
     # 路由
+    from .api.routes_afdian import router as afdian_router
     from .api.routes_agentdb import router as agentdb_router
     from .api.routes_app import router as app_router
     from .api.routes_auth import router as auth_router
@@ -603,6 +608,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_speech import router as speech_router
     from .api.routes_usage import router as usage_router
 
+    app.include_router(afdian_router)
     app.include_router(agentdb_router)
     app.include_router(app_router)
     app.include_router(auth_router)

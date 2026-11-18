@@ -636,6 +636,39 @@
   gap: 10px;
 }
 
+/* ---- 模型计费说明（用户可见的只读价格行） ---- */
+
+.billingRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.billingPrice {
+  flex: none;
+  font-family: var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--dsw-alias-label-primary);
+}
+
+.billingPeriodMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.billingNote {
+  margin-top: 16px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .periodsHead {
   display: flex;
   align-items: flex-start;

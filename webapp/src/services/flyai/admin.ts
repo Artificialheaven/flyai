@@ -124,6 +124,33 @@ export type AnnouncementView = {
   content: string
 }
 
+/** 爱发电方案：amount=0 时按订单实付金额，最终点数 = 基数 × ratio */
+export type AfdianPlanView = {
+  plan_id: string
+  name: string
+  amount: number
+  ratio: number
+}
+
+/** 爱发电自动发卡（仅 admin 可见；token 为掩码，webhook_token 为明文以便拼回调地址） */
+export type AfdianSettingsView = {
+  enabled: boolean
+  user_id: string
+  token: string
+  token_set: boolean
+  api_base: string
+  webhook_token: string
+  webhook_token_set: boolean
+  public_base_url: string
+  /** 累计销售额上限（元）；-1 表示不限 */
+  max_total_amount: number
+  default_amount: number
+  default_ratio: number
+  plans: AfdianPlanView[]
+  purchase_url: string
+  purchase_label: string
+}
+
 /** GET /api/config 的子集：模型管理与系统默认值需要的字段 */
 export type AdminConfig = {
   active_provider?: string
@@ -156,6 +183,8 @@ export type AdminConfig = {
   announcement?: AnnouncementView
   /** 邮件服务（注册验证码/找回密码）：仅 admin 视图包含 */
   email?: EmailSettingsView
+  /** 爱发电自动发卡：仅 admin 视图包含 */
+  afdian?: AfdianSettingsView
   [key: string]: unknown
 }
 

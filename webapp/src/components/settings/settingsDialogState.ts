@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-/** 设置弹窗的分组：通用 / 用量 / 模型 / 功能 / 记忆 / 数据 / 邀请 / 用户（管理员）/ 系统（管理员）/ 生态接入（管理员）/ CDK（管理员）/ 权限门槛（管理员）/ DeepSeek（管理员）/ 邮件服务（管理员）/ 公告（管理员） */
+/** 设置弹窗的分组：通用 / 用量 / 模型 / 功能 / 记忆 / 数据 / 邀请 / 用户（管理员）/ 系统（管理员）/ 生态接入（管理员）/ CDK（管理员）/ 爱发电（管理员）/ 权限门槛（管理员）/ DeepSeek（管理员）/ 邮件服务（管理员）/ 公告（管理员） */
 export type SettingsSection =
   | 'general'
   | 'usage'
@@ -13,6 +13,7 @@ export type SettingsSection =
   | 'system'
   | 'integration'
   | 'cdk'
+  | 'afdian'
   | 'access'
   | 'deepseek'
   | 'email'
