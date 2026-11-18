@@ -4,6 +4,8 @@
   display: flex;
   overflow: hidden;
   background-color: var(--dsw-alias-bg-base);
+  /* 建立独立层叠上下文，背景图层（z-index:-1）才会落在内容之下、底色之上 */
+  isolation: isolate;
 }
 
 .main {

@@ -1,0 +1,17 @@
+.layer {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+/* 图片模式叠一层淡黑遮罩，提升前景文字可读性；纯色模式不加 */
+.image::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.12);
+}

@@ -217,6 +217,28 @@ export type MySettings = {
 
 export type MySettingsPayload = Omit<MySettings, 'active_preset_id'>
 
+/** 应用背景：电脑与手机各一套（theme=跟随主题 / solid=纯色 / image=图片） */
+export type BackgroundMode = 'theme' | 'solid' | 'image'
+/** opacity：背景图层不透明度 0-100（100=完全不透明） */
+export type DeviceBackground = {
+  mode: BackgroundMode
+  color: string
+  image: string
+  opacity: number
+}
+export type BackgroundSettings = {
+  desktop: DeviceBackground
+  mobile: DeviceBackground
+}
+/** PUT 为补丁语义：缺省字段保持不变，空串清空 */
+export type BackgroundPatch = {
+  device: 'desktop' | 'mobile'
+  mode?: BackgroundMode
+  color?: string
+  image?: string
+  opacity?: number
+}
+
 export type ProviderPayload = {
   id?: string
   type?: string
@@ -298,6 +320,15 @@ export const getMySettings = (): Promise<MySettings> =>
 
 export const putMySettings = (payload: MySettingsPayload): Promise<MySettings> =>
   request<MySettings>('/api/my/settings', { method: 'PUT', body: JSON.stringify(payload) })
+
+export const getMyBackground = (): Promise<BackgroundSettings> =>
+  request<BackgroundSettings>('/api/my/settings/background')
+
+export const putMyBackground = (patch: BackgroundPatch): Promise<BackgroundSettings> =>
+  request<BackgroundSettings>('/api/my/settings/background', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  })
 
 export const getConfig = (): Promise<AdminConfig> => request<AdminConfig>('/api/config')
 

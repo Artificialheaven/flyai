@@ -53,6 +53,15 @@ type AuthState = {
   handleSessionExpired: () => void
 }
 
+/** 本机记住的登录 uid（供按账号缓存的数据在首屏同步播种） */
+export const getStoredUid = (): string | null => {
+  try {
+    return localStorage.getItem(UID_KEY)
+  } catch {
+    return null
+  }
+}
+
 const persistLogin = (data: LoginResponse) => {
   localStorage.setItem(TOKEN_KEY, data.token)
   localStorage.setItem(UID_KEY, data.id)

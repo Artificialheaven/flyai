@@ -32,6 +32,21 @@ body.dark {
   color-scheme: dark;
 }
 
+/* 自定义应用背景启用时（body[data-app-bg] 由 BackgroundLayer 维护），
+   顶栏/标签栏/输入区渐隐换成半透明表面，露出下方背景；侧栏保持不透明。
+   未启用时变量不存在，各处用 var(--app-x, 原值) 回落，视觉零变化。 */
+body.light[data-app-bg] {
+  --app-header-bg: rgba(255, 255, 255, 0.78);
+  --app-tabs-bg: rgba(255, 255, 255, 0.7);
+  --app-fade-bg: rgba(255, 255, 255, 0.82);
+}
+
+body.dark[data-app-bg] {
+  --app-header-bg: rgba(26, 26, 28, 0.8);
+  --app-tabs-bg: rgba(26, 26, 28, 0.72);
+  --app-fade-bg: rgba(26, 26, 28, 0.84);
+}
+
 body[data-ds-dark-theme] {
   --scroll-color: rgba(255, 255, 255, 0.15);
   --scroll-color-hover: rgba(255, 255, 255, 0.24);

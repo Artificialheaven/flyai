@@ -133,11 +133,13 @@ export const importWorldJson = async (file: File): Promise<World> => {
   return createWorld(data)
 }
 
-/** 头像上传，返回 /uploads/... 路径 */
-export const uploadAvatar = async (file: File): Promise<string> => {
+/** 图片上传（头像、背景图），返回 /uploads/... 路径 */
+export const uploadImage = async (file: File): Promise<string> => {
   const data = await uploadFile<{ url: string }>('/api/upload', file)
   return data.url
 }
+
+export const uploadAvatar = uploadImage
 
 /** 从任意文本让 AI 解析出角色卡（编辑器预填，不落库） */
 export const generateCharacterFromText = async (text: string): Promise<Character> => {

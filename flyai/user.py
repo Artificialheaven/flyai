@@ -9,12 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import AppConfig, PROJECT_ROOT
 from .lore.store import LoreStore
@@ -246,6 +247,48 @@ class UserStore:
         self._save()
 
 
+# ---- 应用背景（每个设备类型各一套）----
+
+BG_MODES = ("theme", "solid", "image")
+_BG_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# 只接受本站 upload 目录的路径形态；「是否属于当前用户」由 API 层校验
+_BG_IMAGE_RE = re.compile(
+    r"^/uploads/[A-Za-z0-9_-]{1,64}/[A-Za-z0-9_-]{1,96}\.(?:png|jpe?g|gif|webp)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_opacity(value: Any) -> int:
+    """背景图层不透明度 0-100；非法值按 100（完全不透明）。"""
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 100
+    return max(0, min(100, number))
+
+
+def _normalize_background(
+    mode: Any, color: Any, image: Any, opacity: Any = 100
+) -> Tuple[str, str, str, int]:
+    """归一化一组背景配置：非法值回退默认，solid/image 缺少素材时回落 theme。"""
+    mode = mode.strip().lower() if isinstance(mode, str) else ""
+    if mode not in BG_MODES:
+        mode = "theme"
+    color = color if isinstance(color, str) else ""
+    color = color.strip().lower()
+    if color and not _BG_COLOR_RE.match(color):
+        color = ""
+    image = image if isinstance(image, str) else ""
+    image = image.strip()
+    if image and not _BG_IMAGE_RE.match(image):
+        image = ""
+    if mode == "solid" and not color:
+        mode = "theme"
+    if mode == "image" and not image:
+        mode = "theme"
+    return mode, color, image, _normalize_opacity(opacity)
+
+
 @dataclass
 class UserSettings:
     """单个用户的个人设置（data/{uid}/settings.json，跨设备跟随用户）。"""
@@ -266,6 +309,17 @@ class UserSettings:
     max_tokens: Optional[int] = None
     # 当前启用的模型预设 id（data/{uid}/presets/{id}.json）；空=不使用预设
     active_preset_id: str = ""
+
+    # ---- 应用背景：电脑与手机各一套（theme=跟随主题 / solid=纯色 / image=图片）----
+    bg_desktop_mode: str = "theme"
+    bg_desktop_color: str = ""
+    bg_desktop_image: str = ""
+    # 背景图层不透明度 0-100（100=完全不透明）
+    bg_desktop_opacity: int = 100
+    bg_mobile_mode: str = "theme"
+    bg_mobile_color: str = ""
+    bg_mobile_image: str = ""
+    bg_mobile_opacity: int = 100
 
     # ---- 功能开关覆盖（None=跟随管理员全局默认；见 flyai/feature_prefs.py）----
     # 工具与迭代
@@ -318,6 +372,14 @@ class UserSettings:
             "lore_auto_inject": bool(self.lore_auto_inject),
             "max_tokens": self.max_tokens if self.max_tokens else None,
             "active_preset_id": self.active_preset_id or "",
+            "bg_desktop_mode": self.bg_desktop_mode,
+            "bg_desktop_color": self.bg_desktop_color,
+            "bg_desktop_image": self.bg_desktop_image,
+            "bg_desktop_opacity": int(self.bg_desktop_opacity),
+            "bg_mobile_mode": self.bg_mobile_mode,
+            "bg_mobile_color": self.bg_mobile_color,
+            "bg_mobile_image": self.bg_mobile_image,
+            "bg_mobile_opacity": int(self.bg_mobile_opacity),
         }
         for key in self.OVERRIDE_FIELDS:
             out[key] = getattr(self, key)  # None 原样落盘 = 跟随默认
@@ -348,6 +410,18 @@ class UserSettings:
             kwargs["max_tokens"] = None
         pid = d.get("active_preset_id", "")
         kwargs["active_preset_id"] = str(pid).strip() if pid else ""
+        # 背景：逐设备归一化（只做形状校验，图片归属由 API 层校验）
+        for device in ("desktop", "mobile"):
+            mode, color, image, opacity = _normalize_background(
+                d.get("bg_%s_mode" % device),
+                d.get("bg_%s_color" % device),
+                d.get("bg_%s_image" % device),
+                d.get("bg_%s_opacity" % device),
+            )
+            kwargs["bg_%s_mode" % device] = mode
+            kwargs["bg_%s_color" % device] = color
+            kwargs["bg_%s_image" % device] = image
+            kwargs["bg_%s_opacity" % device] = opacity
         # 可空覆盖：仅接受 bool/int；None 与缺键都表示跟随默认（0/False 是合法覆盖值）
         for key, kind in cls.OVERRIDE_FIELDS.items():
             if key not in d or d[key] is None:

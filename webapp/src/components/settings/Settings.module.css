@@ -485,3 +485,259 @@
   color: var(--dsw-alias-label-primary);
   overflow-wrap: anywhere;
 }
+
+/* 应用背景：电脑/手机分段、模式选块、纯色与图片编辑 */
+.bg {
+  flex-shrink: 0;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.bgHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bgTitle {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.bgDevices {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.bgDevice {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.bgDeviceActive,
+.bgDeviceActive:hover {
+  background-color: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
+}
+
+.bgModes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bgMode {
+  flex: 1;
+  min-width: 96px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+
+  &:hover:not(:disabled) {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.bgModeSelected,
+.bgModeSelected:hover:not(:disabled) {
+  background-color: var(--dsw-specific-selector);
+}
+
+/* 背景透明度：0=完全看不见（露出主题底色），100=原样 */
+.bgOpacityRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bgOpacityLabel {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+  user-select: none;
+}
+
+.bgOpacityRange {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--dsw-alias-button-primary-fill);
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.bgOpacityValue {
+  flex-shrink: 0;
+  min-width: 40px;
+  font-size: 13px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--dsw-alias-label-secondary);
+  user-select: none;
+}
+
+.bgColorRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bgColorInput {
+  flex-shrink: 0;
+  width: 48px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background-color: transparent;
+  cursor: pointer;
+
+  &::-webkit-color-swatch-wrapper {
+    padding: 4px;
+  }
+
+  &::-webkit-color-swatch {
+    border: none;
+    border-radius: 5px;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.bgHex {
+  box-sizing: border-box;
+  width: 108px;
+  padding: 7px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 20px;
+  outline: none;
+
+  &:focus {
+    border-color: var(--dsw-alias-button-primary-fill);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+  }
+}
+
+.bgImageRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bgThumb {
+  flex-shrink: 0;
+  width: 96px;
+  height: 54px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.bgFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 18px;
+  margin-top: 10px;
+}
+
+.bgReset {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background-color: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+@media not all and (min-width: 768px) {
+  .bgMode {
+    min-width: 0;
+  }
+
+  .bgFooter {
+    flex-wrap: wrap;
+  }
+}

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import uuid
 from typing import Optional
@@ -52,7 +53,7 @@ from ..deepseek_tools import DeepSeekToolsClient
 from ..auth_sessions import resolve_uid
 from ..ids import InvalidName, check_model_id
 from ..mailer import MailError
-from ..user import ADMIN_UID
+from ..user import ADMIN_UID, BG_MODES, _normalize_background
 from ..errors import DeepSeekError, ProviderError  # noqa: F401
 
 router = APIRouter(prefix="/api", tags=["config"])
@@ -690,6 +691,100 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
 
     scope.save_user_settings()
     return scope.user_settings.to_dict()
+
+
+# ---- 应用背景（电脑/手机各一套；专用接口避免被整体 PUT 覆盖）----
+
+_BG_DEVICES = ("desktop", "mobile")
+_BG_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_BG_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+class MyBackgroundPayload(BaseModel):
+    device: str  # desktop | mobile
+    # 缺省/None = 保持不变；"" = 清空（图片模式下清空图片会自动回落 theme）
+    mode: Optional[str] = None
+    color: Optional[str] = None
+    image: Optional[str] = None
+    # 背景图层不透明度 0-100
+    opacity: Optional[int] = None
+
+
+def _background_view(us) -> dict:
+    return {
+        device: {
+            "mode": getattr(us, "bg_%s_mode" % device),
+            "color": getattr(us, "bg_%s_color" % device),
+            "image": getattr(us, "bg_%s_image" % device),
+            "opacity": int(getattr(us, "bg_%s_opacity" % device)),
+        }
+        for device in _BG_DEVICES
+    }
+
+
+def _owned_background_image(scope, url: str) -> bool:
+    """图片必须是当前用户 upload 目录下的真实文件（防引用他人文件/路径穿越）。"""
+    prefix = "/uploads/%s/" % scope.uid
+    if not url.startswith(prefix):
+        return False
+    name = url[len(prefix):]
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or ".." in name:
+        return False
+    if not name.lower().endswith(_BG_IMAGE_EXTS):
+        return False
+    try:
+        return (scope.upload_dir / name).is_file()
+    except OSError:
+        return False
+
+
+@router.get("/my/settings/background")
+def get_my_background(request: Request):
+    scope = request.app.state.flyai.user(request)
+    return _background_view(scope.user_settings)
+
+
+@router.put("/my/settings/background")
+def put_my_background(payload: MyBackgroundPayload, request: Request):
+    scope = request.app.state.flyai.user(request)
+    us = scope.user_settings
+    device = (payload.device or "").strip()
+    if device not in _BG_DEVICES:
+        raise HTTPException(400, "device 必须是 desktop 或 mobile")
+
+    prefix = "bg_%s_" % device
+    mode = getattr(us, prefix + "mode")
+    color = getattr(us, prefix + "color")
+    image = getattr(us, prefix + "image")
+    opacity = getattr(us, prefix + "opacity")
+
+    if payload.mode is not None:
+        mode = payload.mode.strip().lower()
+        if mode not in BG_MODES:
+            raise HTTPException(400, "mode 必须是 theme/solid/image")
+    if payload.color is not None:
+        color = payload.color.strip().lower()
+        if color and not _BG_COLOR_RE.match(color):
+            raise HTTPException(400, "颜色格式应为 #rrggbb")
+    if payload.image is not None:
+        image = payload.image.strip()
+        if image and not _owned_background_image(scope, image):
+            raise HTTPException(400, "背景图片不存在或无权使用")
+    if payload.opacity is not None:
+        if not 0 <= payload.opacity <= 100:
+            raise HTTPException(400, "opacity 必须是 0-100 的整数")
+        opacity = payload.opacity
+
+    # 再次归一化：如 image 模式但图片被清空 → 自动回落 theme
+    mode, color, image, opacity = _normalize_background(mode, color, image, opacity)
+    setattr(us, prefix + "mode", mode)
+    setattr(us, prefix + "color", color)
+    setattr(us, prefix + "image", image)
+    setattr(us, prefix + "opacity", opacity)
+    scope.save_user_settings()
+    return _background_view(us)
 
 
 @router.get("/my/quota")

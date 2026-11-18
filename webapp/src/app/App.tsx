@@ -35,6 +35,8 @@ import { stopReadAloud } from '../services/speech/readAloud.js'
 import { CollapsedSider } from '../components/sider/CollapsedSider.js'
 import { closeMobileSider, useMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
+import { BackgroundLayer } from '../components/background/BackgroundLayer.js'
+import { clearBackground, loadBackground } from '../services/background.js'
 import styles from './App.module.css'
 
 export const App = () => {
@@ -117,8 +119,11 @@ export const App = () => {
     }
     if (token) {
       void initChat()
+      // 背景与会话并行加载：首屏先用本机缓存播种，接口返回后再校准
+      void loadBackground()
     } else {
       resetChat()
+      clearBackground()
     }
   }, [authReady, token])
 
@@ -136,6 +141,7 @@ export const App = () => {
   return (
     <>
       <div ref={frameRef} className={styles.frame}>
+        <BackgroundLayer />
         {isMobile ? <MobileSider /> : siderCollapsed ? null : <Sider />}
         <main className={styles.main}>
           {saveError ? (

@@ -185,19 +185,32 @@ const encodeJpeg = (
     )
   })
 
+export type CompressOptions = {
+  /** 压缩后长边上限（像素），默认 COMPRESS_MAX_EDGE */
+  maxEdge?: number
+  /** 目标文件大小上限（字节），默认 COMPRESS_TARGET_MB */
+  targetBytes?: number
+  /** true 时无视「已达标/GIF」，始终解码并重编码 JPEG（背景图统一格式用） */
+  force?: boolean
+}
+
 /**
- * 非 GIF 图片自动压缩：超过 COMPRESS_TARGET_MB 时解码 → 缩放 → 重编码 JPEG，
+ * 非 GIF 图片自动压缩：超过目标大小时解码 → 缩放 → 重编码 JPEG，
  * 逐档降质量、仍超标再缩小长边，直到落入目标大小；返回改名 .jpg 的新 File。
- * GIF 或已在目标以内的图片原样返回。失败时抛错，由调用方提示并整批放弃。
+ * GIF 或已在目标以内的图片原样返回（force 时除外）。失败时抛错，由调用方提示。
  */
-export const compressImageFile = async (file: File): Promise<File> => {
-  const targetBytes = COMPRESS_TARGET_MB * MB
-  if (file.size <= targetBytes || isGifFile(file)) {
+export const compressImageFile = async (
+  file: File,
+  options: CompressOptions = {}
+): Promise<File> => {
+  const targetBytes = options.targetBytes ?? COMPRESS_TARGET_MB * MB
+  const maxEdge = options.maxEdge ?? COMPRESS_MAX_EDGE
+  if (!options.force && (file.size <= targetBytes || isGifFile(file))) {
     return file
   }
   const decoded = await decodeImage(file)
   try {
-    let scale = Math.min(1, COMPRESS_MAX_EDGE / Math.max(decoded.width, decoded.height))
+    let scale = Math.min(1, maxEdge / Math.max(decoded.width, decoded.height))
     for (let round = 0; round < MAX_COMPRESS_ROUNDS; round++) {
       for (const quality of JPEG_QUALITIES) {
         const blob = await encodeJpeg(decoded.source, decoded.width, decoded.height, scale, quality)

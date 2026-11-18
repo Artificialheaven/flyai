@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   IconBoltOutline16,
   IconChartOutline16,
@@ -21,7 +21,16 @@ import {
 } from '../base/icons.js'
 import { importSessions, removeAllSessions } from '../../services/chat/store.js'
 import { useAuth } from '../../services/flyai/auth.js'
-import { FlyApiError } from '../../services/flyai/client.js'
+import { assetUrl, FlyApiError } from '../../services/flyai/client.js'
+import { uploadImage } from '../../services/flyai/lore.js'
+import { compressImageFile } from '../../services/attachments.js'
+import {
+  saveDeviceBackground,
+  setLocalBackground,
+  useBackground,
+} from '../../services/background.js'
+import { deviceKind, type DeviceKind } from '../../services/device.js'
+import type { BackgroundMode } from '../../services/flyai/admin.js'
 import {
   parseDeepSeekExport,
   type ParsedDeepSeekExport,
@@ -238,6 +247,7 @@ const SettingsContent = () => {
         return (
           <>
             <ThemeSetting />
+            <BackgroundSetting />
             <LocaleSetting />
             <TtsVoiceSetting />
             <LocationSetting />
@@ -593,6 +603,383 @@ const ThemeSetting = () => {
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+const HEX_RE = /^#[0-9a-fA-F]{6}$/
+/** 源文件上限：超过直接拒绝，不做压缩 */
+const BG_SOURCE_LIMIT = 20 * 1024 * 1024
+/** 压缩目标：长边 2560、文件 ≤3MB（服务端上传上限 5MB） */
+const BG_MAX_EDGE = 2560
+const BG_TARGET_BYTES = 3 * 1024 * 1024
+const BG_COLOR_SAVE_DELAY = 500
+
+const backgroundDevices: { value: DeviceKind; label: TranslationKey }[] = [
+  { value: 'desktop', label: 'backgroundDeviceDesktop' },
+  { value: 'mobile', label: 'backgroundDeviceMobile' },
+]
+
+const backgroundModes: { value: BackgroundMode; label: TranslationKey }[] = [
+  { value: 'theme', label: 'backgroundModeTheme' },
+  { value: 'solid', label: 'backgroundModeSolid' },
+  { value: 'image', label: 'backgroundModeImage' },
+]
+
+const defaultSolidColor = () =>
+  typeof document !== 'undefined' && document.body.classList.contains('dark')
+    ? '#1a1a1c'
+    : '#f2f3f5'
+
+type BgSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+type BgPatch = {
+  mode?: BackgroundMode
+  color?: string
+  image?: string
+  opacity?: number
+}
+
+/**
+ * 应用背景：电脑/手机各一套，云端随账号同步。
+ * 颜色改动即时预览、500ms 防抖保存；图片先压缩（长边 2560 / ≤3MB）再上传。
+ */
+const BackgroundSetting = () => {
+  const t = useTranslate()
+  // 默认展示当前设备，另一台可手动切换
+  const [device, setDevice] = useState<DeviceKind>(deviceKind)
+  const desktop = useBackground((state) => state.desktop)
+  const mobile = useBackground((state) => state.mobile)
+  const active = device === 'desktop' ? desktop : mobile
+
+  const [status, setStatus] = useState<BgSaveStatus>('idle')
+  const [busy, setBusy] = useState<'compress' | 'upload' | null>(null)
+  const [error, setError] = useState<TranslationKey | null>(null)
+  const [hexDraft, setHexDraft] = useState(active.color)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const timerRef = useRef<number | null>(null)
+  const pendingRef = useRef<{ device: DeviceKind; patch: BgPatch } | null>(null)
+  const saveSeq = useRef(0)
+
+  // 切换设备或服务端校准后同步颜色草稿，并清掉上一台设备的状态
+  useEffect(() => {
+    setHexDraft(active.color)
+    setStatus('idle')
+    setError(null)
+  }, [device, active.color])
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      // 面板关闭时把还在防抖中的改动补发，避免只预览生效但没落库
+      const pending = pendingRef.current
+      if (pending) {
+        pendingRef.current = null
+        void saveDeviceBackground(pending.device, pending.patch).catch(() => {})
+      }
+    },
+    []
+  )
+
+  const persist = async (patch: BgPatch) => {
+    const seq = ++saveSeq.current
+    setStatus('saving')
+    setError(null)
+    try {
+      await saveDeviceBackground(device, patch)
+      if (seq === saveSeq.current) {
+        setStatus('saved')
+      }
+    } catch {
+      if (seq === saveSeq.current) {
+        setStatus('error')
+      }
+    }
+  }
+
+  // 取色器拖动/透明度滑动的防抖保存：即时预览，停手后才打接口
+  const scheduleSave = (patch: BgPatch) => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+    }
+    pendingRef.current = { device, patch }
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      pendingRef.current = null
+      void persist(patch)
+    }, BG_COLOR_SAVE_DELAY)
+  }
+
+  const chooseMode = (mode: BackgroundMode) => {
+    if (mode === active.mode) {
+      return
+    }
+    setError(null)
+    if (mode === 'image' && !active.image) {
+      // 还没图：直接打开文件选择，选完自动切到图片模式
+      inputRef.current?.click()
+      return
+    }
+    if (mode === 'solid' && !active.color) {
+      const color = defaultSolidColor()
+      setHexDraft(color)
+      setLocalBackground(device, { mode, color })
+      void persist({ mode, color })
+      return
+    }
+    setLocalBackground(device, { mode })
+    void persist({ mode })
+  }
+
+  const commitHex = () => {
+    const value = hexDraft.trim().toLowerCase()
+    if (!HEX_RE.test(value)) {
+      setHexDraft(active.color)
+      setError('backgroundColorInvalid')
+      return
+    }
+    setError(null)
+    if (value === active.color) {
+      return
+    }
+    setHexDraft(value)
+    setLocalBackground(device, { color: value })
+    void persist({ color: value })
+  }
+
+  const handleFile = async (file: File | undefined) => {
+    if (!file) {
+      return
+    }
+    setError(null)
+    setStatus('idle')
+    if (file.size > BG_SOURCE_LIMIT) {
+      setError('backgroundFileTooLarge')
+      return
+    }
+    setBusy('compress')
+    let compressed: File
+    try {
+      compressed = await compressImageFile(file, {
+        maxEdge: BG_MAX_EDGE,
+        targetBytes: BG_TARGET_BYTES,
+        force: true,
+      })
+    } catch {
+      setBusy(null)
+      setError('backgroundDecodeFailed')
+      return
+    }
+    setBusy('upload')
+    try {
+      const url = await uploadImage(compressed)
+      setBusy(null)
+      setLocalBackground(device, { mode: 'image', image: url })
+      await persist({ mode: 'image', image: url })
+    } catch {
+      setBusy(null)
+      setStatus('error')
+      setError('backgroundUploadFailed')
+    }
+  }
+
+  const removeImage = () => {
+    setError(null)
+    setLocalBackground(device, { mode: 'theme', image: '' })
+    void persist({ mode: 'theme', image: '' })
+  }
+
+  const reset = () => {
+    setError(null)
+    setHexDraft('')
+    setLocalBackground(device, {
+      mode: 'theme', color: '', image: '', opacity: 100,
+    })
+    void persist({ mode: 'theme', color: '', image: '', opacity: 100 })
+  }
+
+  const statusError = error !== null || status === 'error'
+  const statusText =
+    busy === 'compress'
+      ? t('backgroundCompressing')
+      : busy === 'upload'
+        ? t('backgroundUploading')
+        : error !== null
+          ? t(error)
+          : status === 'saving'
+            ? t('backgroundSaving')
+            : status === 'saved'
+              ? t('backgroundSaved')
+              : status === 'error'
+                ? t('backgroundSaveFailed')
+                : null
+
+  return (
+    <div className={styles.bg}>
+      <div className={styles.bgHeader}>
+        <div className={styles.bgTitle}>{t('backgroundTitle')}</div>
+        <div role="tablist" aria-label={t('backgroundTitle')} className={styles.bgDevices}>
+          {backgroundDevices.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              role="tab"
+              aria-selected={device === item.value}
+              className={clsx(
+                styles.bgDevice,
+                device === item.value && styles.bgDeviceActive
+              )}
+              disabled={busy !== null}
+              onClick={() => setDevice(item.value)}
+            >
+              {t(item.label)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={styles.description}>{t('backgroundHint')}</div>
+
+      <div role="radiogroup" aria-label={t('backgroundTitle')} className={styles.bgModes}>
+        {backgroundModes.map((mode) => (
+          <button
+            key={mode.value}
+            type="button"
+            role="radio"
+            aria-checked={active.mode === mode.value}
+            className={clsx(
+              styles.bgMode,
+              active.mode === mode.value && styles.bgModeSelected
+            )}
+            disabled={busy !== null}
+            onClick={() => chooseMode(mode.value)}
+          >
+            {t(mode.label)}
+          </button>
+        ))}
+      </div>
+
+      {active.mode !== 'theme' ? (
+        <div className={styles.bgOpacityRow}>
+          <span className={styles.bgOpacityLabel}>{t('backgroundOpacity')}</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            className={styles.bgOpacityRange}
+            aria-label={t('backgroundOpacity')}
+            value={active.opacity}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const opacity = Number(event.target.value)
+              // 即时预览，停手 500ms 后保存
+              setLocalBackground(device, { opacity })
+              scheduleSave({ opacity })
+            }}
+          />
+          <span className={styles.bgOpacityValue}>{active.opacity}%</span>
+        </div>
+      ) : null}
+
+      {active.mode === 'solid' ? (
+        <div className={styles.bgColorRow}>
+          <input
+            type="color"
+            className={styles.bgColorInput}
+            aria-label={t('backgroundColor')}
+            value={HEX_RE.test(active.color) ? active.color : '#f2f3f5'}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const color = event.target.value.toLowerCase()
+              setError(null)
+              setHexDraft(color)
+              // 即时预览，保存走防抖；拖动取色器时不会每帧打接口
+              setLocalBackground(device, { color })
+              scheduleSave({ color })
+            }}
+          />
+          <input
+            type="text"
+            className={styles.bgHex}
+            aria-label={t('backgroundColor')}
+            value={hexDraft}
+            maxLength={7}
+            spellCheck={false}
+            placeholder="#rrggbb"
+            disabled={busy !== null}
+            onChange={(event) => setHexDraft(event.target.value)}
+            onBlur={commitHex}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+          />
+        </div>
+      ) : null}
+
+      {active.mode === 'image' ? (
+        <div className={styles.bgImageRow}>
+          {active.image ? (
+            <img
+              className={styles.bgThumb}
+              src={assetUrl(active.image)}
+              alt={t('backgroundImageAlt')}
+            />
+          ) : null}
+          <Button
+            variant="outlined"
+            size="s"
+            disabled={busy !== null}
+            onClick={() => inputRef.current?.click()}
+          >
+            {active.image ? t('backgroundReplaceImage') : t('backgroundPickImage')}
+          </Button>
+          {active.image ? (
+            <Button
+              variant="outlined"
+              size="s"
+              disabled={busy !== null}
+              onClick={removeImage}
+            >
+              {t('backgroundRemoveImage')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className={styles.bgFooter}>
+        <div
+          className={clsx(styles.description, statusError && styles.error)}
+          role="status"
+          aria-live="polite"
+        >
+          {statusText ?? t('backgroundSyncHint')}
+        </div>
+        <button
+          type="button"
+          className={styles.bgReset}
+          disabled={busy !== null}
+          onClick={reset}
+        >
+          {t('backgroundReset')}
+        </button>
+      </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          // 清空 value：同一张图改过后还能再次选择
+          event.target.value = ''
+          void handleFile(file)
+        }}
+      />
     </div>
   )
 }
