@@ -617,15 +617,17 @@ def _title_provider(state, sc, speakers, req, provider):
 
 
 def _schedule_auto_title(*, sc, run, session_id: str, provider,
-                         first_text: str, expected_title: str) -> None:
+                         first_text: str, expected_title: str):
     """后台生成首轮标题并落库；仅在标题仍等于 expected_title 时覆盖。
 
     store.get() → set_title → save() 之间不得有 await：单事件循环线程内
     该片段相对 drive 的同步落盘是原子的，避免把生成期间的编辑覆盖掉。
     不能用 save_merged（title 属合并字段，会被磁盘旧值还原）。
+
+    返回后台任务（未调度时为 None），供终态 done 判断标题是否仍在生成。
     """
     if provider is None or not session_id:
-        return
+        return None
     seed = (first_text or "").strip() or "（用户发送了一张图片）"
 
     async def _job():
@@ -654,9 +656,9 @@ def _schedule_auto_title(*, sc, run, session_id: str, provider,
             logger.exception("自动标题生成失败 sid=%s", session_id)
 
     try:
-        asyncio.create_task(_job())
+        return asyncio.create_task(_job())
     except RuntimeError:
-        pass
+        return None
 
 # 图片输入约束
 _ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
@@ -1573,6 +1575,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     if not run_manager.try_lock_for(sc.uid, session.id, run):
         raise HTTPException(409, "该会话已有进行中的回答，请等待结束或重连续读")
 
+    # 首轮自动标题的后台任务；drive 收尾时据此告知客户端标题仍在生成
+    title_task = None
+
     # 房间默认 provider 延迟解析（参数已给则直接用）：
     # 所有座位都有专属 provider 时可无默认
     try:
@@ -1664,7 +1669,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             # 才让 AI 拟标题（用户给房间起过名的保持原样）
             if (_count_user_messages(session) == 1
                     and _is_default_title(session.title)):
-                _schedule_auto_title(
+                title_task = _schedule_auto_title(
                     sc=sc, run=run, session_id=session.id,
                     provider=_title_provider(state, sc, speakers, req, provider),
                     first_text=req.message or "",
@@ -2035,6 +2040,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 最后一位发言者的 done 才结束整个运行
                 fan_done = dict(done_data or {"reason": "stop", "iterations": attempts})
                 fan_done["terminal"] = spk is speakers[-1]
+                # 标题仍在生成时，终态帧之后到达的 session_title 已不会被客户端收取；
+                # 带上标记让前端在收尾后短轮询把标题补回侧栏
+                if (fan_done["terminal"] and title_task is not None
+                        and not title_task.done()):
+                    fan_done["title_pending"] = True
                 # 隐藏遗留的空白 assistant 消息（被重试舍弃的空白回合）；真正的跳过则隐藏最后一条。
                 if skipped and ender is not None and ender.role == "assistant":
                     ender.hidden = True

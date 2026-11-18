@@ -1,6 +1,7 @@
 """首轮自动标题：后台让 AI 拟标题，仅在用户未改过标题时覆盖。"""
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -37,18 +38,25 @@ def _run(coro):
 class _TitleProvider:
     """max_tokens==64 的调用视为标题请求，其余是正常对话。"""
 
-    def __init__(self, title="京都旅行", fail_title=False):
+    def __init__(self, title="京都旅行", fail_title=False,
+                 title_delay=0.0, reply_delay=0.0):
         self.title = title
         self.fail_title = fail_title
+        self.title_delay = title_delay
+        self.reply_delay = reply_delay
         self.title_calls = []
 
     async def stream_chat(self, messages, tool_specs, **kwargs):
         if kwargs.get("max_tokens") == 64:
             self.title_calls.append(list(messages))
+            if self.title_delay:
+                await asyncio.sleep(self.title_delay)
             if self.fail_title:
                 raise ProviderError("标题接口 500")
             yield StreamEvent(StreamEventType.CONTENT_DELTA, self.title)
             return
+        if self.reply_delay:
+            await asyncio.sleep(self.reply_delay)
         yield StreamEvent(StreamEventType.CONTENT_DELTA, "好的")
 
 
@@ -235,3 +243,61 @@ def test_title_failure_keeps_default_title(tmp_path):
     # 主回复不受影响
     t = store.get(s.id).thread(dm.id)
     assert any(m.role == "assistant" and m.content == "好的" for m in t.messages)
+
+
+def _parse_sse(frames):
+    """把 SSE 文本帧解析成 (event, data) 列表。"""
+    events = []
+    for frame in frames:
+        text = frame.decode("utf-8") if isinstance(frame, bytes) else frame
+        name = None
+        data = None
+        for line in text.splitlines():
+            if line.startswith("event: "):
+                name = line[len("event: "):].strip()
+            elif line.startswith("data: "):
+                raw = line[len("data: "):].strip()
+                data = json.loads(raw) if raw else None
+        if name:
+            events.append((name, data))
+    return events
+
+
+def test_title_pending_flag_when_title_loses_the_race(tmp_path):
+    """回复先结束、标题还在生成时，终态 done 带 title_pending，让前端收尾后补取。"""
+    state, sc, store, s, dm, _m, provider = _setup(tmp_path, "新会话")
+    provider.title_delay = 0.3
+
+    async def body():
+        resp = await _chat_in_thread(state, sc, s, _req(dm.id), provider)
+        frames = await _drain(resp)
+        events = _parse_sse(frames)
+        # 收尾时标题任务还没跑完，标题事件不可能出现在流里
+        assert not any(name == "session_title" for name, _ in events)
+        done = [data for name, data in events if name == "done"]
+        assert len(done) == 1
+        assert done[0]["terminal"] is True
+        assert done[0]["title_pending"] is True
+        # 后台任务仍在继续，跑完会落库
+        await asyncio.sleep(0.4)
+        return store.get(s.id).title
+
+    assert _run(body()) == "京都旅行"
+
+
+def test_no_title_pending_when_title_already_emitted(tmp_path):
+    """标题先于回复完成时，done 不带 title_pending（客户端无需轮询）。"""
+    state, sc, store, s, dm, _m, provider = _setup(tmp_path, "新会话")
+    # 回复慢于标题，标题事件赶在 done 之前送达
+    provider.reply_delay = 0.2
+
+    async def body():
+        resp = await _chat_in_thread(state, sc, s, _req(dm.id), provider)
+        frames = await _drain(resp)
+        return _parse_sse(frames)
+
+    events = _run(body())
+    assert any(name == "session_title" for name, _ in events)
+    done = [data for name, data in events if name == "done"]
+    assert len(done) == 1
+    assert "title_pending" not in done[0]

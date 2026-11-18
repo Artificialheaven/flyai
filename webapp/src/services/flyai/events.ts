@@ -63,7 +63,8 @@ export type ChatStreamEvent =
   /** 首轮后台自动标题生成完毕（可能在 done 之前到达；之后到达的不会再送） */
   | { type: 'session_title'; sessionId?: string; title: string }
   | { type: 'error'; message: string; fatal: boolean }
-  | { type: 'done'; usage?: Usage; terminal: boolean }
+  /** titlePending：终态时标题仍在后台生成，客户端收尾后需轮询补取 */
+  | { type: 'done'; usage?: Usage; terminal: boolean; titlePending?: boolean }
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
@@ -175,6 +176,7 @@ export const decodeChatEvent = (event: string, rawData: unknown): ChatStreamEven
         usage: d.usage && typeof d.usage === 'object' ? (d.usage as Usage) : undefined,
         // 群聊单个 AI 结束时 terminal=false；缺省视为终态
         terminal: d.terminal !== false,
+        titlePending: d.title_pending === true,
       }
     default:
       return null

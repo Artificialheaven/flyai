@@ -730,6 +730,31 @@ const refreshSession = async (id: string, epoch: number, force = false) => {
   }
 }
 
+/** 首轮 AI 标题任务在回答结束后才完成时补取：终态帧之后生成的事件不会再推给
+ *  客户端（SSE 已收尾），收尾后短轮询会话详情把新标题写回侧栏。 */
+const AUTO_TITLE_POLL_DELAY = 1500
+const AUTO_TITLE_POLL_ATTEMPTS = 10
+
+const pollAutoTitle = async (id: string, epoch: number) => {
+  for (let attempt = 0; attempt < AUTO_TITLE_POLL_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, AUTO_TITLE_POLL_DELAY))
+    if (epoch !== historyEpoch || deletingSessions.has(id) || getStreamController(id)) {
+      return
+    }
+    let title: string
+    try {
+      title = (await fetchSession(id)).title
+    } catch {
+      continue
+    }
+    if (!title || title === getSession(id)?.title) {
+      continue
+    }
+    updateSession(id, (session) => (session.title === title ? session : { ...session, title }))
+    return
+  }
+}
+
 /** 后端时代不再有本地保存失败，保留空实现以兼容调用方 */
 export const retrySaveSessions = () => {}
 
@@ -1807,6 +1832,8 @@ const streamReply = async (
   let markerTimer = 0
   /** 收到终态帧，本轮正常结束 */
   let terminal = false
+  /** 终态时首轮 AI 标题仍在后台生成（done.title_pending），收尾后需轮询补取 */
+  let titlePending = false
   /** 运行已不在后台（服务重启/运行过期），本地已渲染内容即最终结果 */
   let authoritative = false
   /** 重连次数耗尽：保留已渲染内容并提示手动刷新 */
@@ -1954,6 +1981,7 @@ const streamReply = async (
         if (event.terminal) {
           terminal = true
         }
+        titlePending = titlePending || event.titlePending === true
         break
       default:
         break
@@ -2219,6 +2247,9 @@ const streamReply = async (
         }, STOP_REFRESH_DELAY)
       } else {
         void refreshSession(sessionId, epoch, authoritative)
+      }
+      if (terminal && titlePending) {
+        void pollAutoTitle(sessionId, epoch)
       }
     }
   }
