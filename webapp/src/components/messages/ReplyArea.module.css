@@ -217,6 +217,50 @@
   margin-top: 4px;
 }
 
+/* 可点击的工具行（联网搜索）：与搜索结果行一致的悬浮/选中胶囊 */
+.toolClickable {
+  width: fit-content;
+  cursor: pointer;
+
+  & > .toolBody {
+    width: auto;
+  }
+}
+
+.toolClickable::before,
+.toolActive::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 3px;
+  left: -10px;
+  width: calc(100% + 20px);
+  height: calc(100% - 6px);
+  border-radius: 100px;
+  opacity: 0;
+  transition:
+    opacity 0.2s,
+    background-color 0.2s;
+}
+
+.toolClickable::before {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.toolClickable:hover::before {
+  opacity: 1;
+}
+
+.toolActive::before {
+  background-color: var(--dsw-alias-interactive-bg-active);
+  opacity: 1;
+}
+
+.toolClickable:hover,
+.toolActive {
+  --search-row-site-logo-color: var(--dsw-alias-interactive-bg-hover);
+}
+
 .toolBody {
   display: flex;
   flex-wrap: wrap;

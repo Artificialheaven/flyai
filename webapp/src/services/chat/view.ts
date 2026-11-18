@@ -108,6 +108,21 @@ export type ToolAudio = {
   meta: GeneratedAudioMeta | null
 }
 
+/** web_search 输出里的一条结果（服务端只给标题/链接/摘要） */
+export type ToolSearchResult = {
+  title: string
+  url: string
+  snippet: string
+}
+
+/** web_fetch 打开过的页面；同一 URL 分页读取时 previews 会有多段 */
+export type ToolPage = {
+  id: string
+  url: string
+  title: string
+  previews: string[]
+}
+
 export type ToolStep = {
   type: 'tool'
   key: string
@@ -122,6 +137,10 @@ export type ToolStep = {
   audio?: ToolAudio
   /** search_pixiv 的候选列表：编号、pid 与候选缩略图路径 */
   pixiv?: PixivCandidate[]
+  /** web_search 的结构化结果：行内展示「搜索到 N 个网页」与站点图标 */
+  search?: { query: string; results: Source[] }
+  /** 相邻成功的 web_fetch 合并成一行「浏览 N 个页面」 */
+  pages?: ToolPage[]
 }
 
 export const isDeepSearchKind = (kind: ServerToolKind) =>
@@ -187,6 +206,94 @@ export const getSiteName = (url: string) => {
     return ''
   }
 }
+
+/** 站点图标：搜索结果没有服务端图标时直取站点根目录的 favicon，加载失败由 FallbackImage 兜底 */
+const siteIconFor = (url: string): string | null => {
+  try {
+    const { protocol, origin } = new URL(url)
+    return protocol === 'http:' || protocol === 'https:' ? `${origin}/favicon.ico` : null
+  } catch {
+    return null
+  }
+}
+
+const SEARCH_HEADER = /^（web_search「(.*?)」，共 \d+ 条结果）$/
+const FETCH_HEADER = /^\[(?:网页|订阅源|JSON 数据|文本)\](?: (.*))?$/
+
+/**
+ * 解析 web_search 的工具输出（后端 _format_results 的纯文本格式）。
+ * 流式预览与历史回放都只有这段文本，解析结果用于行内「搜索到 N 个网页」。
+ */
+export const parseSearchOutput = (
+  output: string
+): { query: string; results: ToolSearchResult[] } | null => {
+  const lines = output.split('\n')
+  const header = SEARCH_HEADER.exec(lines[0] ?? '')
+  if (!header) {
+    return null
+  }
+  const results: ToolSearchResult[] = []
+  let current: ToolSearchResult | null = null
+  for (const line of lines.slice(1)) {
+    const title = /^\d+\. (.*)$/.exec(line)
+    if (title) {
+      current = { title: title[1].trim(), url: '', snippet: '' }
+      results.push(current)
+      continue
+    }
+    if (!current) {
+      continue
+    }
+    const url = /^ {3}URL: (\S+)$/.exec(line)
+    if (url) {
+      current.url = url[1]
+      continue
+    }
+    const snippet = /^ {3}摘要：(.*)$/.exec(line)
+    if (snippet) {
+      current.snippet = snippet[1].trim()
+    }
+  }
+  return { query: header[1], results: results.filter((item) => item.url) }
+}
+
+/** 解析 web_fetch 输出头部的标题与最终 URL（[网页]/[订阅源]/[JSON 数据]/[文本]） */
+export const parseFetchOutput = (output: string): { url: string; title: string } | null => {
+  const lines = output.split('\n')
+  const head = FETCH_HEADER.exec(lines[0] ?? '')
+  const url = /^URL: (\S+)$/.exec(lines[1] ?? '')
+  if (!head || !url) {
+    return null
+  }
+  const title = (head[1] ?? '').trim()
+  return { url: url[1], title: title && title !== '(无标题)' ? title : url[1] }
+}
+
+/** 搜索结果转成面板通用的 Source（编号按结果顺序） */
+export const searchOutputToSources = (
+  parsed: { results: ToolSearchResult[] }
+): Source[] =>
+  parsed.results.map((item, index) => ({
+    url: item.url,
+    title: item.title || item.url,
+    siteName: getSiteName(item.url),
+    publishedAt: null,
+    snippet: item.snippet || null,
+    siteIcon: siteIconFor(item.url),
+    index: index + 1,
+  }))
+
+/** web_fetch 打开过的页面转成面板通用的 Source */
+export const pagesToSources = (pages: ToolPage[]): Source[] =>
+  pages.map((page, index) => ({
+    url: page.url,
+    title: page.title,
+    siteName: getSiteName(page.url),
+    publishedAt: null,
+    snippet: null,
+    siteIcon: siteIconFor(page.url),
+    index: index + 1,
+  }))
 
 const getStatus = (
   result: WebSearchToolResultBlock | WebFetchToolResultBlock | undefined,
@@ -380,17 +487,55 @@ export const buildReplyView = (reply: AssistantMessage, streaming: boolean): Rep
     }
     if (block.type === 'tool') {
       flushPreamble()
+      // 流结束后仍未收到 tool_end 的调用（停止、断流）按失败态展示。
+      const status = block.status === 'wip' && !streaming ? 'failed' : block.status
+      const search =
+        block.name === 'web_search' && status === 'done'
+          ? parseSearchOutput(block.preview ?? '')
+          : null
+      const page =
+        block.name === 'web_fetch' && status === 'done'
+          ? parseFetchOutput(block.preview ?? '')
+          : null
+      // 连续成功的抓取合并成一行「浏览 N 个页面」；同一 URL 的分页读取只计一个页面。
+      if (page) {
+        const last = steps.at(-1)
+        if (last && last.type === 'tool' && last.pages) {
+          const existing = last.pages.find((item) => item.url === page.url)
+          if (existing) {
+            existing.previews.push(block.preview ?? '')
+          } else {
+            last.pages.push({
+              id: block.id,
+              url: page.url,
+              title: page.title,
+              previews: [block.preview ?? ''],
+            })
+          }
+          return
+        }
+      }
       steps.push({
         type: 'tool',
         key: block.id,
         name: block.name,
         statusText: block.statusText,
-        // 流结束后仍未收到 tool_end 的调用（停止、断流）按失败态展示。
-        status: block.status === 'wip' && !streaming ? 'failed' : block.status,
+        status,
         preview: block.preview,
         image: getToolImage(block.preview),
         audio: getToolAudio(block.preview),
         pixiv: getToolPixiv(block.name, block.preview),
+        search: search ? { query: search.query, results: searchOutputToSources(search) } : undefined,
+        pages: page
+          ? [
+              {
+                id: block.id,
+                url: page.url,
+                title: page.title,
+                previews: [block.preview ?? ''],
+              },
+            ]
+          : undefined,
       })
       return
     }

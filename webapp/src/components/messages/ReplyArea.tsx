@@ -1,6 +1,12 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
-import { memo, useEffect, useState, type ReactNode } from 'react'
+import {
+  memo,
+  useEffect,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import {
   IconBrowseOutline16,
   IconBrowseWarningOutline16,
@@ -21,6 +27,7 @@ import {
   getToolLabel,
   isDeepSearchKind,
   isImageSearchKind,
+  pagesToSources,
   type FindStep,
   type OpenStep,
   type PageItem,
@@ -275,12 +282,26 @@ const ToolRow = ({
   icon,
   children,
   isLast,
+  onClick,
+  clickable,
+  active,
 }: {
   icon: ReactNode
   children: ReactNode
   isLast: boolean
+  onClick?: () => void
+  clickable?: boolean
+  active?: boolean
 }) => (
-  <div className={clsx(styles.tool, !isLast && styles.withLine)}>
+  <div
+    className={clsx(
+      styles.tool,
+      !isLast && styles.withLine,
+      clickable && styles.toolClickable,
+      active && styles.toolActive
+    )}
+    onClick={onClick}
+  >
     <span className={clsx(styles.rowIcon, styles.toolIcon)}>{icon}</span>
     <div className={styles.toolBody}>{children}</div>
   </div>
@@ -400,9 +421,26 @@ const ReadLinkRow = ({ step, isLast }: { step: ReadLinkStep; isLast: boolean }) 
   )
 }
 
+/** 联网工具的「查看结果」开关：结果可展开（后端流式只给 4000 字符摘录） */
+const OutputChip = ({
+  open,
+  onToggle,
+}: {
+  open: boolean
+  onToggle: (event: ReactMouseEvent) => void
+}) => {
+  const t = useTranslate()
+  return (
+    <span className={styles.chip} onClick={onToggle}>
+      <span className={styles.chipText}>{t(open ? 'toolHideOutput' : 'toolViewOutput')}</span>
+      {open ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+    </span>
+  )
+}
+
 /**
  * FlyAI 后端的工具调用：进行中展示后端的过程文案，结束后展示工具名与结果；
- * 结果可展开查看（后端流式只给 4000 字符摘录）。
+ * 联网工具按 chat-demo 风格展示「搜索到 N 个网页」/「浏览 N 个页面」，并保留查看结果按钮。
  */
 const ToolCallRow = ({
   step,
@@ -417,6 +455,7 @@ const ToolCallRow = ({
 }) => {
   const t = useTranslate()
   const [open, setOpen] = useState(false)
+  const entry = useSearchPanel((state) => state.entry)
   const wip = step.status === 'wip'
   const stopped = step.status === 'failed' && !streaming && message.status === 'stopped'
   const failed = step.status === 'failed' && !stopped
@@ -424,6 +463,69 @@ const ToolCallRow = ({
   // 生图 / 语音输出只展示富媒体（在消息气泡下方），不展开原始标记文本。
   const expandable = !wip && !stopped && !!preview && !step.image && !step.audio
   const label = getToolLabel(step.name)
+  const panelEntry = `${message.id}-${step.key}`
+  const toggleOutput = (event: ReactMouseEvent) => {
+    event.stopPropagation()
+    setOpen((value) => !value)
+  }
+  const chip = expandable ? <OutputChip open={open} onToggle={toggleOutput} /> : null
+
+  // 联网搜索：结果列表 + 站点图标，点击行打开右侧搜索结果面板。
+  const search = step.search
+  if (search && !failed) {
+    const count = search.results.length
+    return (
+      <ToolRow
+        icon={<IconSearchOutline16 />}
+        isLast={isLast}
+        clickable={count > 0}
+        active={entry === panelEntry}
+        onClick={count > 0 ? () => toggleSearchPanel(panelEntry, search.results) : undefined}
+      >
+        <span className={styles.summary}>
+          {count === 0
+            ? t('toolSearchNoResult')
+            : t(count === 1 ? 'toolSearch1Result' : 'toolSearchResults', { count })}
+        </span>
+        {count > 0 ? <SiteThumbnails sources={search.results} /> : null}
+        {chip}
+        {open && preview ? <pre className={styles.toolPreview}>{preview}</pre> : null}
+      </ToolRow>
+    )
+  }
+
+  // 抓取网页：相邻成功调用合并为「浏览 N 个页面」，每页是外部链接。
+  const pages = step.pages
+  if (pages && pages.length > 0) {
+    const count = pages.length
+    const pagePreview = pages
+      .map((page) => page.previews.filter((item) => item.trim()).join('\n\n'))
+      .filter(Boolean)
+      .join('\n\n')
+    return (
+      <ToolRow icon={<IconBrowseOutline16 />} isLast={isLast}>
+        <span className={styles.intro}>
+          {t(count === 1 ? 'toolOpenOneIntro' : 'toolOpensIntro', { count })}
+        </span>
+        {pages.slice(0, 5).map((page) => (
+          <PageLink
+            key={page.id}
+            page={{ id: page.id, url: page.url, title: page.title, status: 'done' }}
+          />
+        ))}
+        {count > 5 ? (
+          <span
+            className={styles.chip}
+            onClick={() => toggleSearchPanel(`${panelEntry}-open`, pagesToSources(pages))}
+          >
+            <span className={styles.chipText}>{t('toolOpenViewAll')}</span>
+          </span>
+        ) : null}
+        {chip ? <OutputChip open={open} onToggle={toggleOutput} /> : null}
+        {open && pagePreview ? <pre className={styles.toolPreview}>{pagePreview}</pre> : null}
+      </ToolRow>
+    )
+  }
 
   let body: ReactNode
   if (wip) {
@@ -457,14 +559,7 @@ const ToolCallRow = ({
             </>
           )}
         </span>
-        {expandable ? (
-          <span className={styles.chip} onClick={() => setOpen((value) => !value)}>
-            <span className={styles.chipText}>
-              {t(open ? 'toolHideOutput' : 'toolViewOutput')}
-            </span>
-            {open ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
-          </span>
-        ) : null}
+        {chip}
         {open && preview ? <pre className={styles.toolPreview}>{preview}</pre> : null}
       </>
     )
