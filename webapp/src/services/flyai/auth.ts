@@ -16,6 +16,16 @@ export type AuthUser = {
 
 type LoginResponse = AuthUser & { token: string }
 
+export type EmailCodePurpose = 'register' | 'reset'
+
+/** 登录页能力探测：决定是否显示邀请码/邮箱字段与「忘记密码」入口 */
+export type RegisterInfo = {
+  /** 旧服务器没有该字段，按「需要邀请码」处理 */
+  invite_required: boolean
+  email_required: boolean
+  password_reset_enabled: boolean
+}
+
 /** 与旧站完全一致的本地键名，切换前端时登录态可平滑继承 */
 const TOKEN_KEY = 'flyai-token'
 const UID_KEY = 'flyai-uid'
@@ -28,8 +38,14 @@ type AuthState = {
   /** 启动恢复（GET /me）完成前为 false，避免登录页闪烁 */
   ready: boolean
   login: (name: string, password: string) => Promise<void>
-  /** 邀请码注册：成功即自动登录，响应形态与 login 一致 */
-  register: (name: string, password: string, inviteCode: string) => Promise<void>
+  /** 邀请码 + 邮箱验证码注册：成功即自动登录，响应形态与 login 一致 */
+  register: (
+    name: string,
+    password: string,
+    inviteCode: string,
+    email: string,
+    emailCode: string
+  ) => Promise<void>
   logout: () => Promise<void>
   /** 启动时用本地令牌恢复会话并向后端校验有效性 */
   restore: () => Promise<void>
@@ -77,10 +93,16 @@ export const useAuth = create<AuthState>((set, get) => ({
     set({ token, user })
   },
 
-  register: async (name, password, inviteCode) => {
+  register: async (name, password, inviteCode, email, emailCode) => {
     const data = await request<LoginResponse>('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ name, password, invite_code: inviteCode }),
+      body: JSON.stringify({
+        name,
+        password,
+        invite_code: inviteCode,
+        email,
+        email_code: emailCode,
+      }),
       silent401: true,
     })
     persistLogin(data)
@@ -126,3 +148,30 @@ export const useAuth = create<AuthState>((set, get) => ({
     showToast(translate('sessionExpired'))
   },
 }))
+
+/** 登录页能力探测；后端关闭邮件验证时两个标志都为 false */
+export const fetchRegisterInfo = (): Promise<RegisterInfo> =>
+  request<RegisterInfo>('/api/auth/register-info', { silent401: true })
+
+/** 发送邮箱验证码；成功后后端返回 retry_after（秒）作为本地倒计时时长 */
+export const sendEmailCode = (
+  email: string,
+  purpose: EmailCodePurpose
+): Promise<{ ok: boolean; retry_after?: number }> =>
+  request<{ ok: boolean; retry_after?: number }>('/api/auth/email-code', {
+    method: 'POST',
+    body: JSON.stringify({ email, purpose }),
+    silent401: true,
+  })
+
+/** 邮箱验证码找回密码；成功返回用户名供登录页预填 */
+export const resetPassword = (
+  email: string,
+  code: string,
+  newPassword: string
+): Promise<{ ok: boolean; name: string }> =>
+  request<{ ok: boolean; name: string }>('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ email, code, new_password: newPassword }),
+    silent401: true,
+  })

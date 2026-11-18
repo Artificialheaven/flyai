@@ -16,11 +16,12 @@ from flyai.invites import InviteStore
 from flyai.user import UserStore
 
 
-def _state(tmp_path, default_quota=0.0, admin_name="root"):
+def _state(tmp_path, default_quota=0.0, admin_name="root", require_invite=True):
     cfg = AppConfig()
     cfg.auth.admin.username = admin_name
     cfg.auth.admin.password = "secret"
     cfg.registration.default_quota = default_quota
+    cfg.registration.require_invite = require_invite
     return SimpleNamespace(
         config=cfg,
         user_store=UserStore(tmp_path),
@@ -52,6 +53,8 @@ def test_register_success_auto_login_and_marks_invite(tmp_path):
     assert rec["uid"] == resp["id"]
     u = state.user_store.get_by_id(resp["id"])
     assert u is not None and u.name == "bob" and u.check_password("pw")
+    # 注册即自动登录，注册与上次登录时间都已记录
+    assert u.created_at and u.last_login_at
     # 默认额度 0
     assert u.quota_total == 0
     invite = state.invite_store.check(code)
@@ -149,6 +152,19 @@ def test_register_rate_limited_after_repeated_failures(tmp_path):
         register(_payload(invite_code="NOPE-NOPE-NOPE"), _req(state))
     assert ei.value.status_code == 429
     assert "注册失败次数过多" in ei.value.detail
+
+
+def test_register_without_invite_when_disabled(tmp_path):
+    # 关闭「注册需要邀请码」后，不传邀请码也不依赖邀请码服务即可注册
+    state = _state(tmp_path, require_invite=False)
+    state.invite_store = None
+    resp = register(_payload(), _req(state))
+    assert resp["token"]
+    u = state.user_store.get_by_id(resp["id"])
+    assert u is not None and u.name == "bob"
+    # 传入的邀请码也不会被消费（此时没有邀请码服务）
+    resp = register(_payload(name="carol", invite_code="ABCD-EFGH"), _req(state))
+    assert state.user_store.get_by_name("carol") is not None
 
 
 def test_register_requires_invite_store(tmp_path):

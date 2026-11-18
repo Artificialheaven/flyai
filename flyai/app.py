@@ -25,7 +25,9 @@ from .config import (
     save_config,
 )
 from .auth_sessions import AuthSessionStore, LoginRateLimiter, resolve_uid
+from .email_codes import EmailCodeStore
 from .errors import ConfigError
+from .mailer import Mailer
 from .updates import APK_MIME
 from .providers.base import BaseProvider
 from .providers.factory import create_provider
@@ -74,6 +76,9 @@ class AppState:
     # 登录凭证（随机 token）与登录限速
     auth_sessions: AuthSessionStore = field(default_factory=AuthSessionStore)
     login_limiter: LoginRateLimiter = field(default_factory=LoginRateLimiter)
+    # 邮箱验证码（内存态）与 SMTP 发信器
+    email_codes: EmailCodeStore = field(default_factory=EmailCodeStore)
+    mailer: Mailer = field(default_factory=Mailer)
     # 待确认的压缩提案：{proposal_id: {uid,sid,room,raw,basesig,ts}}
     _compress_proposals: Dict[str, dict] = field(default_factory=dict)
     # web_fetch 完整正文缓存（分页翻页不重复下载，短 TTL）

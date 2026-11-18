@@ -12,9 +12,11 @@ from fastapi import HTTPException
 
 from flyai.api.routes_auth import (
     CreateUserPayload,
+    LoginPayload,
     UpdateUserPayload,
     create_user,
     list_users,
+    login,
     me,
     update_user,
 )
@@ -68,6 +70,22 @@ def test_list_users_includes_quota(tmp_path):
     row = next(u for u in users if u["id"] == out["id"])
     assert row["quota"]["total"] == pytest.approx(3)
     assert row["quota"]["remaining"] == pytest.approx(2)
+
+
+def test_list_users_includes_timestamps(tmp_path):
+    state = _state(tmp_path)
+    out = _create(state)
+    row = next(u for u in list_users(_req(state))["users"] if u["id"] == out["id"])
+    assert row["created_at"]
+    # 管理员代建、尚未登录过
+    assert row["last_login_at"] == ""
+
+    login(LoginPayload(name="小高", password="pw"), _req(state))
+    row = next(u for u in list_users(_req(state))["users"] if u["id"] == out["id"])
+    assert row["last_login_at"]
+    # 落盘后重新加载仍保留
+    reloaded = UserStore(tmp_path).get_by_id(out["id"])
+    assert reloaded is not None and reloaded.last_login_at == row["last_login_at"]
 
 
 def test_patch_quota_to_up_and_unlimited(tmp_path):

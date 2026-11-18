@@ -1,0 +1,14 @@
+.dialog {
+  max-width: 520px;
+}
+
+/* 保留管理后台填写的换行；长公告在弹窗内滚动 */
+.content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+  max-height: 50vh;
+  overflow-y: auto;
+  font-size: 14px;
+  color: var(--dsw-alias-label-primary);
+}

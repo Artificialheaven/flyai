@@ -101,6 +101,29 @@ export type DeepSeekSettingsView = {
   tts_voice: string
 }
 
+/** 邮件服务（仅 admin 可见；password 为掩码，password_set 表示服务端已存授权码） */
+export type EmailSettingsView = {
+  enabled: boolean
+  host: string
+  port: number
+  encryption: 'ssl' | 'starttls' | 'none'
+  username: string
+  password: string
+  password_set: boolean
+  from_name: string
+  from_address: string
+  code_ttl_seconds: number
+  resend_interval_seconds: number
+  hourly_limit: number
+}
+
+/** 启动公告：每次打开应用（含登录页）弹出 */
+export type AnnouncementView = {
+  enabled: boolean
+  title: string
+  content: string
+}
+
 /** GET /api/config 的子集：模型管理与系统默认值需要的字段 */
 export type AdminConfig = {
   active_provider?: string
@@ -128,7 +151,11 @@ export type AdminConfig = {
   /** DeepSeek 服务：仅 admin 视图包含 */
   deepseek?: DeepSeekSettingsView
   /** 邀请码注册设置：仅 admin 视图包含 */
-  registration?: { default_quota: number }
+  registration?: { default_quota: number; require_invite?: boolean }
+  /** 启动公告：仅 admin 视图包含（展示内容另有公开接口） */
+  announcement?: AnnouncementView
+  /** 邮件服务（注册验证码/找回密码）：仅 admin 视图包含 */
+  email?: EmailSettingsView
   [key: string]: unknown
 }
 
@@ -187,7 +214,12 @@ export type SharePayload = { shared: boolean; min_level: number }
 export type AdminUser = {
   id: string
   name: string
+  email?: string
   level: number
+  /** ISO 本地时间；旧后端/管理员新建的用户可能缺省 */
+  created_at?: string
+  /** 上次登录时间；空串表示从未登录 */
+  last_login_at?: string
   quota: QuotaView | null
 }
 
@@ -256,6 +288,13 @@ export const testProvider = (providerId: string): Promise<{ ok: boolean; message
 export const testDeepSeek = (): Promise<{ ok: boolean; message: string }> =>
   request<{ ok: boolean; message: string }>('/api/config/test/deepseek', {
     method: 'POST',
+  })
+
+/** 用已保存的邮件配置发一封测试信（收件人为空时后端回落到账号邮箱） */
+export const testEmail = (to: string): Promise<{ ok: boolean; message: string }> =>
+  request<{ ok: boolean; message: string }>('/api/config/test/email', {
+    method: 'POST',
+    body: JSON.stringify({ to }),
   })
 
 export const createProvider = (payload: ProviderPayload): Promise<ProviderView> =>

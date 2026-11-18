@@ -16,7 +16,14 @@ import { formatDate } from '../../utils/format.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
-import { errorText, NumberField, PanelEmpty, PanelError, TextField } from './admin/AdminCommon.js'
+import {
+  errorText,
+  NumberField,
+  PanelEmpty,
+  PanelError,
+  SwitchRow,
+  TextField,
+} from './admin/AdminCommon.js'
 import styles from './admin/AdminPanels.module.css'
 
 const copy = async (text: string) => {
@@ -202,6 +209,8 @@ export const InvitePanel = () => {
 const AdminInviteSections = ({ onChanged }: { onChanged: () => void }) => {
   const t = useTranslate()
   const [quota, setQuota] = useState('0')
+  // 后端缺省为 true；旧配置没有该字段时保持「需要邀请码」
+  const [requireInvite, setRequireInvite] = useState(true)
   const [quotaBusy, setQuotaBusy] = useState(false)
   const [quotaError, setQuotaError] = useState('')
   const [customCode, setCustomCode] = useState('')
@@ -218,6 +227,7 @@ const AdminInviteSections = ({ onChanged }: { onChanged: () => void }) => {
     try {
       const config = await getConfig()
       setQuota(String(config.registration?.default_quota ?? 0))
+      setRequireInvite(config.registration?.require_invite !== false)
     } catch (err) {
       setQuotaError(t('inviteLoadFailed', { message: errorText(err) }))
     }
@@ -252,7 +262,8 @@ const AdminInviteSections = ({ onChanged }: { onChanged: () => void }) => {
     setQuotaBusy(true)
     setQuotaError('')
     try {
-      await putConfig({ registration: { default_quota: value } })
+      // 两个字段必须一起提交：后端 parse_obj 会把缺省的 require_invite 重置为 true
+      await putConfig({ registration: { default_quota: value, require_invite: requireInvite } })
       showToast({ key: 'inviteDefaultQuotaSaved' })
     } catch (err) {
       setQuotaError(t('adminSaveFailed', { message: errorText(err) }))
@@ -309,6 +320,12 @@ const AdminInviteSections = ({ onChanged }: { onChanged: () => void }) => {
       <div className={styles.card}>
         <div className={styles.sectionTitle}>{t('inviteDefaultQuota')}</div>
         {quotaError ? <PanelError message={quotaError} /> : null}
+        <SwitchRow
+          label={t('inviteRequireSwitch')}
+          desc={t('inviteRequireSwitchDesc')}
+          checked={requireInvite}
+          onChange={setRequireInvite}
+        />
         <NumberField
           label={t('inviteDefaultQuota')}
           hint={t('inviteDefaultQuotaHint')}

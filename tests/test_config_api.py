@@ -44,6 +44,17 @@ CHAT_KEY = "sk-chat-secret-key-456"
 IMG_KEY = "ark-image-secret-key-789"
 
 
+class FakeMailer:
+    def __init__(self):
+        self.sent = []
+        self.error = None
+
+    def send_test(self, cfg, to):
+        if self.error is not None:
+            raise self.error
+        self.sent.append(to)
+
+
 class FakeUserStore:
     def __init__(self):
         self.users = {}
@@ -84,6 +95,7 @@ def _mkstate(tmp_path):
         _scopes={},
         auth_sessions=AuthSessionStore(),
         login_limiter=LoginRateLimiter(),
+        mailer=FakeMailer(),
         reload_providers=lambda: None,
         reload_tools=lambda: None,
     )
@@ -891,13 +903,27 @@ def test_registration_default_quota_admin_only(tmp_path):
     state = _mkstate(tmp_path)
     put_config(ConfigPayload(registration={"default_quota": 12}), _req(state))
     assert state.config.registration.default_quota == 12
+    # 未提交的 require_invite 回落默认值 true
+    assert state.config.registration.require_invite is True
     view = get_config(_req(state))
-    assert view["registration"] == {"default_quota": 12}
+    assert view["registration"] == {"default_quota": 12, "require_invite": True}
     # 落盘后重新加载仍保留
     assert load_config(tmp_path / "config.json").registration.default_quota == 12
 
     state.user_store.add("u10", level=0)
     assert "registration" not in get_config(_req(state, "u10"))
+
+
+def test_registration_require_invite_roundtrip(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(
+        ConfigPayload(registration={"default_quota": 5, "require_invite": False}),
+        _req(state),
+    )
+    assert state.config.registration.require_invite is False
+    view = get_config(_req(state))
+    assert view["registration"] == {"default_quota": 5, "require_invite": False}
+    assert load_config(tmp_path / "config.json").registration.require_invite is False
 
 
 def test_registration_default_quota_normalized(tmp_path):
@@ -908,3 +934,134 @@ def test_registration_default_quota_normalized(tmp_path):
     assert state.config.registration.default_quota == -1
     put_config(ConfigPayload(registration={"default_quota": "oops"}), _req(state))
     assert state.config.registration.default_quota == 0
+
+
+# ---- SMTP 邮件服务：仅 admin 可见，授权码掩码 + 正文兑现，测试发信 ----
+
+def test_email_section_admin_only_masked(tmp_path):
+    state = _mkstate(tmp_path)
+    view = get_config(_req(state))
+    em = view["email"]
+    assert em["enabled"] is False
+    assert em["password"] == "" and em["password_set"] is False
+
+    state.config.email.username = "bot@qq.com"
+    state.config.email.password = "qq-auth-code"
+    view = get_config(_req(state))
+    em = view["email"]
+    assert em["password"] == mask_api_key("qq-auth-code")
+    assert em["password"] != "qq-auth-code"
+    assert em["password_set"] is True
+    assert "qq-auth-code" not in str(view)
+
+    # 普通用户：整段消失
+    state.user_store.add("u10", level=10)
+    assert "email" not in get_config(_req(state, "u10"))
+
+
+def test_email_put_roundtrip_and_credits_password(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(email={
+        "enabled": True,
+        "host": "smtp.qq.com",
+        "port": 465,
+        "encryption": "ssl",
+        "username": "bot@qq.com",
+        "password": "qq-auth-code",
+        "from_name": "FlyAI",
+        "from_address": "noreply@example.com",
+        "code_ttl_seconds": 900,
+        "resend_interval_seconds": 90,
+        "hourly_limit": 5,
+    }), _req(state))
+    em = state.config.email
+    assert em.enabled is True and em.password == "qq-auth-code"
+    assert em.code_ttl_seconds == 900
+    assert em.resend_interval_seconds == 90
+    assert em.hourly_limit == 5
+    assert load_config(tmp_path / "config.json").email.password == "qq-auth-code"
+
+    # 掩码串回传 → 兑现旧授权码；其它字段照常更新
+    put_config(ConfigPayload(email={
+        "enabled": True,
+        "username": "bot@qq.com",
+        "password": mask_api_key("qq-auth-code"),
+        "hourly_limit": 6,
+    }), _req(state))
+    assert state.config.email.password == "qq-auth-code"
+    assert state.config.email.hourly_limit == 6
+
+    # 空授权码 → 同样保留
+    put_config(ConfigPayload(email={
+        "enabled": True,
+        "username": "bot@qq.com",
+        "password": "",
+        "hourly_limit": 7,
+    }), _req(state))
+    assert state.config.email.password == "qq-auth-code"
+    assert state.config.email.hourly_limit == 7
+
+
+def test_email_values_clamped(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(email={
+        "enabled": True,
+        "password": "k",
+        "code_ttl_seconds": 5,
+        "resend_interval_seconds": 9999,
+        "hourly_limit": 0,
+    }), _req(state))
+    em = state.config.email
+    assert em.code_ttl_seconds == 60
+    assert em.resend_interval_seconds == 600
+    assert em.hourly_limit == 1
+
+
+def test_email_test_send_ok(tmp_path):
+    import asyncio
+
+    from flyai.api.routes_config import TestEmailPayload, test_email
+
+    state = _mkstate(tmp_path)
+    state.config.email.username = "bot@qq.com"
+    state.config.email.password = "qq-auth-code"
+
+    out = asyncio.run(test_email(TestEmailPayload(), _req(state)))
+    assert out["ok"] is True and "bot@qq.com" in out["message"]
+    assert state.mailer.sent == ["bot@qq.com"]
+
+    out = asyncio.run(test_email(TestEmailPayload(to=" to@example.com "),
+                                 _req(state)))
+    assert out["ok"] is True and state.mailer.sent[-1] == "to@example.com"
+
+
+def test_email_test_no_recipient(tmp_path):
+    import asyncio
+
+    from flyai.api.routes_config import TestEmailPayload, test_email
+
+    state = _mkstate(tmp_path)
+    out = asyncio.run(test_email(TestEmailPayload(), _req(state)))
+    assert out["ok"] is False and "收件邮箱" in out["message"]
+
+    state.config.email.from_address = "noreply@example.com"
+    out = asyncio.run(test_email(TestEmailPayload(), _req(state)))
+    assert out["ok"] is True and state.mailer.sent == ["noreply@example.com"]
+
+
+def test_email_test_failure_and_permission(tmp_path):
+    import asyncio
+
+    from flyai.api.routes_config import TestEmailPayload, test_email
+    from flyai.mailer import MailError
+
+    state = _mkstate(tmp_path)
+    state.config.email.username = "bot@qq.com"
+    state.mailer.error = MailError("SMTP 认证失败（QQ 邮箱请使用授权码）")
+    out = asyncio.run(test_email(TestEmailPayload(), _req(state)))
+    assert out["ok"] is False and "授权码" in out["message"]
+
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(test_email(TestEmailPayload(), _req(state, "u10")))
+    assert ei.value.status_code == 403

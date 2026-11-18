@@ -330,6 +330,33 @@
   gap: 8px;
 }
 
+/* ---- 用户搜索 / 未登录筛选 ---- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.filterInput {
+  flex: 1;
+  width: auto;
+  min-width: 180px;
+}
+
+.filterDays {
+  width: 88px;
+}
+
+.filterLabel {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
 .item {
   display: flex;
   align-items: center;

@@ -17,6 +17,29 @@ import styles from './AdminPanels.module.css'
 const formatNumber = (value: number): string =>
   (Math.round(value * 10) / 10).toLocaleString()
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** 后端时间为无时区的 ISO 本地时间；解析失败时原样展示 */
+const formatTime = (value?: string): string => {
+  const raw = (value ?? '').trim()
+  if (!raw) {
+    return '—'
+  }
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) {
+    return raw
+  }
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** 上次活跃时间：从未登录的用户按注册时间计算 */
+const lastActiveTime = (user: AdminUser): number => {
+  const raw = user.last_login_at || user.created_at || ''
+  const time = raw ? new Date(raw).getTime() : NaN
+  return Number.isFinite(time) ? time : NaN
+}
+
 const quotaText = (user: AdminUser): string => {
   const quota = user.quota
   if (!quota) {
@@ -40,6 +63,34 @@ export const UsersPanel = () => {
   const [editing, setEditing] = useState<AdminUser | null>(null)
   const [resetting, setResetting] = useState<AdminUser | null>(null)
   const [deleting, setDeleting] = useState<AdminUser | null>(null)
+  const [query, setQuery] = useState('')
+  const [inactiveDaysInput, setInactiveDaysInput] = useState('')
+
+  const normalizedQuery = query.trim().toLowerCase()
+  const inactiveDays = Number(inactiveDaysInput)
+  const inactiveFilter =
+    inactiveDaysInput.trim() !== '' && Number.isFinite(inactiveDays) && inactiveDays >= 0
+      ? inactiveDays
+      : null
+  const visibleUsers = users.filter((user) => {
+    if (normalizedQuery) {
+      const haystack = `${user.name} ${user.email ?? ''} ${user.id}`.toLowerCase()
+      if (!haystack.includes(normalizedQuery)) {
+        return false
+      }
+    }
+    if (inactiveFilter !== null) {
+      const lastActive = lastActiveTime(user)
+      // 无法解析时间时保留展示，避免用户「消失」
+      if (
+        Number.isFinite(lastActive) &&
+        Date.now() - lastActive < inactiveFilter * DAY_MS
+      ) {
+        return false
+      }
+    }
+    return true
+  })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -94,13 +145,35 @@ export const UsersPanel = () => {
         </div>
       </div>
       {error ? <PanelError message={error} /> : null}
+      <div className={styles.filters}>
+        <input
+          className={`${styles.input} ${styles.filterInput}`}
+          value={query}
+          placeholder={t('usersSearchPlaceholder')}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <span className={styles.filterLabel}>{t('usersInactiveDays')}</span>
+        <input
+          className={`${styles.input} ${styles.filterDays}`}
+          type="number"
+          min="0"
+          step="1"
+          value={inactiveDaysInput}
+          placeholder="0"
+          onChange={(event) => setInactiveDaysInput(event.target.value)}
+        />
+        <span className={styles.filterLabel}>{t('usersInactiveDaysUnit')}</span>
+      </div>
+      <div className={styles.hint}>{t('usersInactiveDaysHint')}</div>
       {loading ? (
         <PanelEmpty text={t('adminLoading')} />
       ) : users.length === 0 ? (
         <PanelEmpty text={t('usersEmpty')} />
+      ) : visibleUsers.length === 0 ? (
+        <PanelEmpty text={t('usersNoMatch')} />
       ) : (
         <div className={styles.list}>
-          {users.map((user) => (
+          {visibleUsers.map((user) => (
             <div key={user.id} className={styles.item}>
               <div className={styles.avatar}>{initial(user.name)}</div>
               <div className={styles.itemMain}>
@@ -115,6 +188,15 @@ export const UsersPanel = () => {
                   {user.quota && user.quota.total !== -1
                     ? ` · ${t('usersQuotaUsed', { used: formatNumber(user.quota.used) })}`
                     : ''}
+                </div>
+                <div className={styles.itemMeta}>
+                  {t('usersRegisteredAt', { date: formatTime(user.created_at) })}
+                  {' · '}
+                  {t('usersLastLogin', {
+                    date: user.last_login_at
+                      ? formatTime(user.last_login_at)
+                      : t('usersNeverLoggedIn'),
+                  })}
                 </div>
               </div>
               <div className={styles.itemActions}>

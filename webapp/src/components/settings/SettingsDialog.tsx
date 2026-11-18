@@ -11,7 +11,9 @@ import {
   IconLibraryOutline16,
   IconLightOutline16,
   IconLockOutline16,
+  IconNoticeOutline16,
   IconPanelLeftOutline16,
+  IconSendOutline16,
   IconSettingsOutline16,
   IconThinkOutline16,
   IconLinkOutline16,
@@ -44,8 +46,10 @@ import { DeepSeekImportDialog } from './DeepSeekImportDialog.js'
 import { InvitePanel } from './InvitePanel.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import { AccessPanel } from './admin/AccessPanel.js'
+import { AnnouncementPanel } from './admin/AnnouncementPanel.js'
 import { CdkPanel } from './admin/CdkPanel.js'
 import { DeepSeekPanel } from './admin/DeepSeekPanel.js'
+import { EmailPanel } from './admin/EmailPanel.js'
 import { FeaturesPanel } from './admin/FeaturesPanel.js'
 import { IntegrationPanel } from './admin/IntegrationPanel.js'
 import { MemoryPanel } from './admin/MemoryPanel.js'
@@ -141,6 +145,18 @@ const sections: {
     icon: <IconBoltOutline16 />,
     adminOnly: true,
   },
+  {
+    value: 'email',
+    label: 'settingDialogAsideEmailOptionLabel',
+    icon: <IconSendOutline16 />,
+    adminOnly: true,
+  },
+  {
+    value: 'announcement',
+    label: 'settingDialogAsideAnnouncementOptionLabel',
+    icon: <IconNoticeOutline16 />,
+    adminOnly: true,
+  },
 ]
 
 const SettingsContent = () => {
@@ -195,6 +211,10 @@ const SettingsContent = () => {
         return isAdmin ? <AccessPanel /> : null
       case 'deepseek':
         return isAdmin ? <DeepSeekPanel /> : null
+      case 'email':
+        return isAdmin ? <EmailPanel /> : null
+      case 'announcement':
+        return isAdmin ? <AnnouncementPanel /> : null
       case 'users':
         return isAdmin ? <UsersPanel /> : null
       case 'system':

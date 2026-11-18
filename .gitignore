@@ -14,3 +14,5 @@ test/temp/
 tools/frp/
 # 服务器 APK 发布包（大文件，仅分发用）
 webroot/*.apk
+# 本地发布产物（APK / 源码 zip，由 scripts/release.py 生成）
+release/

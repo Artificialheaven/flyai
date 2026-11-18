@@ -76,6 +76,7 @@ export const TextField = ({
   hint,
   value,
   placeholder,
+  type = 'text',
   disabled = false,
   onChange,
 }: {
@@ -83,6 +84,7 @@ export const TextField = ({
   hint?: string
   value: string
   placeholder?: string
+  type?: 'text' | 'password' | 'email'
   disabled?: boolean
   onChange: (value: string) => void
 }) => (
@@ -90,8 +92,41 @@ export const TextField = ({
     <span className={styles.fieldLabel}>{label}</span>
     <input
       className={styles.input}
+      type={type}
       value={value}
       placeholder={placeholder}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+    />
+    {hint ? <span className={styles.hint}>{hint}</span> : null}
+  </label>
+)
+
+/** 多行文本：公告正文等需要保留换行的配置 */
+export const TextAreaField = ({
+  label,
+  hint,
+  value,
+  placeholder,
+  rows = 8,
+  disabled = false,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  value: string
+  placeholder?: string
+  rows?: number
+  disabled?: boolean
+  onChange: (value: string) => void
+}) => (
+  <label className={styles.field}>
+    <span className={styles.fieldLabel}>{label}</span>
+    <textarea
+      className={styles.textarea}
+      value={value}
+      placeholder={placeholder}
+      rows={rows}
       disabled={disabled}
       onChange={(event) => onChange(event.target.value)}
     />

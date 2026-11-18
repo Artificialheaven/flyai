@@ -204,6 +204,8 @@ class RegistrationSettings(BaseModel):
     """邀请码注册设置（仅 admin 可见/可改）。"""
     # 新注册用户的初始额度（点数）；-1 表示不限，0 表示需管理员充值
     default_quota: float = 0
+    # 注册是否必须提供邀请码；关闭后任何人都可直接注册
+    require_invite: bool = True
 
     @validator("default_quota", pre=True)
     def _check_default_quota(cls, v):  # noqa: N805
@@ -216,6 +218,66 @@ class RegistrationSettings(BaseModel):
         if number < 0 and number != -1:
             return 0
         return number
+
+
+class AnnouncementSettings(BaseModel):
+    """启动公告（每次打开应用弹出；仅 admin 可改，公开接口下发展示内容）。"""
+    enabled: bool = False
+    title: str = "公告"
+    content: str = ""
+
+    @validator("title", pre=True)
+    def _trim_title(cls, v):  # noqa: N805
+        return str(v or "").strip()[:120]
+
+    @validator("content", pre=True)
+    def _trim_content(cls, v):  # noqa: N805
+        return str(v or "").strip()[:20000]
+
+
+class EmailSettings(BaseModel):
+    """SMTP 邮件服务（注册邮箱验证与找回密码；仅 admin 可见/可改）。"""
+    # 关闭时注册行为保持原样（只校验邀请码），不要求邮箱
+    enabled: bool = False
+    host: str = "smtp.qq.com"
+    port: int = 465
+    # ssl（465，推荐）/ starttls（587）/ none（明文，不推荐）
+    encryption: Literal["ssl", "starttls", "none"] = "ssl"
+    # QQ 邮箱账号；同时作为默认发件地址
+    username: str = ""
+    # SMTP 授权码（不是 QQ 登录密码）
+    password: str = ""
+    from_name: str = "FlyAI"
+    # 留空则使用 username
+    from_address: str = ""
+    # 验证码有效期 / 重发冷却 / 单邮箱每小时发码上限
+    code_ttl_seconds: int = 600
+    resend_interval_seconds: int = 60
+    hourly_limit: int = 10
+
+    @validator("code_ttl_seconds", pre=True)
+    def _clamp_ttl(cls, v):  # noqa: N805
+        return _clamp_int(v, 60, 3600, 600)
+
+    @validator("resend_interval_seconds", pre=True)
+    def _clamp_interval(cls, v):  # noqa: N805
+        return _clamp_int(v, 10, 600, 60)
+
+    @validator("hourly_limit", pre=True)
+    def _clamp_hourly(cls, v):  # noqa: N805
+        return _clamp_int(v, 1, 100, 10)
+
+    @validator("port", pre=True)
+    def _clamp_port(cls, v):  # noqa: N805
+        return _clamp_int(v, 1, 65535, 465)
+
+
+def _clamp_int(v: Any, low: int, high: int, default: int) -> int:
+    try:
+        number = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
 
 
 class HistorySettings(BaseModel):
@@ -966,6 +1028,8 @@ class AppConfig(BaseModel):
     roleplay: RoleplaySettings = RoleplaySettings()
     auth: AuthSettings = AuthSettings()
     registration: RegistrationSettings = RegistrationSettings()
+    announcement: AnnouncementSettings = AnnouncementSettings()
+    email: EmailSettings = EmailSettings()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     image_generation: ImageGenSettings = ImageGenSettings()
     image_models: List[ImageModelConfig] = []

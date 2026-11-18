@@ -33,8 +33,12 @@ class User:
 
     id: str = ""
     name: str = ""
+    # 注册邮箱（小写；空串=老用户或管理员手建未填），用于找回密码与唯一性
+    email: str = ""
     password_hash: str = ""
     created_at: str = ""
+    # 最近一次登录（含注册后自动登录）时间；空串=从未登录过
+    last_login_at: str = ""
     # 权限等级 0-255，决定可使用的共享模型；越大越高
     level: int = 0
     # 计费：对话次数总额（-1=无限）；累计已扣。每轮扣 1×当前模型倍率
@@ -59,8 +63,10 @@ class User:
         return {
             "id": self.id,
             "name": self.name,
+            "email": (self.email or "").strip().lower(),
             "password_hash": self.password_hash,
             "created_at": self.created_at,
+            "last_login_at": self.last_login_at,
             "level": int(self.level or 0),
             "quota_total": float(self.quota_total or 0),
             "quota_used": float(self.quota_used or 0),
@@ -77,8 +83,10 @@ class User:
         return cls(
             id=d.get("id", ""),
             name=d.get("name", ""),
+            email=str(d.get("email") or "").strip().lower(),
             password_hash=d.get("password_hash", ""),
             created_at=d.get("created_at", ""),
+            last_login_at=d.get("last_login_at", "") or "",
             level=int(d.get("level", 0) or 0),
             quota_total=_num("quota_total"),
             quota_used=max(0.0, _num("quota_used")),
@@ -131,10 +139,25 @@ class UserStore:
                 return u
         return None
 
-    def create(self, name: str, password: str, level: int = 0) -> User:
+    def get_by_email(self, email: str) -> Optional[User]:
+        """按邮箱查找（大小写不敏感）；空串不匹配任何人。"""
+        target = (email or "").strip().lower()
+        if not target:
+            return None
+        for u in self._users.values():
+            if (u.email or "").strip().lower() == target:
+                return u
+        return None
+
+    def create(
+        self, name: str, password: str, level: int = 0, email: str = ""
+    ) -> User:
         if self.get_by_name(name):
             raise ValueError(f"用户名已存在: {name}")
-        u = User(name=name, level=int(level or 0))
+        email = (email or "").strip().lower()
+        if email and self.get_by_email(email):
+            raise ValueError("该邮箱已被使用")
+        u = User(name=name, email=email, level=int(level or 0))
         if password:
             u.set_password(password)  # 空密码保留空 hash，check_password 视为任意输入可进入
         self._users[u.id] = u
@@ -151,6 +174,14 @@ class UserStore:
 
     def valid(self, uid: str) -> bool:
         return uid in self._users
+
+    def touch_login(self, uid: str) -> None:
+        """记录一次成功登录（注册后自动登录同样计入）。"""
+        u = self._users.get(uid)
+        if u is None:
+            return
+        u.last_login_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self._save()
 
     # ---- 计费额度 ----
 

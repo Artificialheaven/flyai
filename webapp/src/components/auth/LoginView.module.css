@@ -81,8 +81,43 @@
   word-break: break-word;
 }
 
+.notice {
+  margin-top: -6px;
+  color: var(--dsw-alias-brand-primary);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}
+
+.hint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* 验证码输入 + 获取按钮：输入框自适应，按钮不随窗口换行 */
+.codeRow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.codeRow .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.codeButton {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* 登录/注册模式切换：低调的纯文本链接，不抢主按钮 */
 .modeSwitch {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
   margin-top: -8px;
   text-align: center;
 }

@@ -48,7 +48,26 @@
     }
   },
   "registration": {
-    "default_quota": 0
+    "default_quota": 0,
+    "require_invite": true
+  },
+  "announcement": {
+    "enabled": false,
+    "title": "公告",
+    "content": ""
+  },
+  "email": {
+    "enabled": false,
+    "host": "smtp.qq.com",
+    "port": 465,
+    "encryption": "ssl",
+    "username": "",
+    "password": "",
+    "from_name": "FlyAI",
+    "from_address": "",
+    "code_ttl_seconds": 600,
+    "resend_interval_seconds": 60,
+    "hourly_limit": 10
   },
   "roleplay": {
     "format_enabled": true,

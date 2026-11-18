@@ -20,8 +20,10 @@ import { Welcome } from '../components/session/Welcome.js'
 import { LoginView } from '../components/auth/LoginView.js'
 import { useAuth } from '../services/flyai/auth.js'
 import { loadRuntimeConfig } from '../services/flyai/runtimeConfig.js'
-import { checkForAppUpdate } from '../services/flyai/appUpdate.js'
+import { checkForAppUpdate, useAppUpdate } from '../services/flyai/appUpdate.js'
+import { loadAnnouncement } from '../services/flyai/announcement.js'
 import { UpdateDialog } from '../components/update/UpdateDialog.js'
+import { AnnouncementDialog } from '../components/base/AnnouncementDialog.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { LoreDialog } from '../components/lore/LoreDialog.js'
 import { NewRoomDialog } from '../components/room/NewRoomDialog.js'
@@ -60,6 +62,8 @@ export const App = () => {
   const activeId = useChatStore((state) => state.activeId)
   const authReady = useAuth((state) => state.ready)
   const token = useAuth((state) => state.token)
+  // APK 更新弹窗优先；关闭后再显示启动公告
+  const updateDialogOpen = useAppUpdate((state) => state.open)
 
   usePreventPageScroll(isMobile)
 
@@ -97,10 +101,11 @@ export const App = () => {
   }, [])
 
   // 服务器地址来自根目录 config.json，必须在任何请求发出前加载完成；
-  // APK 内随后检查更新（静默失败，不阻塞启动）
+  // 随后并行拉取启动公告、检查 APK 更新（均静默失败，不阻塞启动）
   useEffect(() => {
     void loadRuntimeConfig().then(() => {
       useAuth.getState().restore()
+      void loadAnnouncement()
       void checkForAppUpdate()
     })
   }, [])
@@ -122,6 +127,7 @@ export const App = () => {
       <>
         <LoginView />
         <UpdateDialog />
+        {updateDialogOpen ? null : <AnnouncementDialog />}
         <Toast />
       </>
     )
@@ -190,6 +196,7 @@ export const App = () => {
       <LoreDialog />
       <NewRoomDialog />
       <UpdateDialog />
+      {updateDialogOpen ? null : <AnnouncementDialog />}
       <Toast />
     </>
   )

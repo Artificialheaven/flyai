@@ -17,8 +17,10 @@ from pydantic import BaseModel
 
 from ..config import (
     AccessSettings,
+    AnnouncementSettings,
     AppConfig,
     DeepSeekSettings,
+    EmailSettings,
     EmbeddingsConfig,
     ImageGenSettings,
     ImageModelConfig,
@@ -47,6 +49,7 @@ from ..models_access import visible_image_models, visible_providers
 from ..deepseek_tools import DeepSeekToolsClient
 from ..auth_sessions import resolve_uid
 from ..ids import InvalidName, check_model_id
+from ..mailer import MailError
 from ..user import ADMIN_UID
 from ..errors import DeepSeekError, ProviderError  # noqa: F401
 
@@ -122,10 +125,19 @@ class ConfigPayload(BaseModel):
     deepseek: Optional[dict] = None
     # 邀请码注册设置（仅 admin 可见/可改）
     registration: Optional[dict] = None
+    # 启动公告（仅 admin 可改；展示内容经公开接口下发）
+    announcement: Optional[dict] = None
+    # SMTP 邮件服务（含授权码，仅 admin 可见/可改）
+    email: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
     provider_id: Optional[str] = None
+
+
+class TestEmailPayload(BaseModel):
+    # 收件人；空则用 SMTP 账号/发件地址
+    to: str = ""
 
 
 # ---- 视图 ----
@@ -253,6 +265,15 @@ def _masked_config(state, uid: Optional[str] = None):
         out["deepseek"] = ds
         # 注册默认额度仅 admin 可见
         out["registration"] = cfg.registration.dict()
+        # 公告内容本身是公开信息，但编辑入口仅 admin
+        out["announcement"] = cfg.announcement.dict()
+        # SMTP 邮件服务：授权码只给掩码 + 是否已设置
+        em = cfg.email.dict()
+        em["password_set"] = bool(em.get("password"))
+        em["password"] = (
+            mask_api_key(em.get("password") or "") if em.get("password") else ""
+        )
+        out["email"] = em
     return out
 
 
@@ -448,6 +469,17 @@ def put_config(payload: ConfigPayload, request: Request):
         # 注册接口每次读 cfg.registration，保存后立即生效
         cfg.registration = RegistrationSettings.parse_obj(dict(payload.registration))
 
+    if payload.announcement is not None:
+        # 公开接口 /api/app/announcement 每次读 cfg.announcement，保存后立即生效
+        cfg.announcement = AnnouncementSettings.parse_obj(dict(payload.announcement))
+
+    if payload.email is not None:
+        # 空授权码/掩码串=保留旧值；认证路由每次读 cfg.email，保存后热生效
+        ed = dict(payload.email)
+        ed["password"] = _credit_key(
+            ed.get("password", ""), cfg.email.password)
+        cfg.email = EmailSettings.parse_obj(ed)
+
     _persist(state)
     if scheduler_changed:
         # 调度器开关/周期/时区热生效：在运行循环内安排重启
@@ -507,6 +539,34 @@ async def test_deepseek_key(request: Request):
             "message": "检测失败：%s: %s" % (type(exc).__name__, str(exc)[:300]),
         }
     return {"ok": True, "message": "Key 可用（已合成 %d 字节音频）" % len(audio)}
+
+
+@router.post("/config/test/email")
+async def test_email(payload: TestEmailPayload, request: Request):
+    """管理员用已保存的 SMTP 配置发送一封测试邮件。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    cfg = getattr(state.config, "email", None)
+    mailer = getattr(state, "mailer", None)
+    if cfg is None or mailer is None:
+        return {"ok": False, "message": "邮件服务未就绪"}
+    to = (
+        (payload.to or "").strip()
+        or (getattr(cfg, "username", "") or "").strip()
+        or (getattr(cfg, "from_address", "") or "").strip()
+    )
+    if not to:
+        return {"ok": False, "message": "请填写收件邮箱"}
+    try:
+        await asyncio.to_thread(mailer.send_test, cfg, to)
+    except MailError as exc:
+        return {"ok": False, "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - 探测失败一律回显原因
+        return {
+            "ok": False,
+            "message": "发送失败：%s" % type(exc).__name__,
+        }
+    return {"ok": True, "message": "测试邮件已发送至 %s" % to}
 
 
 # ---- 用户个人设置（data/{uid}/settings.json，所有登录用户可用）----

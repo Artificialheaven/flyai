@@ -257,6 +257,16 @@ export const IconSendOutline16 = () => (
   </svg>
 )
 
+/** 公告：启用后每次打开应用（含登录页）弹出 */
+export const IconNoticeOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M3.5 6.25H2.75A1.75 1.75 0 0 0 1 8v.5c0 .966.784 1.75 1.75 1.75h.75v1.5a1 1 0 0 0 1 1h.5a1 1 0 0 0 1-1v-1.5c.306-.057.6-.155.872-.288l3.44 1.72A1.75 1.75 0 0 0 13.3 10.02V4.48a1.75 1.75 0 0 0-2.488-1.576L7.372 4.624A3.24 3.24 0 0 0 6.25 4.5H4.75v1.5h1.5c.198 0 .39-.033.568-.095l.323-.111 3.66-1.83a.25.25 0 0 1 .356.222v5.54a.25.25 0 0 1-.356.224L7.14 8.12a3.25 3.25 0 0 1-3.05.055l-.59-.295V6.25Z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
 /** 设置图标直接绘制路径，各实例在侧边栏和弹窗中独立显示。 */
 export const IconSettingsOutline16 = () => (
   <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

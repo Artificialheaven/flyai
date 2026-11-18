@@ -1,4 +1,4 @@
-"""公开的应用元信息：webroot 中可下载的最新 Android 安装包。"""
+"""公开的应用元信息：webroot 中可下载的最新 Android 安装包、启动公告。"""
 
 from __future__ import annotations
 
@@ -34,4 +34,17 @@ def get_app_version(request: Request):
                 "size": release.size,
             }
         )
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/announcement")
+def get_announcement(request: Request):
+    """公开接口：公告在登录页也要弹出，不做鉴权、不缓存。"""
+    state = request.app.state.flyai
+    cfg = getattr(state.config, "announcement", None)
+    payload = {
+        "enabled": bool(getattr(cfg, "enabled", False)),
+        "title": str(getattr(cfg, "title", "") or ""),
+        "content": str(getattr(cfg, "content", "") or ""),
+    }
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
