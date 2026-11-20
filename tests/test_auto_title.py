@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from flyai.agent.runs import ChatRun, ChatRunManager
 from flyai.api.routes_chat import (
+    _AUTO_TITLE_MAX_TOKENS,
     _chat_in_thread,
     _clean_auto_title,
     _count_user_messages,
@@ -36,23 +37,28 @@ def _run(coro):
 
 
 class _TitleProvider:
-    """max_tokens==64 的调用视为标题请求，其余是正常对话。"""
+    """标题请求按 max_tokens 识别，其余视为正常对话。"""
 
     def __init__(self, title="京都旅行", fail_title=False,
-                 title_delay=0.0, reply_delay=0.0):
+                 truncate_title=False, title_delay=0.0, reply_delay=0.0):
         self.title = title
         self.fail_title = fail_title
+        # 模拟思考模型吃满 max_tokens：先出正文，再报截断错误
+        self.truncate_title = truncate_title
         self.title_delay = title_delay
         self.reply_delay = reply_delay
         self.title_calls = []
 
     async def stream_chat(self, messages, tool_specs, **kwargs):
-        if kwargs.get("max_tokens") == 64:
+        if kwargs.get("max_tokens") == _AUTO_TITLE_MAX_TOKENS:
             self.title_calls.append(list(messages))
             if self.title_delay:
                 await asyncio.sleep(self.title_delay)
             if self.fail_title:
                 raise ProviderError("标题接口 500")
+            if self.truncate_title:
+                yield StreamEvent(StreamEventType.CONTENT_DELTA, self.title[:2])
+                raise ProviderError("模型输出达到 token 上限被截断")
             yield StreamEvent(StreamEventType.CONTENT_DELTA, self.title)
             return
         if self.reply_delay:
@@ -241,6 +247,16 @@ def test_title_failure_keeps_default_title(tmp_path):
     _turn(state, sc, s, dm, provider)
     assert store.get(s.id).title == "新会话"
     # 主回复不受影响
+    t = store.get(s.id).thread(dm.id)
+    assert any(m.role == "assistant" and m.content == "好的" for m in t.messages)
+
+
+def test_truncated_title_uses_partial_text(tmp_path):
+    """思考模型吃满 max_tokens 被截断时，用已产出的正文落标题。"""
+    state, sc, store, s, dm, _m, provider = _setup(tmp_path, "新会话")
+    provider.truncate_title = True
+    _turn(state, sc, s, dm, provider)
+    assert store.get(s.id).title == "京都"
     t = store.get(s.id).thread(dm.id)
     assert any(m.role == "assistant" and m.content == "好的" for m in t.messages)
 

@@ -674,7 +674,10 @@ _AUTO_TITLE_PROMPT = (
     "消息只有图片或内容极少时，输出「图片分享」。"
 )
 _AUTO_TITLE_MAX_CHARS = 20
-_AUTO_TITLE_MAX_TOKENS = 64
+# 标题本身只需几十 token，但思考类模型（DeepSeek/豆包/GLM 等默认思考）会把
+# reasoning 算进 max_tokens，64 时常在正文前就吃满、被 finish_reason=length
+# 截断。放宽上限只影响「模型啰嗦」的极端情况，正常生成完即停。
+_AUTO_TITLE_MAX_TOKENS = 512
 _AUTO_TITLE_WRAPPERS = ("「」", "『』", "“”", "\"\"", "《》", "【】", "''")
 _AUTO_TITLE_TAIL_PUNCT = "。．.!！?？~～…、，,;；:："
 
@@ -759,6 +762,7 @@ def _schedule_auto_title(*, sc, run, session_id: str, provider,
                 system_prompt=_AUTO_TITLE_PROMPT,
                 max_tokens=_AUTO_TITLE_MAX_TOKENS,
                 session_id=session_id,
+                partial_ok=True,
             )
             title = _clean_auto_title(raw)
             if not title:
