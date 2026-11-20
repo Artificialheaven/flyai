@@ -24,6 +24,7 @@ import {
 } from '../../services/flyai/lore.js'
 import type { Character, World } from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
+import { openingOptions } from '../room/openingEntries.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
@@ -38,6 +39,7 @@ import {
 import { CharacterEditor } from './CharacterEditor.js'
 import { WorldEditor } from './WorldEditor.js'
 import { closeLore, useLoreDialog, type LoreTab } from './loreState.js'
+import { openNewRoom } from '../room/newRoomState.js'
 import styles from './Lore.module.css'
 
 type View = { kind: 'list' } | { kind: 'character'; initial: Character | null } | { kind: 'world'; initial: World | null }
@@ -137,12 +139,23 @@ const LoreContent = () => {
     }
   }
 
-  const startChat = (character: Character) =>
-    run(character.id, async () => {
+  const startChat = (character: Character) => {
+    // 有备选开场白或可选开局设定：转到新建房间弹窗（预选该卡）让用户挑；
+    // 都没有则保持一键直达。
+    if (
+      (character.alternate_greetings ?? []).some((greeting) => greeting.trim()) ||
+      openingOptions(character.table).length > 0
+    ) {
+      closeLore()
+      openNewRoom([character.id])
+      return
+    }
+    void run(character.id, async () => {
       await startRoomChat([character.id])
       closeLore()
       showToast(t('loreStartChatStarted'))
     })
+  }
 
   const fork = (character: Character) =>
     run(character.id, async () => {

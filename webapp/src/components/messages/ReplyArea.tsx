@@ -22,6 +22,7 @@ import {
   IconThinkOutline16,
 } from '../base/icons.js'
 import type { AssistantMessage } from '../../services/chat/types.js'
+import type { RegexScript } from '../../services/flyai/types.js'
 import {
   getAreaTitle,
   getToolLabel,
@@ -40,6 +41,7 @@ import {
 } from '../../services/chat/view.js'
 import { Tooltip } from '../base/Tooltip.js'
 import { Markdown } from '../markdown/Markdown.js'
+import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
 import styles from './ReplyArea.module.css'
@@ -68,11 +70,19 @@ export const ReplyArea = memo(function ReplyArea({
   view,
   streaming,
   hasResponse,
+  stScripts,
+  stDepth,
+  stHtml,
+  stVariables,
 }: {
   message: AssistantMessage
   view: ReplyView
   streaming: boolean
   hasResponse: boolean
+  stScripts?: RegexScript[]
+  stDepth?: number
+  stHtml?: MarkdownRenderOptions
+  stVariables?: Record<string, unknown>
 }) {
   useTranslate()
   const [open, setOpen] = useState(true)
@@ -106,6 +116,10 @@ export const ReplyArea = memo(function ReplyArea({
               sources={view.sources}
               streaming={streaming}
               isLast={index === view.steps.length - 1}
+              stScripts={stScripts}
+              stDepth={stDepth}
+              stHtml={stHtml}
+              stVariables={stVariables}
             />
           ))}
         </div>
@@ -128,12 +142,20 @@ const StepItem = ({
   sources,
   streaming,
   isLast,
+  stScripts,
+  stDepth,
+  stHtml,
+  stVariables,
 }: {
   step: Step
   message: AssistantMessage
   sources: Source[]
   streaming: boolean
   isLast: boolean
+  stScripts?: RegexScript[]
+  stDepth?: number
+  stHtml?: MarkdownRenderOptions
+  stVariables?: Record<string, unknown>
 }) => {
   switch (step.type) {
     case 'thinking': {
@@ -160,6 +182,10 @@ const StepItem = ({
             cacheKey={`${message.id}-${step.key}`}
             disableLink={false}
             sources={sources}
+            stScripts={stScripts}
+            stDepth={stDepth}
+            stHtml={stHtml}
+            stVariables={stVariables}
           />
         </ContentItem>
       )

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import logging
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -51,6 +52,7 @@ from ..sessions.resolve import (
     effective_character,
     effective_world,
     member_character,
+    opening_character,
     thread_messages,
     user_seat,
 )
@@ -151,8 +153,8 @@ def _install_proactor_services(services: dict, state, sc, member=None) -> None:
     """P3：把自我记忆/承诺存储按开关注入工具服务；缺失或关闭即不注入。"""
     cfg = getattr(state, "config", None)
     sm_store = getattr(state, "self_memory_store", None)
-    if sm_store is not None and getattr(getattr(cfg, "self_memory", None),
-                                        "enabled", True):
+    if sm_store is not None and feature_prefs.self_memory_active(
+            cfg, getattr(sc, "user_settings", None)):
         services["self_memory_store"] = sm_store
     c_store = getattr(state, "commitment_store", None)
     if c_store is not None and getattr(getattr(cfg, "proactor", None),
@@ -303,29 +305,100 @@ def _make_loop_starter(state, sc, run_manager: ChatRunManager):
     return _start
 
 
+def _st_regex_enabled(sc) -> bool:
+    """ST 正则的 prompt 侧开关（用户设置缺省开；卡内无脚本时天然无操作）。"""
+    us = getattr(sc, "user_settings", None)
+    value = getattr(us, "st_regex_prompt_enabled", None)
+    return True if value is None else bool(value)
+
+
+def _st_compile_scripts(sc, raw_scripts):
+    """编译某张卡的 prompt 侧脚本；关闭开关或无脚本时返回空表。
+
+    无效正则由引擎内部跳过并计数，绝不抛给请求层。
+    """
+    if not _st_regex_enabled(sc) or not raw_scripts:
+        return []
+    from ..st.regex_scripts import compile_scripts
+
+    scripts, _warnings = compile_scripts(raw_scripts, side="prompt")
+    return scripts
+
+
+def _st_regex_map(sc, character_ids) -> Dict[str, list]:
+    """角色 id → prompt 侧脚本表（群聊按消息所属卡查表）。"""
+    if not _st_regex_enabled(sc):
+        return {}
+    lore = getattr(sc, "lore", None)
+    out: Dict[str, list] = {}
+    seen = set()
+    for raw_id in character_ids or []:
+        cid = (raw_id or "").strip() if isinstance(raw_id, str) else ""
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        char = None
+        if lore is not None:
+            try:
+                char = lore.get_character(cid)
+            except Exception:
+                char = None
+        scripts = _st_compile_scripts(
+            sc, getattr(char, "regex_scripts", None) if char is not None else None
+        )
+        if scripts:
+            out[cid] = scripts
+    return out
+
+
 def _lore_depth_specs(querier, character, user_char, last_message,
-                      group_names=None) -> List[dict]:
-    """世界书/角色表的 @depth 常驻条目：掷概率 + 宏替换后返回注入规格。"""
-    if querier is None:
-        return []
-    try:
-        specs = querier.depth_block_specs()
-    except Exception:
-        logger.exception("深度常驻条目收集失败")
-        return []
-    if not specs:
-        return []
+                      group_names=None, variables=None) -> List[dict]:
+    """世界书/角色表的 @depth 常驻条目 + 卡级 depth_prompt：宏替换后返回注入规格。
+
+    depth_prompt 来自酒馆卡 extensions（{"prompt", "depth", "role"}），即使没有
+    世界书/角色表条目也要注入，因此这里不再提前 return。
+    """
     from ..tavern import render_tavern_macros
 
     char_name = getattr(character, "name", "") or "角色"
     user_name = getattr(user_char, "name", "") if user_char else ""
-    out = []
-    for s in specs:
-        out.append(dict(s, content=render_tavern_macros(
-            s.get("content") or "",
+
+    def _render(text: str) -> str:
+        return render_tavern_macros(
+            text or "",
             char_name=char_name, user_name=user_name or "用户",
             group_names=group_names or [], last_message=last_message or "",
-        )))
+            variables=variables,
+        )
+
+    specs: List[dict] = []
+    if querier is not None:
+        try:
+            specs = querier.depth_block_specs()
+        except Exception:
+            logger.exception("深度常驻条目收集失败")
+            specs = []
+    out = [dict(s, content=_render(s.get("content") or "")) for s in specs]
+
+    ext = getattr(character, "extensions", None)
+    dp = ext.get("depth_prompt") if isinstance(ext, dict) else None
+    if isinstance(dp, dict):
+        prompt = str(dp.get("prompt") or "").strip()
+        if prompt:
+            try:
+                depth = max(0, int(dp.get("depth") or 4))
+            except (TypeError, ValueError):
+                depth = 4
+            role = dp.get("role")
+            if role not in ("user", "assistant", "system"):
+                role = {0: "system", 1: "user", 2: "assistant"}.get(role, "system")
+            out.append({
+                "title": "depth_prompt",
+                "content": _render(prompt),
+                "role": role,
+                "depth": depth,
+                "order": 100,
+            })
     return out
 
 
@@ -543,6 +616,54 @@ def _schedule_extraction(state, sc, char_id, marker_key, history, member,
         pass
 
 
+# ---- 轮后 LLM 收尾（心情判定 / 第一人称自我记忆）----
+# 这些收尾在终态 done 帧之后才跑，且只写各自的状态库、不再改会话历史；
+# 若继续 await，run 会一直保持 running 并占着会话单飞锁，客户端收到 done
+# 后立刻发下一条就会被 409「该会话已有进行中的回答」拒掉。改为后台执行。
+_POST_TURN_TASKS = set()
+
+
+def _spawn_post_turn(label: str, factory) -> None:
+    """后台执行轮后收尾；factory 返回协程（延迟创建，避免无事件循环时报错）。"""
+
+    async def _job():
+        try:
+            await factory()
+        except Exception:
+            logger.exception("轮后收尾失败 %s", label)
+
+    try:
+        task = asyncio.create_task(_job())
+    except RuntimeError:
+        return
+    # 保留强引用，防止任务在完成前被 GC
+    _POST_TURN_TASKS.add(task)
+    task.add_done_callback(_POST_TURN_TASKS.discard)
+
+
+async def _post_turn_chat_hooks(state, sc, session_id, character_id,
+                                provider, transcript, had_pending) -> None:
+    await handle_post_turn_mood(
+        state, sc, session_id=session_id,
+        character_id=character_id,
+        transcript=transcript, provider=provider,
+        had_pending=had_pending,
+    )
+    await extract_self_after_turn(state, sc, transcript)
+
+
+async def _post_turn_room_hooks(state, sc, jobs, transcript) -> None:
+    # jobs: [(session_id, character_id, provider, turn_text, had_pending)]
+    for session_id, character_id, provider, turn_text, had_pending in jobs:
+        await handle_post_turn_mood(
+            state, sc, session_id=session_id,
+            character_id=character_id,
+            transcript=turn_text, provider=provider,
+            had_pending=had_pending,
+        )
+    await extract_self_after_turn(state, sc, transcript)
+
+
 # ---- 首轮自动标题 ----
 # 首条用户消息后，后台让当前 AI 拟一个短标题替换「新会话/消息前缀」。
 # 不阻塞回复、不计费、失败静默；生成期间用户若改过标题则放弃覆盖。
@@ -692,6 +813,10 @@ class ChatRequest(BaseModel):
     # 历史编辑 / 重新生成：二选一，锚点为该轮用户消息 id（仅 dm 窗口）
     edit_message_id: Optional[str] = None
     regenerate_message_id: Optional[str] = None
+    # L4-A 续写：目标是该窗口最后一条可见 AI 回复，生成增量并回同一条消息
+    continue_message_id: Optional[str] = None
+    # 消息来源标记：目前只接受 "card"（酒馆卡沙箱在用户确认后发起）
+    origin: Optional[str] = None
     # 定向发言（客户端解析输入框里的 @角色名）：被点名者按此顺序最先回复，
     # 其余座位跟后；仅 group 窗口生效
     target_member_ids: List[str] = []
@@ -795,6 +920,48 @@ def _normalize_skip_text(text: Optional[str]) -> str:
             s = s[:-1].strip()
             changed = True
     return s
+
+
+def _last_visible_assistant(history) -> Optional[Message]:
+    """窗口内最后一条可见且有正文的 AI 消息（续写锚点）。"""
+    for m in reversed(list(history or [])):
+        if m.role != "assistant":
+            continue
+        if getattr(m, "hidden", False) or getattr(m, "tombstone", None):
+            continue
+        if not (m.content or "").strip():
+            continue
+        return m
+    return None
+
+
+def _merge_continue_reply(thread, target, history, turn_start, base,
+                          session, mvu_on) -> str:
+    """L4-A 续写收尾：把本轮临时 assistant 增量并回目标消息后删除临时消息。
+
+    同一轮不新增消息；MVU 只对增量文本应用补丁。就地修改回复后必须同步活动
+    variant 快照，否则下次加载会被 heal_thread 误判成孤儿回复。
+    """
+    from ..st import mvu as st_mvu
+
+    parts = []
+    for m in history[turn_start:]:
+        if m.role != "assistant" or getattr(m, "hidden", False):
+            continue
+        if (m.content or "").strip():
+            parts.append(m.content or "")
+    delta = "".join(parts)
+    if delta:
+        target.content = (base or "") + delta
+        if mvu_on:
+            cur = (target.stat_data
+                   or (session.mvu or {}).get("stat_data") or {})
+            new_state, _applied, _warns = st_mvu.apply_updates(cur, delta)
+            target.stat_data = copy.deepcopy(new_state)
+            session.mvu["stat_data"] = copy.deepcopy(new_state)
+        versions.sync_active_reply(thread, target)
+    del history[turn_start:]
+    return delta
 
 
 def _build_images(req) -> Optional[List[ImageAttachment]]:
@@ -920,8 +1087,12 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         session = sc.store.create()
 
     if (not req.message.strip() and not req.images
-            and not req.regenerate_message_id and req.galgame_resume is None):
+            and not req.regenerate_message_id and req.galgame_resume is None
+            and not getattr(req, "continue_message_id", None)):
         raise HTTPException(400, "消息内容为空")
+    origin = (getattr(req, "origin", None) or "").strip()
+    if origin and origin != "card":
+        raise HTTPException(400, "非法的消息来源")
 
     # provider 延迟解析：多 AI 房间可能每个座位都指定了自己的 provider，
     # 此时即使没有房间默认提供商也应能发言
@@ -1018,13 +1189,22 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     # 请求级 provider 在此解析（房间路径的座位级解析在 _chat_in_thread 内）
     provider = _resolve_visible_provider(state, sc, req.provider_id)
     # 加载角色/世界观（优先会话副本）→ 构建系统提示词与查询/属性服务
-    character = effective_character(session, sc.lore)
+    character = opening_character(session, effective_character(session, sc.lore))
     world = effective_world(session, sc.lore)
     user_char = member_character(user_seat(session), sc.lore)
     # 用户功能偏好与全局默认合并（工具/扮演/各功能开关）；管理员无覆盖字段
     _us = getattr(sc, "user_settings", None)
     eff_roleplay = feature_prefs.effective_roleplay(state.config, _us)
     eff_tools = feature_prefs.effective_tool_settings(state.config, _us)
+    # P4 原生 MVU：卡声明 + 服务端/用户开关；首次进入时按 InitVar 惰性初始化
+    from ..st import mvu as st_mvu
+
+    mvu_on = st_mvu.mvu_active(character, _us, state.config)
+    if st_mvu.ensure_session_state(session, character):
+        sc.store.save_merged(session)
+    mvu_vars = (
+        dict((session.mvu or {}).get("stat_data") or {}) if mvu_on else None
+    )
     _registry = getattr(state, "registry", None)
     # P1 请求级自定义工具（每用户独立 agent.db），先于白名单计算以便放行 custom__*
     custom_extras = _custom_extras(state, sc, session.id)
@@ -1047,7 +1227,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     )
     system_prompt = build_system_prompt(
         character, world, DEFAULT_SYSTEM_PROMPT, roleplay=eff_roleplay,
-        user_character=user_char,
+        user_character=user_char, variables=mvu_vars,
     )
     services = {}
     # 沙箱工具依赖（fs_* 仅在 sandbox.enabled 时注册，缺省不影响其他工具）
@@ -1203,6 +1383,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 + (("\n\n" + recall_block) if recall_block else "")
             depth_specs = _lore_depth_specs(
                 services.get("lore"), character, user_char, req.message or "",
+                variables=mvu_vars,
             )
             # 当前启用的模型预设：main 块并入系统提示词，tail 与角色 PHI 同位，
             # depth 块与世界书深度块合并；采样参数/jailbreak 前缀透传给 loop
@@ -1231,6 +1412,15 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 query=req.message or "",
             )
             await _touch_proactor(state, sc, session.id)
+            # ST 正则（prompt 侧）：单聊按当前角色卡编译，作为全历史的兜底表
+            st_scripts = _st_compile_scripts(
+                sc, getattr(character, "regex_scripts", None)
+            )
+            st_regex = {"fallback": st_scripts} if st_scripts else None
+            if mvu_on:
+                # MVU 更新块只从出站 prompt 剥离（存储原文留给展示侧正则）
+                st_regex = dict(st_regex or {})
+                st_regex["strip_updates"] = True
             done_data = None
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
@@ -1261,6 +1451,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 is_admin=(sc.uid == ADMIN_UID),
                 extra_tools=loop_extras,
                 loop_ctx=loop_ctx,
+                st_regex=st_regex,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -1279,6 +1470,17 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             for m in session.messages[recall_head:]:
                 if m.role == "assistant":
                     m.character_id = session.character_id or ""
+            # P4 MVU：应用本轮助手消息里的 <UpdateVariable>，逐条写 stat_data 快照
+            if mvu_on:
+                # 先按幸存消息重算基准（编辑/重生成/撤回后旧更新不沿用）
+                st_mvu.recompute_state(session, session.messages)
+                cur = dict((session.mvu or {}).get("stat_data") or {})
+                for m in session.messages[recall_head:]:
+                    if m.role != "assistant" or not (m.content or "").strip():
+                        continue
+                    cur, _applied, _warns = st_mvu.apply_updates(cur, m.content)
+                    m.stat_data = copy.deepcopy(cur)
+                session.mvu["stat_data"] = cur
             # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
             _attach_recall(session.messages, recall_head, "", recall_items)
             # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
@@ -1293,15 +1495,18 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 history=session.messages, member=None,
                 provider=provider,
             )
-            # P3 轮后：心情判定/宣布消费 + 第一人称自我记忆抽取（失败不阻断）
+            # P3 轮后：心情判定/宣布消费 + 第一人称自我记忆抽取（失败不阻断）。
+            # 终态帧已经发出：两步都只写各自的状态库、不改会话历史，放到后台
+            # 执行，避免拖住会话锁——否则用户收到 done 后马上发下一条会 409。
             turn_text = transcript_from_history(session.messages)
-            await handle_post_turn_mood(
-                state, sc, session_id=session.id,
-                character_id=session.character_id or "",
-                transcript=turn_text, provider=provider,
-                had_pending=had_pending_announce(live_block),
+            had_pending_now = had_pending_announce(live_block)
+            _spawn_post_turn(
+                "mood/self-memory",
+                lambda: _post_turn_chat_hooks(
+                    state, sc, session.id, session.character_id or "",
+                    provider, turn_text, had_pending_now,
+                ),
             )
-            await extract_self_after_turn(state, sc, turn_text)
             await _finalize_loop(
                 state, sc, session.id, loop_ctx, session.messages
             )
@@ -1424,6 +1629,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     if run_manager is None:
         run_manager = _get_run_manager(state)
 
+    from ..st import mvu as st_mvu
+
     thread = session.thread(req.thread_id)
     if thread is None:
         raise HTTPException(404, "窗口不存在")
@@ -1520,9 +1727,31 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     # 规范化后的跳过语集合（比较前先 _normalize_skip_text）
     skip_marker = {"略", "跳过", "skip"}
 
+    # 卡片来源标记（submit_chat 已校验，只允许空串或 'card'）
+    origin = (getattr(req, "origin", None) or "").strip()
     # 历史编辑 / 重新生成（仅 dm 窗口）。getattr：内部 SimpleNamespace 调用
     edit_id = getattr(req, "edit_message_id", None)
     regen_id = getattr(req, "regenerate_message_id", None)
+    # L4-A 续写：目标必须是本窗口最后一条可见 AI 回复，生成内容并回原消息
+    continue_id = (getattr(req, "continue_message_id", None) or "").strip()
+    continue_target = None
+    continue_base = ""
+    if continue_id:
+        if edit_id or regen_id or getattr(req, "galgame_resume", None) is not None:
+            raise HTTPException(400, "续写不能与编辑/重新生成同时使用")
+        if thread.kind != "dm":
+            raise HTTPException(400, "群聊窗口不支持续写")
+        if is_galgame:
+            raise HTTPException(400, "只读会话不支持续写")
+        last = _last_visible_assistant(history)
+        if last is None or last.id != continue_id:
+            raise HTTPException(400, "只能续写本窗口最后一条 AI 回复")
+        if last.tool_calls:
+            raise HTTPException(400, "该回复包含工具调用，不支持续写")
+        if not (last.content or "").strip():
+            raise HTTPException(400, "该回复内容为空，不支持续写")
+        continue_target = last
+        continue_base = last.content or ""
     mode = ""
     anchor = ""
     prev = (0, 0)
@@ -1630,6 +1859,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 content=req.message or None,
                 name=user_char.name if user_char else None,
                 images=images,
+                origin=origin,
             )
             try:
                 prev = versions.begin_edit(thread, anchor, new_user)
@@ -1652,6 +1882,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             }
             history[:] = _heal_dangling_tool_calls(history, custom)
             sc.store.save_merged(session)
+        elif continue_target is not None:
+            # L4-A 续写：不新增用户消息，原 AI 回复作为 assistant prefill
+            pass
         else:
             # 追加用户消息到该窗口（用户扮演自设时按角色名标注，便于展示）
             history.append(
@@ -1660,6 +1893,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     content=req.message or None,
                     name=user_char.name if user_char else None,
                     images=images,
+                    origin=origin,
                 )
             )
             # 修复此前因重启中断、失去 tool 响应的 assistant（否则直接 400）
@@ -1685,6 +1919,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
         # P2 长跑收尾标志：finally 统一写 loop_sessions 终态
         loop_failed = False
         loop_cancelled = False
+        # 本轮新增消息的起点；续写成功收尾时已并回目标消息的标记
+        # （finally 兜底只在取消/出错、尚未并回时生效）
+        turn_start = len(history)
+        continue_merged = False
         try:
             await run.emit(
                 "message_start",
@@ -1699,8 +1937,39 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             # 房间默认 provider 的懒解析副本（勿在 drive 内直接给外层 provider
             # 赋值——那会让它在 drive 作用域整个变成未绑定局部变量）
             default_provider = provider
+            # 终态帧之后才有必要跑的轮后收尾（最后一位发言者的心情判定）
+            post_turn_jobs = []
+            # ST 正则（prompt 侧）：按发言者角色卡建表，供全历史按消息归属查表
+            st_by_character = _st_regex_map(
+                sc, [m.character_id for m in speakers]
+            )
+            # P4 原生 MVU：本窗口以第一张声明 MVU 的卡作为会话级状态载体
+            mvu_char = None
+            for _spk in speakers:
+                _cand = opening_character(session, member_character(_spk, sc.lore))
+                if st_mvu.mvu_active(_cand, _us, state.config):
+                    mvu_char = _cand
+                    break
+            mvu_on = mvu_char is not None
+            mvu_char_id = str(getattr(mvu_char, "id", "") or "")
+            if st_mvu.ensure_session_state(session, mvu_char):
+                sc.store.save_merged(session)
+            mvu_vars = (
+                dict((session.mvu or {}).get("stat_data") or {}) if mvu_on else None
+            )
+            # 本轮新增消息的起点（编辑/重生成已截断历史，之后追加的都是新产出）
+            turn_start = len(history)
+            # L4-A 续写：本次生成的增量文本（收尾时并回目标消息并删除临时消息）
+            continue_delta = ""
             for spk in speakers:
-                char = member_character(spk, sc.lore)
+                char = opening_character(session, member_character(spk, sc.lore))
+                # MVU 变量只注入载体卡自己的提示词（其他卡不展开变量宏）
+                spk_vars = (
+                    mvu_vars
+                    if mvu_on and mvu_char_id
+                    and str(getattr(char, "id", "") or "") == mvu_char_id
+                    else None
+                )
                 # 座位级 provider：座位指定了就用它（权限按本用户校验），
                 # 否则懒解析并复用房间默认 provider
                 if (spk.provider_id or "").strip():
@@ -1724,6 +1993,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         base=DEFAULT_SYSTEM_PROMPT,
                         roleplay=eff_roleplay,
                         user_character=user_char,
+                        variables=spk_vars,
                     )
                 else:
                     sys_prompt = build_member_system_prompt(
@@ -1736,6 +2006,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         base=DEFAULT_SYSTEM_PROMPT,
                         roleplay=eff_roleplay,
                         user_character=user_char,
+                        variables=spk_vars,
                     )
                 services = {}
                 # 召回日志（主动召回记录）
@@ -1876,6 +2147,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 depth_specs = _lore_depth_specs(
                     services.get("lore"), char, user_char,
                     req.message or "", group_names=others,
+                    variables=spk_vars,
                 )
                 # 启用中的预设：按本座位角色渲染（main 入系统提示词、
                 # tail 与该角色 PHI 同位、depth 与世界书块合并、jailbreak 前缀）
@@ -1929,6 +2201,17 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     character_id=spk.character_id or "",
                     query=req.message or "",
                 )
+                # ST 正则 prompt 侧：本座位脚本表 + MVU 更新块剥离
+                spk_st_regex = None
+                if st_by_character or mvu_on:
+                    spk_st_regex = {
+                        "by_character": st_by_character,
+                        "fallback": st_by_character.get(
+                            getattr(spk, "character_id", "") or "", []
+                        ),
+                    }
+                    if mvu_on:
+                        spk_st_regex["strip_updates"] = True
                 while True:
                     attempts += 1
                     before = len(history)
@@ -1952,21 +2235,30 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         keep_turns=getattr(
                             getattr(sc, "user_settings", None), "keep_turns", 0
                         ) or 0,
-                        allowed_tools=allowed_tools,
+                        allowed_tools=(
+                            [] if continue_target is not None else allowed_tools
+                        ),
                         deep_thinking=getattr(req, "deep_thinking", False),
                         post_history_instructions=preset_phi,
                         live_ctx=live_block,
                         max_tokens=eff_max_tokens,
                         depth_blocks=depth_specs + rendered_preset.depth_blocks,
                         extra_params=rendered_preset.params or None,
-                        assistant_prefill=rendered_preset.prefill,
+                        assistant_prefill=(
+                            continue_base + (rendered_preset.prefill or "")
+                            if continue_target is not None
+                            else rendered_preset.prefill
+                        ),
                         uid=sc.uid,
                         level=sc.level,
                         is_admin=(sc.uid == ADMIN_UID),
-                        extra_tools=loop_extras,
+                        extra_tools=(
+                            [] if continue_target is not None else loop_extras
+                        ),
                         loop_ctx=(
                             loop_ctx if spk is speakers[0] else None
                         ),
+                        st_regex=spk_st_regex,
                     ):
                         if ev == "done":
                             done_data = data
@@ -1986,6 +2278,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         if m.role == "assistant":
                             m.name = spk.name
                             m.character_id = spk.character_id or ""
+                            if origin:
+                                m.origin = origin
                     ender = history[before:][-1] if history[before:] else None
                     ender_txt = (
                         (ender.content or "").strip()
@@ -2059,6 +2353,14 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             and not m.tool_calls
                         ):
                             m.hidden = True
+                # L4-A 续写：把本次增量并回目标消息（同一轮不新增消息），
+                # MVU 只对增量应用补丁；随后删除本轮临时 assistant 消息。
+                if continue_target is not None:
+                    continue_delta = _merge_continue_reply(
+                        thread, continue_target, history, turn_start,
+                        continue_base, session, mvu_on,
+                    )
+                    continue_merged = True
                 # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
                 # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
                 if fan_done["terminal"]:
@@ -2076,23 +2378,56 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     history=history, member=spk,
                     provider=spk_provider,
                 )
-                # P3 轮后心情：跳过的座位没有真实发言，不判定、不消费宣布
+                # P3 轮后心情：跳过的座位没有真实发言，不判定、不消费宣布。
+                # 最后一位发言者之后就是终态帧，收尾挪到后台；其余座位还在
+                # 生成中（客户端本就在等），照旧同步跑即可。
                 if not skipped:
-                    await handle_post_turn_mood(
-                        state, sc, session_id=session.id,
-                        character_id=spk.character_id or "",
-                        transcript=transcript_from_history(
+                    if continue_target is not None:
+                        # 续写的临时消息已并回目标消息，本轮转写只能用增量
+                        turn_text = continue_delta
+                    else:
+                        turn_text = transcript_from_history(
                             history, head=head_snapshot, actor_id=spk.id
-                        ),
-                        provider=spk_provider,
-                        had_pending=had_pending_announce(live_block),
-                    )
-            # P3 第一人称自我记忆：每请求一次（全局视角，不按座位重复）
-            await extract_self_after_turn(
-                state, sc, transcript_from_history(history)
-            )
+                        )
+                    had_pending_now = had_pending_announce(live_block)
+                    if spk is speakers[-1]:
+                        post_turn_jobs.append((
+                            session.id, spk.character_id or "",
+                            spk_provider, turn_text, had_pending_now,
+                        ))
+                    else:
+                        await handle_post_turn_mood(
+                            state, sc, session_id=session.id,
+                            character_id=spk.character_id or "",
+                            transcript=turn_text,
+                            provider=spk_provider,
+                            had_pending=had_pending_now,
+                        )
+            # P4 MVU：本轮新消息应用变量更新并逐条写快照（仅载体卡的消息）
+            if mvu_on:
+                # 先按幸存消息重算基准（编辑/重生成/撤回后旧更新不沿用）
+                st_mvu.recompute_state(session, history)
+                cur = dict((session.mvu or {}).get("stat_data") or {})
+                for m in history[turn_start:]:
+                    if m.role != "assistant" or not (m.content or "").strip():
+                        continue
+                    mid = getattr(m, "character_id", "") or ""
+                    if mid and mvu_char_id and mid != mvu_char_id:
+                        continue
+                    cur, _applied, _warns = st_mvu.apply_updates(cur, m.content)
+                    m.stat_data = copy.deepcopy(cur)
+                session.mvu["stat_data"] = cur
+            # P3 第一人称自我记忆：每请求一次（全局视角，不按座位重复）。
+            # 与最后一位发言者的心情判定一起放到后台，终态帧后不再占会话锁。
+            room_transcript = transcript_from_history(history)
             _merge_galgame_tts_overlay(state, session)
             sc.store.save_merged(session)
+            _spawn_post_turn(
+                "room mood/self-memory",
+                lambda: _post_turn_room_hooks(
+                    state, sc, post_turn_jobs, room_transcript
+                ),
+            )
             return "done"
         except ProviderError as exc:
             logger.warning("provider 错误: %s", exc)
@@ -2115,6 +2450,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             loop_failed = True
             return "error"
         finally:
+            # 续写中途被停止/出错：把已生成的半截增量并回目标消息，不留孤儿消息
+            if continue_target is not None and not continue_merged:
+                _merge_continue_reply(
+                    thread, continue_target, history, turn_start,
+                    continue_base, session, locals().get("mvu_on", False),
+                )
             # 收编本轮回复为新 reply variant；空产出回滚。正常群聊 mode="" 时只保存
             if mode:
                 versions.commit_run(thread, anchor, mode_head, mode, prev)
@@ -2237,7 +2578,7 @@ async def memory_snapshot(rid: str, request: Request,
             if hasattr(_snap_registry, "all") else None
         )
         for spk in speakers:
-            char = member_character(spk, sc.lore)
+            char = opening_character(session, member_character(spk, sc.lore))
             if (spk.provider_id or "").strip():
                 spk_provider = _resolve_visible_provider(
                     state, sc, spk.provider_id)
@@ -2388,8 +2729,16 @@ async def chat_run_events(run_id: str, request: Request, after: int = 0):
 
 @router.post("/chat/runs/{run_id}/cancel")
 async def cancel_chat_run(run_id: str, request: Request):
-    """主动停止：取消后台生成任务（已生成部分仍会保存）。"""
+    """主动停止：取消后台生成任务（已生成部分仍会保存）。
+
+    取消是异步投递；这里等任务真正收尾（释放会话锁）再返回，
+    否则用户「停止 → 立刻重发」会撞上 409。
+    """
     run = _get_owned_run(request, run_id)
     if run.status == "running" and run.task is not None:
         run.task.cancel()
+        try:
+            await asyncio.wait({run.task}, timeout=3.0)
+        except Exception:
+            pass
     return {"cancelled": True}

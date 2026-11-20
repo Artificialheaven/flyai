@@ -1,6 +1,7 @@
 import {
   IconMenuOutline20,
   IconNewChatOutline20,
+  IconPanelLeftOutline16,
   IconSettingsOutline16,
   IconUsersOutline16,
 } from '../base/icons.js'
@@ -18,11 +19,14 @@ export const MobileHeader = ({
   session,
   onOpenSettings,
   onOpenMembers,
+  onOpenPanel,
 }: {
   title?: string
   session?: Session
   onOpenSettings?: () => void
   onOpenMembers?: () => void
+  /** 打开酒馆卡状态面板 */
+  onOpenPanel?: () => void
 }) => {
   const t = useTranslate()
   return (
@@ -38,6 +42,15 @@ export const MobileHeader = ({
         <>
           <div className={styles.title}>{title}</div>
           {session ? <TokenMeter session={session} /> : null}
+          {onOpenPanel ? (
+            <IconButton
+              size="xl"
+              tone="primary"
+              icon={<IconPanelLeftOutline16 />}
+              aria-label={t('statusPanelOpen')}
+              onClick={onOpenPanel}
+            />
+          ) : null}
           {onOpenMembers ? (
             <IconButton
               size="xl"

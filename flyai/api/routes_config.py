@@ -40,6 +40,9 @@ from ..config import (
     LoopSettings,
     McpSettings,
     MoodSettings,
+    MvuSettings,
+    StImageSettings,
+    StNetSettings,
     ExtTriggerSettings,
     ProactorSettings,
     RegistrationSettings,
@@ -124,6 +127,10 @@ class ConfigPayload(BaseModel):
     watchers: Optional[dict] = None
     # 功能权限门槛（无密钥，整段读写）
     access: Optional[dict] = None
+    # 酒馆卡扩展：外链图片代理 / 受控网络代理 / MVU 总开关（无密钥，整段读写）
+    st_image: Optional[dict] = None
+    st_net: Optional[dict] = None
+    mvu: Optional[dict] = None
     # DeepSeek 官方服务（含独立 Key，仅 admin 可见/可改）
     deepseek: Optional[dict] = None
     # 邀请码注册设置（仅 admin 可见/可改）
@@ -252,6 +259,18 @@ def _masked_config(state, uid: Optional[str] = None):
         "watchers": cfg.watchers.dict(),
         # 权限门槛不含密钥，对所有登录用户可见（前端据此提示不可用功能）
         "access": cfg.access.dict(),
+        # 酒馆卡扩展：图片代理门槛与 MVU 总开关（前端据此显示设置项）
+        "st_image": cfg.st_image.dict(),
+        "st_net": cfg.st_net.dict(),
+        "mvu": cfg.mvu.dict(),
+        "st_image_available": (
+            bool(cfg.st_image.enabled)
+            and (uid == ADMIN_UID or level >= int(cfg.st_image.min_level or 0))
+        ),
+        "st_net_available": (
+            bool(cfg.st_net.enabled)
+            and (uid == ADMIN_UID or level >= int(cfg.st_net.min_level or 0))
+        ),
     }
     # 嵌入配置含 api_key（即使掩码）与内部缓存路径，不对普通用户下发
     if uid == ADMIN_UID:
@@ -472,6 +491,15 @@ def put_config(payload: ConfigPayload, request: Request):
         # 等级由模型校验器统一 clamp 到 0..255
         cfg.access = AccessSettings.parse_obj(dict(payload.access))
 
+    if payload.st_image is not None:
+        cfg.st_image = StImageSettings.parse_obj(dict(payload.st_image))
+
+    if payload.st_net is not None:
+        cfg.st_net = StNetSettings.parse_obj(dict(payload.st_net))
+
+    if payload.mvu is not None:
+        cfg.mvu = MvuSettings.parse_obj(dict(payload.mvu))
+
     if payload.deepseek is not None:
         dd = dict(payload.deepseek)
         dd["api_key"] = _credit_key(
@@ -619,6 +647,21 @@ class MySettingsPayload(BaseModel):
     image_enabled: Optional[bool] = None
     galgame_enabled: Optional[bool] = None
     galgame_max_loops: Optional[int] = None
+    # 第一人称自我记忆个人开关（默认关闭；非覆盖项，不与全局做三态合并）
+    self_memory_enabled: bool = False
+
+    # 酒馆卡扩展（None=跟随默认：正则/HTML/MVU 默认开，外链插图/代理默认关）
+    st_regex_prompt_enabled: Optional[bool] = None
+    st_regex_display_enabled: Optional[bool] = None
+    st_html_enabled: Optional[bool] = None
+    st_external_images_enabled: Optional[bool] = None
+    st_image_proxy_enabled: Optional[bool] = None
+    st_js_sandbox_enabled: Optional[bool] = None
+    # L4：卡内授权动作 / 会话副本写入 / 受控网络代理（默认关）
+    st_card_actions_enabled: Optional[bool] = None
+    st_card_write_enabled: Optional[bool] = None
+    st_net_proxy_enabled: Optional[bool] = None
+    mvu_enabled: Optional[bool] = None
 
 
 @router.get("/my/settings")
@@ -683,11 +726,17 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
     ):
         setattr(us, key, _opt_int(getattr(payload, key), label, 0, 50000))
     for key in ("web_enabled", "browser_enabled", "pixiv_enabled",
-                "image_enabled", "galgame_enabled"):
+                "image_enabled", "galgame_enabled",
+                "st_regex_prompt_enabled", "st_regex_display_enabled",
+                "st_html_enabled", "st_external_images_enabled",
+                "st_image_proxy_enabled", "st_js_sandbox_enabled",
+                "st_card_actions_enabled", "st_card_write_enabled",
+                "st_net_proxy_enabled", "mvu_enabled"):
         v = getattr(payload, key)
         setattr(us, key, None if v is None else bool(v))
     us.galgame_max_loops = _opt_int(
         payload.galgame_max_loops, "galgame_max_loops", 1, 100)
+    us.self_memory_enabled = bool(payload.self_memory_enabled)
 
     scope.save_user_settings()
     return scope.user_settings.to_dict()

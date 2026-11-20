@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -14,6 +15,7 @@ from flyai.feature_prefs import (
     effective_roleplay,
     effective_tool_settings,
     feature_enabled,
+    self_memory_active,
 )
 from flyai.tools.base import Tool, ToolContext, ToolResult
 from flyai.tools.registry import ToolRegistry
@@ -156,6 +158,45 @@ def test_registry_specs_filters_by_name():
 def test_galgame_loops_override():
     cfg = AppConfig()
     assert effective_galgame_loops(cfg, UserSettings(galgame_max_loops=77)) == 77
+
+
+def test_self_memory_default_off_and_requires_both_switches():
+    """自我记忆 = 全局 ∧ 个人，个人默认关；老设置反序列化后也是关。"""
+    cfg = AppConfig()
+    assert cfg.self_memory.enabled is True  # 全局默认开
+
+    # 个人默认关：完整意义上生效但被个人开关挡住
+    assert UserSettings().self_memory_enabled is False
+    assert self_memory_active(cfg, UserSettings()) is False
+    assert feature_enabled("self_memory", cfg, UserSettings()) is False
+
+    # 个人打开后才生效
+    on = UserSettings(self_memory_enabled=True)
+    assert self_memory_active(cfg, on) is True
+    assert feature_enabled("self_memory", cfg, on) is True
+
+    # 全局关闭时个人开关无法开启
+    cfg.self_memory.enabled = False
+    assert self_memory_active(cfg, on) is False
+
+    # 后台调用方没有 user_settings：只看全局
+    cfg.self_memory.enabled = True
+    assert self_memory_active(cfg, None) is True
+    cfg.self_memory.enabled = False
+    assert self_memory_active(cfg, None) is False
+
+    # 缺少 self_memory 段（精简测试配置）按关闭处理
+    assert self_memory_active(SimpleNamespace(), on) is False
+
+
+def test_self_memory_flag_roundtrip_in_user_settings():
+    saved = UserSettings(self_memory_enabled=True).to_dict()
+    assert saved["self_memory_enabled"] is True
+    assert UserSettings.from_dict(saved).self_memory_enabled is True
+    # 老文件没有该键：默认关
+    legacy = UserSettings().to_dict()
+    legacy.pop("self_memory_enabled", None)
+    assert UserSettings.from_dict(legacy).self_memory_enabled is False
 
 
 def test_category_map_covers_registered_feature_tools():

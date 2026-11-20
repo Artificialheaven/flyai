@@ -1,5 +1,5 @@
 import type { TranslationMessage } from '../../i18n/index.js'
-import type { RoomMember } from '../flyai/types.js'
+import type { RoomMember, StPayload } from '../flyai/types.js'
 import type { ApiErrorKind } from '../api/client.js'
 import type {
   ChatModel,
@@ -52,6 +52,12 @@ export type UserMessage = MessageBranch & {
   files: FileAttachment[]
   createdAt: number
   serverVersions?: ServerVersions
+  /** 发言者角色卡 id（酒馆正则展示侧按卡查表用） */
+  characterId?: string
+  /** 该条消息对应的 MVU 变量快照 */
+  statData?: Record<string, unknown>
+  /** 消息来源：卡片在宿主确认后发送的消息为 'card'，缺省为用户手动输入 */
+  origin?: 'card'
 }
 
 /** 思考块：thinking_delta 累积，签名随 signature_delta 到达；历史轮次的思考服务端会丢弃，不回传 */
@@ -121,8 +127,14 @@ export type AssistantMessage = MessageBranch & {
   /** 群聊发言者（后端消息的 name/actor_id）；私聊不展示 */
   speakerName?: string
   speakerId?: string
+  /** 发言者角色卡 id（酒馆正则展示侧按卡查表用） */
+  characterId?: string
+  /** 该条回复生成后的 MVU 变量快照 */
+  statData?: Record<string, unknown>
   /** 本轮自动注入的旧事实；仅作折叠展示，不进上下文 */
   recall?: RecallItem[]
+  /** 消息来源：卡片在宿主确认后发起的动作为 'card'，缺省为用户手动操作 */
+  origin?: 'card'
   /** 是否允许作为续写前缀；仍需满足回复状态与内容限制。 */
   prefix: boolean
   status: ReplyStatus
@@ -211,6 +223,8 @@ export type Session = {
   scoped?: boolean
   /** 只读会话（如历史 galgame 记录），不展示输入框 */
   readOnly?: boolean
+  /** 酒馆扩展数据（正则脚本/HTML 开关/MVU 状态）；旧后端不返回 */
+  st?: StPayload
 }
 
 /** 会话列表元数据；消息只在打开会话时加载。 */

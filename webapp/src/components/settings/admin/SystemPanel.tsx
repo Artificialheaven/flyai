@@ -11,8 +11,15 @@ import {
   PanelEmpty,
   PanelError,
   SwitchRow,
+  TextAreaField,
   TextField,
 } from './AdminCommon.js'
+import {
+  bytesToMbText,
+  formatDomainList,
+  mbTextToBytes,
+  parseDomainList,
+} from './stPolicies.js'
 import styles from './AdminPanels.module.css'
 
 type Raw = Record<string, unknown>
@@ -56,6 +63,16 @@ type FormState = {
   pixivCandidates: string
   imageEnabled: boolean
   imageSize: string
+  stImageEnabled: boolean
+  stImageMinLevel: string
+  stImageDomains: string
+  stNetEnabled: boolean
+  stNetMinLevel: string
+  stNetAllowAny: boolean
+  stNetDomains: string
+  stNetMaxMb: string
+  stNetTimeout: string
+  stNetPerMinute: string
   galgameEnabled: boolean
   galgameLoops: string
   ttsEnabled: boolean
@@ -124,6 +141,8 @@ const toForm = (config: AdminConfig): FormState => {
   const browser = asRecord(raw.browser)
   const pixiv = asRecord(raw.pixiv)
   const image = asRecord(raw.image_generation)
+  const stImage = asRecord(raw.st_image)
+  const stNet = asRecord(raw.st_net)
   const galgame = asRecord(raw.galgame)
   const tts = asRecord(raw.tts)
   const loop = asRecord(raw.loop)
@@ -176,6 +195,16 @@ const toForm = (config: AdminConfig): FormState => {
     pixivCandidates: num(pixiv, 'candidate_num', 15),
     imageEnabled: bool(image, 'enabled', true),
     imageSize: str(image, 'default_size', '2K'),
+    stImageEnabled: bool(stImage, 'enabled', false),
+    stImageMinLevel: num(stImage, 'min_level', 256),
+    stImageDomains: formatDomainList(stImage.allowed_domains),
+    stNetEnabled: bool(stNet, 'enabled', false),
+    stNetMinLevel: num(stNet, 'min_level', 0),
+    stNetAllowAny: bool(stNet, 'allow_any_public_https', true),
+    stNetDomains: formatDomainList(stNet.allowed_domains),
+    stNetMaxMb: bytesToMbText(stNet.max_bytes),
+    stNetTimeout: num(stNet, 'timeout', 15),
+    stNetPerMinute: num(stNet, 'per_minute', 60),
     galgameEnabled: bool(galgame, 'enabled', true),
     galgameLoops: num(galgame, 'max_loops', 40),
     ttsEnabled: bool(tts, 'enabled', true),
@@ -236,7 +265,7 @@ const toForm = (config: AdminConfig): FormState => {
   }
 }
 
-/** 系统默认值（仅管理员）：工具、角色扮演、联网、浏览器、Pixiv、生图、Galgame、语音、长跑 */
+/** 系统默认值（仅管理员）：工具、角色扮演、联网、浏览器、Pixiv、生图、卡片沙箱、Galgame、语音、长跑 */
 export const SystemPanel = () => {
   const t = useTranslate()
   const isAdmin = useAuth((state) => state.user?.role === 'admin')
@@ -285,6 +314,11 @@ export const SystemPanel = () => {
       webMaxChars: Number(form.webMaxChars),
       webIterations: Number(form.webIterations),
       pixivCandidates: Number(form.pixivCandidates),
+      stImageMinLevel: form.stImageMinLevel.trim() ? Number(form.stImageMinLevel) : NaN,
+      stNetMinLevel: form.stNetMinLevel.trim() ? Number(form.stNetMinLevel) : NaN,
+      stNetMaxMb: form.stNetMaxMb.trim() ? Number(form.stNetMaxMb) : NaN,
+      stNetTimeout: form.stNetTimeout.trim() ? Number(form.stNetTimeout) : NaN,
+      stNetPerMinute: form.stNetPerMinute.trim() ? Number(form.stNetPerMinute) : NaN,
       galgameLoops: Number(form.galgameLoops),
       ttsMinLevel: Number(form.ttsMinLevel),
       ttsSampleRate: Number(form.ttsSampleRate),
@@ -370,6 +404,23 @@ export const SystemPanel = () => {
         ...asRecord(raw.galgame),
         enabled: form.galgameEnabled,
         max_loops: ints.galgameLoops,
+      },
+      // 两项策略都是整段回传（后端 parse_obj 全量替换），先展开原值再覆盖表单字段
+      st_image: {
+        ...asRecord(raw.st_image),
+        enabled: form.stImageEnabled,
+        min_level: ints.stImageMinLevel,
+        allowed_domains: parseDomainList(form.stImageDomains),
+      },
+      st_net: {
+        ...asRecord(raw.st_net),
+        enabled: form.stNetEnabled,
+        allow_any_public_https: form.stNetAllowAny,
+        allowed_domains: parseDomainList(form.stNetDomains),
+        min_level: ints.stNetMinLevel,
+        max_bytes: mbTextToBytes(form.stNetMaxMb),
+        timeout: ints.stNetTimeout,
+        per_minute: ints.stNetPerMinute,
       },
       tts: {
         ...asRecord(raw.tts),
@@ -673,6 +724,70 @@ export const SystemPanel = () => {
                 onChange={(value) => patch({ imageSize: value })}
               />
             </div>
+          </div>
+
+          <div className={styles.sectionTitle}>{t('systemStCard')}</div>
+          <div className={styles.hint}>{t('systemStCardHint')}</div>
+          <div className={styles.rows}>
+            <SwitchRow
+              label={t('systemStImageEnabled')}
+              desc={t('featuresStImageProxyDesc')}
+              checked={form.stImageEnabled}
+              onChange={(checked) => patch({ stImageEnabled: checked })}
+            />
+            <NumberField
+              label={t('systemStImageMinLevel')}
+              hint={t('systemStImageMinLevelHint')}
+              value={form.stImageMinLevel}
+              onChange={(value) => patch({ stImageMinLevel: value })}
+            />
+            <TextAreaField
+              label={t('systemStImageDomains')}
+              hint={t('systemStImageDomainsHint')}
+              value={form.stImageDomains}
+              rows={3}
+              onChange={(value) => patch({ stImageDomains: value })}
+            />
+            <SwitchRow
+              label={t('systemStNetEnabled')}
+              desc={t('featuresStNetProxyDesc')}
+              checked={form.stNetEnabled}
+              onChange={(checked) => patch({ stNetEnabled: checked })}
+            />
+            <NumberField
+              label={t('systemStNetMinLevel')}
+              hint={t('systemStNetMinLevelHint')}
+              value={form.stNetMinLevel}
+              onChange={(value) => patch({ stNetMinLevel: value })}
+            />
+            <SwitchRow
+              label={t('systemStNetAllowAny')}
+              desc={t('systemStNetAllowAnyDesc')}
+              checked={form.stNetAllowAny}
+              onChange={(checked) => patch({ stNetAllowAny: checked })}
+            />
+            <TextAreaField
+              label={t('systemStNetDomains')}
+              hint={t('systemStNetDomainsHint')}
+              value={form.stNetDomains}
+              rows={3}
+              onChange={(value) => patch({ stNetDomains: value })}
+            />
+            <NumberField
+              label={t('systemStNetMaxMb')}
+              value={form.stNetMaxMb}
+              onChange={(value) => patch({ stNetMaxMb: value })}
+            />
+            <NumberField
+              label={t('systemStNetTimeout')}
+              value={form.stNetTimeout}
+              onChange={(value) => patch({ stNetTimeout: value })}
+            />
+            <NumberField
+              label={t('systemStNetPerMinute')}
+              value={form.stNetPerMinute}
+              onChange={(value) => patch({ stNetPerMinute: value })}
+            />
           </div>
 
           <div className={styles.sectionTitle}>{t('systemSd')}</div>

@@ -202,6 +202,40 @@ def switch_version(
     rebuild_active(thread, anchor)
 
 
+def sync_active_reply(thread, message: Message) -> None:
+    """把扁平历史里某条回复的当前内容同步回活动 variant 快照。
+
+    卡内写回 / 续写会就地修改 thread.messages 中的回复；若该轮已有版本记录，
+    不同步会让 heal_thread 把它误判成「孤儿部分回复」并额外生成一个版本。
+    找不到对应快照时静默返回。
+    """
+    try:
+        idx = next(
+            i for i, m in enumerate(thread.messages) if m.id == message.id
+        )
+    except StopIteration:
+        return
+    for anchor, entry in thread.edits.items():
+        try:
+            i, end = locate_turn(thread.messages, anchor)
+        except ValueError:
+            continue
+        if not (i < idx < end):
+            continue
+        slot = entry.get("edits", [])[entry.get("edit_active", 0)] \
+            if entry.get("edits") else None
+        if not slot:
+            return
+        variants = slot.get("reply_variants") or []
+        if not variants:
+            return
+        active = variants[slot.get("reply_active", 0)]
+        k = idx - i - 1
+        if 0 <= k < len(active):
+            active[k] = copy.deepcopy(message.to_dict())
+        return
+
+
 def _sig(d: Dict[str, Any]) -> str:
     return json.dumps(d, ensure_ascii=False, sort_keys=True)
 

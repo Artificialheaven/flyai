@@ -192,10 +192,13 @@ def test_missing_name_raises():
         character_from_cc({"data": "bad"})
 
 
-def test_creator_and_assets_dropped():
+def test_creator_and_tags_dropped_assets_retained():
+    # creator/tags 仍不进模型；assets 属于酒馆扩展数据，P1 起原样保留（不执行/不下载）
     c = character_from_cc(V3_CARD)
     d = c.to_dict()
-    assert "creator" not in d and "assets" not in d and "tags" not in d
+    assert "creator" not in d and "tags" not in d
+    assert d["assets"] == V3_CARD["data"]["assets"]
+    assert d["alternate_greetings"] == ["备选1", "备选2"]
 
 
 # ---- HTTP 端点：PNG 头像落盘 + 保存角色 ----

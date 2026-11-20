@@ -318,6 +318,7 @@ async def run_agent_loop(
     is_admin: bool = False,
     extra_tools: Optional[List["Tool"]] = None,
     loop_ctx: Optional[LoopContext] = None,
+    st_regex: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -352,6 +353,9 @@ async def run_agent_loop(
     loop_ctx：P2 长跑上下文。非 None 时跳过双预算封顶，启用强制汇报/空转
     自停/滚动压缩/安全点打断与干净停止；依赖 services 中的 loop_state、
     loop_compact、interrupt_hub、loop_settings 钩子（缺失时相应保护降级）。
+    st_regex：酒馆正则脚本 prompt 侧上下文
+    ``{"by_character": {cid: [Script]}, "fallback": [Script]}``；对请求副本
+    应用（绝不改 history 中的原文），无效脚本已在编译期跳过。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -424,6 +428,27 @@ async def run_agent_loop(
         msgs = _keep_recent_turns(msgs, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
         msgs = [m for m in msgs if not getattr(m, "tombstone", None)]
+        # 酒馆正则脚本（prompt 侧）：在截断前对副本应用，history 原文不变
+        if st_regex:
+            from ..st.regex_scripts import apply_to_messages
+
+            msgs = apply_to_messages(
+                msgs,
+                by_character=st_regex.get("by_character") or {},
+                fallback=st_regex.get("fallback") or [],
+                side="prompt",
+            )
+        # MVU：更新块只从出站副本剥离（存储原文保留给展示侧正则美化）
+        if st_regex and st_regex.get("strip_updates"):
+            from dataclasses import replace
+
+            from ..st.mvu import strip_update_blocks
+
+            msgs = [
+                replace(m, content=strip_update_blocks(m.content))
+                if m.role == "assistant" and m.content else m
+                for m in msgs
+            ]
         # 普通聊天兜底：窗口超过硬上限时静默截断旧轮次（只影响本轮请求）
         msgs = _truncate_context(msgs)
         if system_prompt:

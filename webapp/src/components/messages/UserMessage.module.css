@@ -27,6 +27,16 @@
   --message-file-image-size: 64px;
 }
 
+.originBadge {
+  margin-bottom: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .bubble {
   max-width: calc(100% - 88px);
   box-sizing: border-box;

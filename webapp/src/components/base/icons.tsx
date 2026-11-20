@@ -635,3 +635,27 @@ export const IconBoltOutline16 = () => (
     />
   </svg>
 )
+
+export const IconExpandOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M9.4 2.2h4.4v4.4M6.6 13.8H2.2V9.4M13.5 2.5 9.1 6.9M2.5 13.5l4.4-4.4"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
+
+export const IconCollapseOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M13.8 6.6H9.4V2.2M2.2 9.4h4.4v4.4M9.1 6.9l4.4-4.4M6.9 9.1l-4.4 4.4"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)

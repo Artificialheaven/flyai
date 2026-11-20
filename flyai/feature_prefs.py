@@ -52,7 +52,7 @@ TOOL_CATEGORIES = {
     # P2 长跑模式（仅全局；loop_finish 为请求级 extra，不在全局表中）
     "loop_request": "loop",
     "loop_start": "loop",
-    # P3 第一人称自我记忆（仅全局，默认开）
+    # P3 第一人称自我记忆（全局开关 + 个人开关，个人默认关）
     "remember_self": "self_memory",
     "recall_self": "self_memory",
     # P3 承诺/提醒（随主动行为总闸，默认关）
@@ -123,11 +123,31 @@ def _us(user_settings: Any):
     return user_settings if user_settings is not None else None
 
 
+def self_memory_active(cfg, user_settings) -> bool:
+    """自我记忆对该用户是否生效：管理员全局开关 AND 个人开关。
+
+    个人开关（UserSettings.self_memory_enabled）默认关闭；老数据和测试桩没有
+    该字段时按 False 处理。后台调用方没有 user_settings 时只看全局，保持与
+    抽取/注入等旧调用方一致的降级行为。
+    """
+    seg = getattr(cfg, "self_memory", None)
+    if seg is None:
+        return False
+    if not bool(getattr(seg, "enabled", True)):
+        return False
+    if user_settings is None:
+        return True
+    return bool(getattr(user_settings, "self_memory_enabled", False))
+
+
 def feature_enabled(category: str, cfg, user_settings) -> bool:
     """某功能类别对该用户是否有效：用户覆盖优先，否则取全局默认。
 
     测试桩的精简 config 可能缺整个配置段：按该段真实默认值兜底。
     """
+    if category == "self_memory":
+        # 自我记忆不是「覆盖」而是全局 ∧ 个人两个开关同时满足（个人默认关）
+        return self_memory_active(cfg, user_settings)
     flag = _USER_FLAGS.get(category)
     if flag is not None:
         override = getattr(user_settings, flag, None)

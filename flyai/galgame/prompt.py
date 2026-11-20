@@ -56,10 +56,17 @@ def build_galgame_prompt(
     base: str = "",
     roleplay: Optional[RoleplaySettings] = None,
     user_character: Optional[Character] = None,
+    variables: Optional[dict] = None,
 ) -> str:
-    """构建 Galgame 系统提示词：角色卡/世界观内容 + VN 演出规则。"""
+    """构建 Galgame 系统提示词：角色卡/世界观内容 + VN 演出规则。
+
+    variables：MVU stat_data；非 None 时常驻条目内的酒馆宏会被展开。
+    """
     parts = [
-        build_system_prompt(character, world, base, roleplay, user_character),
+        build_system_prompt(
+            character, world, base, roleplay, user_character,
+            variables=variables,
+        ),
         _GALGAME_RULES,
     ]
     return "\n\n".join(p for p in parts if p and p.strip())

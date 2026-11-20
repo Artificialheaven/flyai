@@ -1,0 +1,123 @@
+.host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin: 8px 0;
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 12px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-secondary);
+  background: transparent;
+}
+
+.labelRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.label {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.badge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: help;
+}
+
+.badgeActive {
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-brand-text);
+}
+
+.errorBadge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 999px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: help;
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sourceBtn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.sourceBtn:hover {
+  background: var(--dsw-alias-bg-secondary, rgba(0, 0, 0, 0.04));
+  color: var(--dsw-alias-label-primary);
+}
+
+.notice {
+  padding: 8px 12px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.preview {
+  max-height: 480px;
+  overflow: auto;
+  padding: 4px 12px 12px;
+}
+
+.frame {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  border: none;
+  background: transparent;
+}
+
+.chromeless {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
+.fullscreen {
+  height: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--dsw-alias-bg-primary, #fff);
+}
+
+.fullscreen .frame {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}

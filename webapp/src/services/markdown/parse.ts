@@ -6,6 +6,7 @@ import { mathFromMarkdown } from 'mdast-util-math'
 import { gfm } from 'micromark-extension-gfm'
 import { math } from 'micromark-extension-llm-math'
 import type { Source } from '../chat/view.js'
+import { APP_PLACEHOLDER_RE } from '../st/cardApp.js'
 
 /** 正文里的 [citation:N]，已换成对应来源 */
 export interface CitationNode extends MdAstNode {
@@ -13,13 +14,24 @@ export interface CitationNode extends MdAstNode {
   source: Source
 }
 
+/** 酒馆卡整页 HTML 应用（沙箱 iframe 或静态清洗二选一渲染） */
+export interface CardAppNode extends MdAstNode {
+  type: 'cardApp'
+  html: string
+  lang: string
+  /** 当前消息原文，沙箱里通过 getChatMessages 暴露 */
+  message: string
+}
+
 declare module 'mdast' {
   interface RootContentMap {
     citation: CitationNode
+    cardApp: CardAppNode
   }
 
   interface PhrasingContentMap {
     citation: CitationNode
+    cardApp: CardAppNode
   }
 }
 
@@ -33,7 +45,19 @@ const text = (value: string): Text => ({ type: 'text', value })
  */
 export function toMdAst(
   input: string,
-  { sources, disableLink }: { sources: Source[] | undefined; disableLink: boolean }
+  {
+    sources,
+    disableLink,
+    cardApps,
+    cardMessage,
+  }: {
+    sources: Source[] | undefined
+    disableLink: boolean
+    /** 抽离出来的整页 HTML 应用，按占位符序号排列 */
+    cardApps?: string[]
+    /** 当前消息原文 */
+    cardMessage?: string
+  }
 ): Root {
   const ast = fromMarkdown(input, {
     extensions: [
@@ -56,6 +80,16 @@ export function toMdAst(
       ],
       { ignore: ['linkReference'] }
     )
+  }
+  if (cardApps && cardApps.length > 0) {
+    const message = cardMessage ?? ''
+    findAndReplace(ast, [
+      new RegExp(APP_PLACEHOLDER_RE.source, 'g'),
+      (_: string, index: string): CardAppNode | '' => {
+        const html = cardApps[Number(index)]
+        return html ? { type: 'cardApp', html, lang: 'html', message } : ''
+      },
+    ])
   }
   const raw = (node: Nodes) => input.slice(node.position?.start.offset, node.position?.end.offset)
   // 先处理子节点，再按需把当前节点换成若干节点

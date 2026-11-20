@@ -126,6 +126,8 @@ class Session:
     context_warned: Dict[str, List[int]] = field(default_factory=dict)
     # normal=普通聊天；galgame=Galgame 模式（全屏视觉小说，单角色）
     mode: str = "normal"
+    # 本会话选定的开局世界书条目标题；空=按卡默认（保持卡内 pinned 状态）
+    opening_entry: str = ""
     # Galgame 持久场景态：{"background":{"id","url"},"sprite":{"id","url"}}
     galgame: Dict[str, Any] = field(default_factory=dict)
     # Galgame 已合成 TTS 清单：对白文本 -> 音频 url（刷新后直接复用，不再重新合成）
@@ -134,6 +136,9 @@ class Session:
     max_tokens: int = 0
     # 本窗口禁用的工具注册名（与请求级 disabled_tools 取并集，服务端强制）
     disabled_tools: List[str] = field(default_factory=list)
+    # MVU 变量状态（酒馆卡）：{enabled, initialized, char_id, initial, stat_data}；
+    # 空字典=非 MVU 会话。不进 MERGED_FIELDS：长流式保存会覆盖实时状态
+    mvu: Dict[str, Any] = field(default_factory=dict)
     # 仅列表摘要使用（不落盘）：所有窗口消息数之和
     message_count: int = 0
 

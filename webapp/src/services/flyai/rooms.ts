@@ -8,6 +8,10 @@ export const createRoom = async (body: {
   character_ids: string[]
   world_id?: string | null
   mode?: 'normal' | 'galgame'
+  /** 开场白选择：1..N = alternate_greetings 的第 N 条；缺省/0 = first_mes */
+  greeting_index?: number
+  /** 开局设定（世界书标题以「开局/序章」开头的条目）；缺省=按卡默认 */
+  opening_entry?: string
 }): Promise<SessionDetail> =>
   request<SessionDetail>('/api/rooms', { method: 'POST', body: JSON.stringify(body) })
 

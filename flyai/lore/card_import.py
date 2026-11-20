@@ -5,17 +5,24 @@
   值为 base64 编码的卡片 JSON；PNG 图片本身作为角色头像。
 - JSON 卡片：同样的信封（{"spec": ..., "data": {...}}），或更老的 v1 平铺字段。
 
-只转换影响扮演效果的字段；creator / tags / assets（表情贴图）等元数据丢弃。
-alternate_greetings（备选开场白）目前没有对应 UI，仅取 first_mes。
+字段映射以扮演效果为主；同时尽量保真地保留酒馆扩展数据（不执行其中的
+JavaScript）：
+
+- ``extensions``：depth_prompt / world / talkativeness / fav / tavern_helper 等；
+- ``regex_scripts``：酒馆正则脚本（由 FlyAI 原生引擎解释，见 flyai.st）；
+- ``alternate_greetings``、``assets`` 原样保留。
+
+creator / tags 仍丢弃。导入时通过 :func:`import_report` 返回统计与警告。
 """
 
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import struct
 import zlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import Character
 
@@ -138,6 +145,27 @@ def _build_table(data: Dict[str, Any]):
     return table
 
 
+def _card_extensions(data: Dict[str, Any]) -> Dict[str, Any]:
+    """data.extensions，并兼容 depth_prompt 放在 data 顶层的旧写法。"""
+    raw = data.get("extensions")
+    ext: Dict[str, Any] = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+    top_dp = data.get("depth_prompt")
+    if isinstance(top_dp, dict) and not isinstance(ext.get("depth_prompt"), dict):
+        ext["depth_prompt"] = copy.deepcopy(top_dp)
+    return ext
+
+
+def _card_regex_scripts(data: Dict[str, Any],
+                        extensions: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """正则脚本在 CCv3 里位于 data.extensions.regex_scripts，兼容顶层写法。"""
+    raw = extensions.get("regex_scripts")
+    if not isinstance(raw, list):
+        raw = data.get("regex_scripts")
+    if not isinstance(raw, list):
+        return []
+    return [copy.deepcopy(s) for s in raw if isinstance(s, dict)]
+
+
 def character_from_cc(card: Dict[str, Any]) -> Character:
     """把 CC 卡片信封映射为 FlyAI Character（新 id、未保存）。"""
     if not isinstance(card, dict):
@@ -160,6 +188,10 @@ def character_from_cc(card: Dict[str, Any]) -> Character:
     if personality:
         intro_parts.append("【性格】\n" + personality)
 
+    extensions = _card_extensions(data)
+    greetings = data.get("alternate_greetings")
+    assets = data.get("assets")
+
     return Character(
         name=name,
         intro="\n\n".join(intro_parts),
@@ -169,4 +201,55 @@ def character_from_cc(card: Dict[str, Any]) -> Character:
         post_history_instructions=(data.get("post_history_instructions") or "").strip(),
         system_prompt=(data.get("system_prompt") or "").strip(),
         table=_build_table(data),
+        regex_scripts=_card_regex_scripts(data, extensions),
+        extensions=extensions,
+        alternate_greetings=[
+            str(g) for g in (greetings if isinstance(greetings, list) else [])
+            if str(g or "").strip()
+        ],
+        assets=[
+            copy.deepcopy(a) for a in (assets if isinstance(assets, list) else [])
+            if isinstance(a, dict)
+        ],
     )
+
+
+def import_report(character: Character) -> Dict[str, Any]:
+    """导入统计与用户可读警告（全部为数据，不执行卡内 JS）。
+
+    返回 ``{"stats": {...}, "warnings": [...]}``，供 /characters/import-card
+    在保持旧响应字段的同时附加展示。
+    """
+    ext = character.extensions if isinstance(character.extensions, dict) else {}
+    dp = ext.get("depth_prompt")
+    has_depth_prompt = isinstance(dp, dict) and bool(str(dp.get("prompt") or "").strip())
+    world = str(ext.get("world") or "").strip()
+
+    stats = {
+        "table": len(character.table),
+        "regex_scripts": len(character.regex_scripts),
+        "alternate_greetings": len(character.alternate_greetings),
+        "assets": len(character.assets),
+        "depth_prompt": has_depth_prompt,
+    }
+    warnings: List[str] = []
+    if ext.get("tavern_helper"):
+        warnings.append("卡内 tavern_helper 脚本仅保留为数据，FlyAI 不会执行任何卡内 JavaScript")
+    if character.regex_scripts:
+        note = "已保留 %d 条酒馆正则脚本，将由 FlyAI 原生正则引擎解释" % len(character.regex_scripts)
+        try:
+            from ..st import regex_scripts as _st_regex
+
+            invalid = _st_regex.invalid_script_count(character.regex_scripts)
+        except Exception:
+            invalid = 0
+        if invalid:
+            note += "（其中 %d 条正则无效，将被跳过）" % invalid
+        warnings.append(note)
+    if world:
+        warnings.append(
+            "卡内关联世界书「%s」未自动导入；卡内嵌世界书条目已转换到内容表" % world)
+    if character.assets:
+        warnings.append(
+            "卡内 assets（表情/背景资源）已保留元数据，但暂未同步到 FlyAI 资源库")
+    return {"stats": stats, "warnings": warnings}

@@ -99,10 +99,12 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
             for k, v in (data.get("context_warned") or {}).items()
         },
         mode=data.get("mode", "normal") or "normal",
+        opening_entry=data.get("opening_entry", "") or "",
         galgame=data.get("galgame", {}) or {},
         galgame_tts=data.get("galgame_tts", {}) or {},
         max_tokens=int(data.get("max_tokens", 0) or 0),
         disabled_tools=list(data.get("disabled_tools", []) or []),
+        mvu=data.get("mvu", {}) or {},
     )
 
 
@@ -126,10 +128,12 @@ def session_to_dict(session: Session) -> Dict:
         "token_usage": session.token_usage or {},
         "context_warned": session.context_warned or {},
         "mode": session.mode,
+        "opening_entry": session.opening_entry or "",
         "galgame": session.galgame or {},
         "galgame_tts": session.galgame_tts or {},
         "max_tokens": int(session.max_tokens or 0),
         "disabled_tools": list(session.disabled_tools or []),
+        "mvu": session.mvu or {},
     }
 
 

@@ -82,3 +82,54 @@ def test_session_export_v2_shape(tmp_path):
     card = data["characters"][0]
     assert card["ref"] == f"admin:{ch.id}"
     assert card["name"] == "初"
+
+
+# ---- 会话角色卡导出：头像内嵌 ----
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png-body"
+
+
+def _character_export_env(tmp_path, with_upload=True):
+    ch = Character(id="c1", name="初", author="admin",
+                   avatar="/uploads/admin/avatar.png")
+    s = Session(title="房间")
+    s.members.append(RoomMember(name="你", is_user=True))
+    m = RoomMember(name="初", character_id="c1")
+    s.members.append(m)
+    s.threads.append(Thread(kind="dm", title="初", member_ids=[m.id]))
+    store = JsonSessionStore(tmp_path / "s")
+    store.save(s)
+
+    upload_dir = tmp_path / "data" / "uploads" / "admin"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / "avatar.png").write_bytes(PNG)
+
+    sc = SimpleNamespace(uid="admin", store=store, lore=_FakeLore([ch]))
+    if with_upload:
+        sc.upload_dir = upload_dir
+    flyai = SimpleNamespace(user=lambda request: sc)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(flyai=flyai)))
+    return s, request
+
+
+def test_session_character_export_embeds_avatar(tmp_path):
+    import base64
+
+    from flyai.api.routes_session import session_character_export
+
+    s, request = _character_export_env(tmp_path)
+    body = json.loads(session_character_export(s.id, request).body)
+    assert body["type"] == "flyai-character"
+    image = body["data"]["avatar_image"]
+    assert image["media_type"] == "image/png"
+    assert base64.b64decode(image["data"]) == PNG
+
+
+def test_session_character_export_without_upload_dir(tmp_path):
+    """作用域无 upload_dir（老测试桩）→ getattr 兜底，不炸、不带图。"""
+    from flyai.api.routes_session import session_character_export
+
+    s, request = _character_export_env(tmp_path, with_upload=False)
+    body = json.loads(session_character_export(s.id, request).body)
+    assert body["data"]["name"] == "初"
+    assert "avatar_image" not in body["data"]

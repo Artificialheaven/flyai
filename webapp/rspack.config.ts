@@ -46,9 +46,11 @@ export const createConfig = (devServer?: Configuration['devServer']): Configurat
     rules: [
       { test: /\.module\.css$/, type: 'css/module', use: [cssLoader] },
       { test: /\.css$/, exclude: /\.module\.css$/, type: 'css', use: [cssLoader] },
+      // 内置第三方库以字符串形式内联（卡内沙箱的 jQuery，见 services/st/vendor）
+      { test: /\.js$/, resourceQuery: /raw/, type: 'asset/source' },
       {
         test: /\.(j|t)sx?$/,
-        exclude: /[\\/]node_modules[\\/]/,
+        exclude: [/[\\/]node_modules[\\/]/, /[\\/]src[\\/]services[\\/]st[\\/]vendor[\\/]/],
         loader: 'builtin:swc-loader',
         options: {
           jsc: {

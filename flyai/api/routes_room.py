@@ -53,6 +53,26 @@ class RoomCreate(BaseModel):
     world_id: Optional[str] = None
     # normal=普通房间（可多角色）；galgame=Galgame 模式（单角色视觉小说）
     mode: str = "normal"
+    # 开场白选择：None/0=first_mes；1..N=alternate_greetings 的第 N 条（按存储原下标）
+    greeting_index: Optional[int] = None
+    # 开局设定：世界书中标题以「开局/序章」开头的条目标题；None/空=按卡默认
+    opening_entry: Optional[str] = None
+
+
+def _pick_greeting(ch, greeting_index: Optional[int]) -> str:
+    """按 greeting_index 选开场白；越界或选中条目为空时回落 first_mes。
+
+    下标按存储原列表计算（不做去空压缩），保证与前端下拉选项一致。
+    """
+    if greeting_index is None or greeting_index <= 0:
+        return (ch.first_mes or "").strip()
+    alts = list(ch.alternate_greetings or [])
+    idx = greeting_index - 1
+    if 0 <= idx < len(alts):
+        picked = str(alts[idx] or "").strip()
+        if picked:
+            return picked
+    return (ch.first_mes or "").strip()
 
 
 class GroupCreate(BaseModel):
@@ -165,40 +185,62 @@ def create_room(body: RoomCreate, request: Request):
     if body.world_id and not sc.lore.get_world(body.world_id):
         raise HTTPException(400, "世界观不存在")
 
-    s = sc.store.create(title=body.title or "新会话")
-    if is_galgame:
-        s.mode = "galgame"
-    if body.world_id:
-        s.world_id = body.world_id
-    s.members.append(RoomMember(name="你", is_user=True))  # 用户座位
+    # 先解析全部角色/开局选择再落盘，参数错误时不留下空会话文件
     chosen = []
     for cid in (body.character_ids or []):
         ch = sc.lore.get_character(cid)
         if ch is None:
             raise HTTPException(400, f"角色不存在: {cid}")
         chosen.append((ch, cid))
-        m = RoomMember(name=ch.name, character_id=cid)
-        s.members.append(m)
-        s.threads.append(Thread(kind="dm", title=m.name, member_ids=[m.id]))
+    opening = (body.opening_entry or "").strip()
+    if is_galgame or len(chosen) != 1:
+        # 多角色归属不明、Galgame 有自己的开场流程：忽略开局选择
+        opening = ""
+    elif opening:
+        from ..lore.opening import opening_titles
+
+        if opening not in opening_titles(chosen[0][0]):
+            raise HTTPException(400, "开局条目不存在")
+
+    s = sc.store.create(title=body.title or "新会话")
+    if is_galgame:
+        s.mode = "galgame"
+    if body.world_id:
+        s.world_id = body.world_id
+    if opening:
+        s.opening_entry = opening
+    s.members.append(RoomMember(name="你", is_user=True))  # 用户座位
+    seat = None
+    for ch, cid in chosen:
+        seat = RoomMember(name=ch.name, character_id=cid)
+        s.members.append(seat)
+        s.threads.append(Thread(kind="dm", title=seat.name, member_ids=[seat.id]))
     # 开场白（first_mes）：仅单角色普通房间自动落一条 AI 首条消息。
     # 多角色归属不明、Galgame 有自己的初始剧情流程，均不播种。
-    if not is_galgame and len(chosen) == 1:
+    if not is_galgame and len(chosen) == 1 and seat is not None:
+        ch, cid = chosen[0]
         # 单 AI 房间同步顶层绑定字段：会话副本 / 导出 / 压缩校验都读顶层，
         # 与 update_member 换座后的同步规则保持一致。
-        s.character_id = chosen[0][1]
+        s.character_id = cid
         s.character_override = None
-        greeting = (chosen[0][0].first_mes or "").strip()
+        greeting = _pick_greeting(ch, body.greeting_index)
         if greeting:
             from ..lore.query import substitute_chat_macros
             from ..schemas import Message
 
-            greeting = substitute_chat_macros(greeting, chosen[0][0].name, "你")
+            greeting = substitute_chat_macros(greeting, ch.name, "你")
             s.threads[0].messages.append(
                 Message(role="assistant", content=greeting,
-                        actor_id=m.id, character_id=chosen[0][1] or "")
+                        actor_id=seat.id, character_id=cid or "")
             )
     sc.store.save(s)
-    return _session_dict(s, with_messages=True, lore=sc.lore)
+    return _session_dict(
+        s, with_messages=True, lore=sc.lore,
+        user_settings=getattr(sc, "user_settings", None),
+        cfg=getattr(request.app.state.flyai, "config", None),
+        level=int(getattr(sc, "level", 0) or 0),
+        is_admin=sc.uid == ADMIN_UID,
+    )
 
 
 @router.post("/rooms/{rid}/members")
@@ -261,6 +303,9 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
             if len(ai_seats) == 1:
                 s.character_id = body.character_id
                 s.character_override = None
+                if card_changed:
+                    # 旧卡的开局标题不应套到新卡上（不存在时也等于按卡默认）
+                    s.opening_entry = ""
     _apply_member_seat_settings(
         state, sc, m, body.provider_id, body.memory_mode, body.memory_char_id
     )
@@ -418,5 +463,9 @@ def switch_turn(rid: str, tid: str, anchor: str, body: TurnSwitch, request: Requ
         )
     except (IndexError, KeyError):
         raise HTTPException(400, "版本序号无效")
+    # P4 MVU：切换变体后按可见消息最后快照回退/前进变量状态
+    from ..st import mvu as st_mvu
+
+    st_mvu.recompute_state(s, t.messages)
     sc.store.save(s)
     return t.to_dict()

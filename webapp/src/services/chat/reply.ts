@@ -176,6 +176,8 @@ export const canContinueReply = (reply: AssistantMessage): boolean => {
     reply.stopReason === 'tool_use' ||
     reply.blocks.some(
       (block) =>
+        // 本轮含客户端工具调用时后端拒绝续写（tool_calls 非空）
+        block.type === 'tool' ||
         block.type === 'server_tool_use' ||
         block.type === 'web_search_tool_result' ||
         block.type === 'web_fetch_tool_result' ||

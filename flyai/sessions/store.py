@@ -15,6 +15,7 @@ class SessionStore(ABC):
     MERGED_FIELDS = (
         "title", "pinned", "max_tokens", "disabled_tools",
         "character_id", "world_id", "character_override", "world_override",
+        "opening_entry",
     )
 
     @abstractmethod

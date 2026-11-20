@@ -340,8 +340,26 @@ class UserSettings:
     pixiv_enabled: Optional[bool] = None
     image_enabled: Optional[bool] = None
     galgame_enabled: Optional[bool] = None
+    # 第一人称自我记忆（P3）：个人开关，默认关闭；管理员全局开启后才可启用
+    self_memory_enabled: bool = False
     # Galgame 单轮工具循环上限
     galgame_max_loops: Optional[int] = None
+    # 酒馆卡扩展（None=跟随默认；默认值见 st 模块与 AppConfig）
+    st_regex_prompt_enabled: Optional[bool] = None
+    st_regex_display_enabled: Optional[bool] = None
+    st_html_enabled: Optional[bool] = None
+    st_external_images_enabled: Optional[bool] = None
+    # 外链插图经服务端代理（需管理员开启 st_image 且权限等级达标）
+    st_image_proxy_enabled: Optional[bool] = None
+    # 卡内整页 HTML+JS 应用放进沙箱 iframe（默认仅管理员开启）
+    st_js_sandbox_enabled: Optional[bool] = None
+    # 卡内授权动作（发送/重生成/继续）：逐次弹窗确认，仅单角色 DM
+    st_card_actions_enabled: Optional[bool] = None
+    # 卡内写回会话副本（变量/世界书/角色）：仅写会话副本，永不写根卡
+    st_card_write_enabled: Optional[bool] = None
+    # 卡内网络请求经服务端受控代理（需管理员开启 st_net 且等级达标）
+    st_net_proxy_enabled: Optional[bool] = None
+    mvu_enabled: Optional[bool] = None
 
     # 可空覆盖字段名 → 类型（b=布尔/i=整数）；to/from_dict 与 API 共用
     OVERRIDE_FIELDS = {
@@ -360,7 +378,18 @@ class UserSettings:
         "pixiv_enabled": "b",
         "image_enabled": "b",
         "galgame_enabled": "b",
+        "self_memory_enabled": "b",
         "galgame_max_loops": "i",
+        "st_regex_prompt_enabled": "b",
+        "st_regex_display_enabled": "b",
+        "st_html_enabled": "b",
+        "st_external_images_enabled": "b",
+        "st_image_proxy_enabled": "b",
+        "st_js_sandbox_enabled": "b",
+        "st_card_actions_enabled": "b",
+        "st_card_write_enabled": "b",
+        "st_net_proxy_enabled": "b",
+        "mvu_enabled": "b",
     }
 
     def to_dict(self) -> Dict[str, Any]:

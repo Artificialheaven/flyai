@@ -4,6 +4,11 @@ import type { TranslationKey } from '../../i18n/index.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { useAuth } from '../../services/flyai/auth.js'
 import {
+  getMySettings,
+  putMySettings,
+  type MySettings,
+} from '../../services/flyai/admin.js'
+import {
   addCommitment,
   addJob,
   addPoll,
@@ -221,6 +226,9 @@ export const SessionAssistantDialog = ({
   const [memRows, setMemRows] = useState<SelfMemoryRow[]>([])
   const [memLoading, setMemLoading] = useState(false)
   const [memInclude, setMemInclude] = useState(false)
+  // 个人开关默认关闭；需要完整设置面板数据用于整体回写
+  const [memEnabled, setMemEnabled] = useState(false)
+  const [memSettings, setMemSettings] = useState<MySettings | null>(null)
   const [memStatement, setMemStatement] = useState('')
   const [memTags, setMemTags] = useState('')
   const [memImportance, setMemImportance] = useState('60')
@@ -231,14 +239,31 @@ export const SessionAssistantDialog = ({
   const loadMemory = useCallback(async () => {
     setMemLoading(true)
     try {
-      const data = await listSelfMemory(memInclude)
+      const [data, settings] = await Promise.all([
+        listSelfMemory(memInclude),
+        getMySettings(),
+      ])
       setMemRows(data.items)
+      setMemSettings(settings)
+      setMemEnabled(Boolean(settings.self_memory_enabled))
     } catch (err) {
       setError(t('adminLoadFailed', { message: errorText(err) }))
     } finally {
       setMemLoading(false)
     }
   }, [memInclude, t])
+
+  const toggleMemory = (enabled: boolean) =>
+    run('memToggle', async () => {
+      if (!memSettings) {
+        return
+      }
+      const payload = { ...memSettings, self_memory_enabled: enabled }
+      delete payload.active_preset_id
+      const saved = await putMySettings(payload)
+      setMemSettings(saved)
+      setMemEnabled(Boolean(saved.self_memory_enabled))
+    }, enabled ? t('assistMemEnabledToast') : t('assistMemDisabledToast'))
 
   useEffect(() => {
     if (tab === 'memory') {
@@ -684,7 +709,15 @@ export const SessionAssistantDialog = ({
 
       {tab === 'memory' ? (
         <>
-          <div className={styles.hint}>{t('assistMemHint')}</div>
+          <SwitchRow
+            label={t('assistMemSwitch')}
+            desc={t('assistMemSwitchDesc')}
+            checked={memEnabled}
+            onChange={(checked) => void toggleMemory(checked)}
+          />
+          <div className={styles.hint}>
+            {memEnabled ? t('assistMemHint') : t('assistMemDisabledHint')}
+          </div>
           <div className={styles.formCard}>
             <TextField
               label={t('assistMemStatement')}
@@ -707,7 +740,7 @@ export const SessionAssistantDialog = ({
             <div className={styles.actions}>
               <Button
                 size="s"
-                disabled={busy === 'memAdd' || !memStatement.trim()}
+                disabled={!memEnabled || busy === 'memAdd' || !memStatement.trim()}
                 onClick={() => void addMemory()}
               >
                 {t('assistMemAdd')}
@@ -774,6 +807,7 @@ export const SessionAssistantDialog = ({
                       <Button
                         variant="outlined"
                         size="s"
+                        disabled={!memEnabled}
                         onClick={() => {
                           setSupersedeTarget(row)
                           setSupersedeDraft('')

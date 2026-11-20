@@ -11,7 +11,8 @@
     release/flyai-src-<version>.zip
 
 版本号以 mobile/android/variables.gradle 的 appVersionName 为准，脚本不写死。
-源码 zip = git 已跟踪文件 + mobile/android 源码树（未入库但编译必需），
+源码 zip = git 已跟踪文件 + 未跟踪但未被 .gitignore 的源码（新功能文件常常
+还没来得及 git add）+ mobile/android 源码树（未入库但编译必需），
 排除机密（config/config.json、keystore、*.jks 等）与生成物（node_modules、build 等）。
 """
 
@@ -55,9 +56,15 @@ EXCLUDED_FILES = {
     "local.properties",
     ".DS_Store",
     "Thumbs.db",
+    # 本地笔记 / 临时脚本，不属于源码
+    "mem.md",
+    "memory.md",
+    "flyai.txt",
+    "todo.md",
+    "clean_pyc.py",
 }
 
-EXCLUDED_SUFFIXES = (".pyc", ".apk", ".jks", ".keystore")
+EXCLUDED_SUFFIXES = (".pyc", ".apk", ".jks", ".keystore", ".midi", ".mid", ".mp3", ".wav")
 
 # 相对仓库根的前缀（机密、运行数据、生成物、本地备份）
 EXCLUDED_PREFIXES = (
@@ -65,9 +72,11 @@ EXCLUDED_PREFIXES = (
     "data/",
     "release/",
     "show/",
-    "test/temp/",
+    "test/",
     "webroot/",
     "tools/frp/",
+    "workspace/",
+    "mobile/android-backup",
     "mobile/android/app/src/main/assets/public/",
 )
 
@@ -115,11 +124,17 @@ def is_excluded(rel):
         return True
     if name.endswith(EXCLUDED_SUFFIXES):
         return True
+    if name.startswith("tmp_") or name.startswith("tmp."):
+        return True
     return any(rel.startswith(prefix) for prefix in EXCLUDED_PREFIXES)
 
 
 def git_files():
-    """git 已跟踪文件；有未提交改动时只警告（zip 取工作区内容）。"""
+    """git 已跟踪 + 未跟踪但未忽略的文件（排除项见 is_excluded）。
+
+    只取 `git ls-files` 会漏掉尚未 `git add` 的新源码文件，导致源码包
+    里的旧文件引用包内不存在的模块（例如 import 新模块直接 ImportError）。
+    """
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(REPO_ROOT),
@@ -128,10 +143,10 @@ def git_files():
     if status.returncode != 0:
         die("git status 失败：%s" % status.stderr.decode("utf-8", "replace").strip())
     if status.stdout.strip():
-        log("警告：工作区有未提交改动，源码 zip 将包含当前工作区内容")
+        log("警告：工作区有未提交改动，源码 zip 将包含当前工作区内容（含未跟踪源码）")
 
     listing = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=str(REPO_ROOT),
         capture_output=True,
     )

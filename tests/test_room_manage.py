@@ -454,3 +454,186 @@ def test_empty_first_mes_seeds_nothing(tmp_path):
     sc.lore.get_character("c1").first_mes = "   \n  "
     out = create_room(RoomCreate(character_ids=["c1"]), request)
     assert out["threads"][0]["messages"] == []
+
+
+# ---- 开场白选择（alternate_greetings） ----
+
+def _greeting_env(tmp_path):
+    sc, request = _room_create_env(tmp_path)
+    ch = sc.lore.get_character("c1")
+    ch.first_mes = "默认开场"
+    ch.alternate_greetings = ["备选一", "备选二"]
+    return sc, request
+
+
+def test_greeting_index_picks_alternate(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    out = create_room(
+        RoomCreate(character_ids=["c1"], greeting_index=2), request)
+    msgs = out["threads"][0]["messages"]
+    assert len(msgs) == 1 and msgs[0]["content"] == "备选二"
+    assert sc.store.get(out["id"]).threads[0].messages[0].content == "备选二"
+
+
+def test_greeting_index_zero_or_missing_uses_first_mes(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    for index in (None, 0):
+        out = create_room(
+            RoomCreate(character_ids=["c1"], greeting_index=index), request)
+        msgs = out["threads"][0]["messages"]
+        assert len(msgs) == 1 and msgs[0]["content"] == "默认开场"
+
+
+def test_greeting_index_out_of_range_falls_back(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    for index in (3, -1):
+        out = create_room(
+            RoomCreate(character_ids=["c1"], greeting_index=index), request)
+        msgs = out["threads"][0]["messages"]
+        assert len(msgs) == 1 and msgs[0]["content"] == "默认开场"
+
+
+def test_greeting_index_blank_alternate_falls_back(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    # 按存储原下标选择：第 2 条为空 → 回落 first_mes，而不是顺延到第 3 条
+    sc.lore.get_character("c1").alternate_greetings = ["备选一", "  ", "备选三"]
+    out = create_room(
+        RoomCreate(character_ids=["c1"], greeting_index=2), request)
+    msgs = out["threads"][0]["messages"]
+    assert len(msgs) == 1 and msgs[0]["content"] == "默认开场"
+
+
+def test_greeting_index_substitutes_macros(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    sc.lore.get_character("c1").alternate_greetings = ["  {{char}}对{{user}}说：早  "]
+    out = create_room(
+        RoomCreate(character_ids=["c1"], greeting_index=1), request)
+    msgs = out["threads"][0]["messages"]
+    assert len(msgs) == 1 and msgs[0]["content"] == "角色1对你说：早"
+
+
+def test_greeting_index_ignored_for_multi_character_room(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    out = create_room(
+        RoomCreate(character_ids=["c1", "c2"], greeting_index=1), request)
+    assert all(t["messages"] == [] for t in out["threads"])
+
+
+def test_greeting_index_ignored_for_galgame_room(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _greeting_env(tmp_path)
+    out = create_room(
+        RoomCreate(character_ids=["c1"], mode="galgame", greeting_index=1),
+        request)
+    assert out["threads"][0]["messages"] == []
+
+
+# ---- 开局设定（开局*/序章* 世界书条目选择） ----
+
+def _opening_env(tmp_path):
+    from flyai.lore.models import LoreEntry
+
+    sc, request = _room_create_env(tmp_path)
+    ch = sc.lore.get_character("c1")
+    ch.first_mes = "默认开场"
+    ch.table = [
+        LoreEntry(title="序章", content="序章内容"),
+        LoreEntry(title="开局1", content="开局1内容"),
+        LoreEntry(title="开局2", content="开局2内容"),
+        # 模仿真实卡：只有开局3 默认常驻
+        LoreEntry(title="开局3", content="开局3内容", pinned=True),
+        LoreEntry(title="其它设定", content="其它内容", pinned=True),
+    ]
+    return sc, request
+
+
+def _prompt_card(sc, room):
+    from flyai.sessions.resolve import opening_character
+
+    session = sc.store.get(room["id"])
+    card = sc.lore.get_character(session.character_id)
+    return session, opening_character(session, card)
+
+
+def test_opening_entry_persisted_and_applied(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _opening_env(tmp_path)
+    out = create_room(
+        RoomCreate(character_ids=["c1"], opening_entry="开局1"), request)
+    assert out["opening_entry"] == "开局1"
+    session, card = _prompt_card(sc, out)
+    assert session.opening_entry == "开局1"
+    titles = {e.title: e for e in card.table}
+    assert titles["开局1"].pinned
+    # 未选中的开局条目整体移除（只 unpin 仍会被关键字/语义检索命中）
+    assert "序章" not in titles and "开局2" not in titles and "开局3" not in titles
+    # 非开局条目保持原样
+    assert titles["其它设定"].pinned
+    # 原卡不被修改：导出/发布仍是作者版本
+    original = {e.title: e for e in sc.lore.get_character("c1").table}
+    assert not original["开局1"].pinned and original["开局3"].pinned
+
+
+def test_opening_entry_blank_keeps_card_default(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+    from flyai.sessions.resolve import opening_character
+
+    sc, request = _opening_env(tmp_path)
+    for value in (None, "", "   "):
+        out = create_room(
+            RoomCreate(character_ids=["c1"], opening_entry=value), request)
+        session = sc.store.get(out["id"])
+        assert session.opening_entry == ""
+        card = sc.lore.get_character("c1")
+        assert opening_character(session, card) is card  # 无选择不拷贝
+        assert {e.title: e.pinned for e in card.table}["开局3"]
+
+
+def test_opening_entry_unknown_title_rejected_without_session_file(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _opening_env(tmp_path)
+    with pytest.raises(HTTPException) as ei:
+        create_room(
+            RoomCreate(character_ids=["c1"], opening_entry="开局9"), request)
+    assert ei.value.status_code == 400
+    assert sc.store.list() == []
+
+
+def test_opening_entry_ignored_for_multi_character_and_galgame(tmp_path):
+    from flyai.api.routes_room import RoomCreate, create_room
+
+    sc, request = _opening_env(tmp_path)
+    out = create_room(
+        RoomCreate(character_ids=["c1", "c2"], opening_entry="开局1"), request)
+    assert sc.store.get(out["id"]).opening_entry == ""
+    out = create_room(
+        RoomCreate(character_ids=["c1"], mode="galgame", opening_entry="开局1"),
+        request)
+    assert sc.store.get(out["id"]).opening_entry == ""
+
+
+def test_switch_card_clears_opening_entry(tmp_path):
+    sc, request, store, s, m = _single_dm_env(tmp_path)
+    s.opening_entry = "开局1"
+    store.save(s)
+    # 幂等保存同一张卡：保留选择
+    update_member(s.id, m.id, MemberUpdate(character_id="c1"), request)
+    assert store.get(s.id).opening_entry == "开局1"
+    # 换到另一张卡：旧卡的开局选择清空
+    update_member(s.id, m.id, MemberUpdate(character_id="c2"), request)
+    assert store.get(s.id).opening_entry == ""

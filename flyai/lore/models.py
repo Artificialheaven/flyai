@@ -6,6 +6,7 @@ LoreEntry 是「内容表」条目（一个标题 + 一段内容）。
 
 from __future__ import annotations
 
+import copy
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -92,6 +93,11 @@ class Character:
     voice: str = ""           # 绑定音色的 speaker ID（空=用全局默认音色）
     author: str = ""          # 创建者 uid（服务端注入）；对外以 author:id 唯一标识
     public: bool = False      # 是否已发布为全体用户共享（admin 操作）
+    # ---- 酒馆卡保真字段（原样保留，绝不执行其中的 JS）----
+    regex_scripts: List[Dict[str, Any]] = field(default_factory=list)  # ST regex_scripts
+    extensions: Dict[str, Any] = field(default_factory=dict)  # depth_prompt/world/talkativeness/fav/tavern_helper 等
+    alternate_greetings: List[str] = field(default_factory=list)
+    assets: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.id:
@@ -127,6 +133,10 @@ class Character:
             "voice": self.voice,
             "author": self.author,
             "public": self.public,
+            "regex_scripts": copy.deepcopy(list(self.regex_scripts or [])),
+            "extensions": copy.deepcopy(dict(self.extensions or {})),
+            "alternate_greetings": [str(g) for g in (self.alternate_greetings or [])],
+            "assets": copy.deepcopy(list(self.assets or [])),
         }
 
     @classmethod
@@ -150,6 +160,20 @@ class Character:
             voice=d.get("voice", "") or "",
             author=d.get("author", "") or "",
             public=bool(d.get("public", False)),
+            regex_scripts=[
+                dict(s) for s in (d.get("regex_scripts") or [])
+                if isinstance(s, dict)
+            ],
+            extensions=dict(d.get("extensions") or {})
+            if isinstance(d.get("extensions"), dict) else {},
+            alternate_greetings=[
+                str(g) for g in (d.get("alternate_greetings") or [])
+                if str(g or "").strip()
+            ],
+            assets=[
+                dict(a) for a in (d.get("assets") or [])
+                if isinstance(a, dict)
+            ],
         )
 
 

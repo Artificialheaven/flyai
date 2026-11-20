@@ -112,6 +112,7 @@ export const CharacterEditor = ({
   const patch = (value: Draft) => setDraft((prev) => ({ ...prev, ...value }))
   const entries = draft.table ?? []
   const attributes = draft.attributes ?? []
+  const alternateGreetings = draft.alternate_greetings ?? []
 
   const setEntry = (index: number, value: Partial<LoreEntry>) =>
     patch({ table: entries.map((entry, i) => (i === index ? { ...entry, ...value } : entry)) })
@@ -179,7 +180,13 @@ export const CharacterEditor = ({
     setSaving(true)
     setError('')
     try {
-      await onSave({ ...draft, table: entries, attributes })
+      await onSave({
+        ...draft,
+        table: entries,
+        attributes,
+        // 空项不落库（后端也会过滤），否则会占掉开场白下拉的序号
+        alternate_greetings: alternateGreetings.filter((greeting) => greeting.trim()),
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -321,6 +328,66 @@ export const CharacterEditor = ({
             onChange={(event) => patch({ first_mes: event.target.value })}
           />
         </label>
+        {alternateGreetings.length > 0 || !readOnly ? (
+          <div className={styles.sectionBox}>
+            <div className={styles.boxHead}>
+              <div className={styles.boxTitle}>{t('loreAlternateGreetings')}</div>
+              {!readOnly ? (
+                <Button
+                  variant="outlined"
+                  size="s"
+                  onClick={() =>
+                    patch({ alternate_greetings: [...alternateGreetings, ''] })
+                  }
+                >
+                  {t('loreAddGreeting')}
+                </Button>
+              ) : null}
+            </div>
+            <div className={styles.hint}>{t('loreAlternateGreetingsHint')}</div>
+            {alternateGreetings.length === 0 ? (
+              <div className={styles.hint}>{t('loreGreetingEmpty')}</div>
+            ) : null}
+            {alternateGreetings.map((greeting, index) => (
+              <div className={styles.entry} key={index}>
+                <div className={styles.boxHead}>
+                  <span className={styles.fieldLabel}>
+                    {t('loreGreetingLabel', { index: index + 1 })}
+                  </span>
+                  {!readOnly ? (
+                    <button
+                      type="button"
+                      className={styles.iconAction}
+                      aria-label={t('delete')}
+                      onClick={() =>
+                        patch({
+                          alternate_greetings: alternateGreetings.filter(
+                            (_, i) => i !== index
+                          ),
+                        })
+                      }
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                </div>
+                <textarea
+                  className={`${styles.textarea} ${styles.textareaTall}`}
+                  value={greeting}
+                  disabled={readOnly}
+                  placeholder={t('loreGreetingPlaceholder')}
+                  onChange={(event) =>
+                    patch({
+                      alternate_greetings: alternateGreetings.map((item, i) =>
+                        i === index ? event.target.value : item
+                      ),
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        ) : null}
         <label className={styles.field}>
           <span className={styles.fieldLabel}>{t('loreMesExample')}</span>
           <textarea

@@ -1,5 +1,10 @@
 import type { Image, Link as LinkNode } from 'mdast'
-import { memo, type ReactNode } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
+import { assetUrl } from '../../services/flyai/client.js'
+import { fetchProxyImage } from '../../services/st/imageProxy.js'
+import { ImageViewer } from '../images/ImageViewer.js'
+import { isExternalImage, safeImageSrc } from './htmlPolicy.js'
+import { useMarkdownRenderOptions } from './SanitizedHtml.js'
 
 const sanitizeUrl = (url: string) => {
   // 如果URL没有协议，添加默认的https协议
@@ -45,8 +50,63 @@ export const Link = memo(function Link({
   )
 })
 
-/** Markdown 图片显示为指向图片地址的链接 */
+/**
+ * 酒馆卡启用 HTML 渲染时，Markdown 图片内联展示并支持点开看图器；
+ * 其余情况保持「指向图片地址的链接」的旧行为。
+ */
 export function ImageAsLink({ node }: { node: Image }) {
+  const { htmlEnabled, externalImages, imageProxy } = useMarkdownRenderOptions()
+  const [open, setOpen] = useState(false)
+  const [proxySrc, setProxySrc] = useState('')
+  const safeSrc = htmlEnabled ? safeImageSrc(node.url, { external: externalImages }) : ''
+  const proxied = Boolean(imageProxy && safeSrc && isExternalImage(safeSrc))
+
+  // 代理模式：先经服务端取回 blob: URL，绝不直连外链；失败则只留 alt 文本。
+  useEffect(() => {
+    if (!proxied) {
+      setProxySrc('')
+      return undefined
+    }
+    let cancelled = false
+    fetchProxyImage(safeSrc)
+      .then((blobUrl) => {
+        if (!cancelled) {
+          setProxySrc(blobUrl)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [proxied, safeSrc])
+
+  const displaySrc = proxied
+    ? proxySrc
+    : safeSrc.startsWith('/') && !safeSrc.startsWith('//')
+      ? assetUrl(safeSrc)
+      : safeSrc
+  if (safeSrc) {
+    return (
+      <>
+        <img
+          className="ds-markdown-inline-image"
+          src={displaySrc || undefined}
+          alt={node.alt ?? ''}
+          title={node.title ?? undefined}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onClick={() => {
+            if (displaySrc) {
+              setOpen(true)
+            }
+          }}
+        />
+        {open && displaySrc ? (
+          <ImageViewer image={{ src: displaySrc }} onClose={() => setOpen(false)} />
+        ) : null}
+      </>
+    )
+  }
   const url = sanitizeUrl(node.url)
   return (
     <a href={url} title={node.title ?? ''} target="_blank" rel="noreferrer">

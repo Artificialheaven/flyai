@@ -97,7 +97,10 @@ const uploadFile = async <T>(path: string, file: File): Promise<T> => {
 export const importCharacterCard = async (file: File): Promise<Character> =>
   uploadFile<Character>('/api/characters/import-card', file)
 
-/** FlyAI / 酒馆 v2 角色卡 JSON（导出文件可直接再导入） */
+/**
+ * FlyAI / 酒馆 v2 角色卡 JSON（导出文件可直接再导入）。
+ * 走服务端 /characters/import：保留酒馆保真字段，并还原内嵌头像。
+ */
 export const importCharacterJson = async (file: File): Promise<Character> => {
   const text = await file.text()
   let parsed: unknown
@@ -106,11 +109,19 @@ export const importCharacterJson = async (file: File): Promise<Character> => {
   } catch {
     throw new Error('文件不是有效的 JSON')
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('文件内容不是角色卡 JSON')
+  }
+  const envelope = parsed as { data?: unknown; type?: unknown }
   const data =
-    parsed && typeof parsed === 'object' && 'data' in parsed
-      ? (parsed as { data: Partial<Character> }).data
-      : (parsed as Partial<Character>)
-  return createCharacter(data)
+    envelope.data && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
+      ? envelope.data
+      : parsed
+  const type = typeof envelope.type === 'string' && envelope.type ? envelope.type : 'character'
+  return request<Character>('/api/characters/import', {
+    method: 'POST',
+    body: JSON.stringify({ type, data }),
+  })
 }
 
 export const importWorldbook = async (

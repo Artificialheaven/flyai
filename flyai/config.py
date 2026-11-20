@@ -1120,6 +1120,100 @@ class DeepSeekSettings(BaseModel):
         return v if v in ("stella", "tide") else "stella"
 
 
+class StImageSettings(BaseModel):
+    """酒馆卡外链插图：服务端代理（方案 4）的兜底开关。
+
+    前端默认走方案 1（直连 + 每用户开关）；代理仅当 enabled 为真且
+    用户权限等级 ≥ min_level 时可用。allowed_domains 为空表示不限制
+    （但仍受 SSRF/内网地址拦截）。admin 恒不受 min_level 约束。
+    """
+
+    enabled: bool = False
+    min_level: int = 256
+    allowed_domains: List[str] = []
+
+    @validator("min_level", pre=True)
+    def _clamp_level(cls, v):  # noqa: N805
+        # 256 = 仅 admin（普通用户等级上限 255，admin 按 uid 判定恒过）
+        try:
+            return max(0, min(int(v), 256))
+        except (TypeError, ValueError):
+            return 256
+
+    @validator("allowed_domains", pre=True)
+    def _clean_domains(cls, v):  # noqa: N805
+        if not isinstance(v, (list, tuple)):
+            return []
+        out = []
+        for item in v:
+            host = str(item or "").strip().lower().lstrip(".")
+            if host and "/" not in host and len(host) <= 253:
+                out.append(host)
+        return out
+
+
+class StNetSettings(BaseModel):
+    """酒馆卡受控网络代理（L4-C）：卡内 fetch 由服务端代发。
+
+    默认关闭。开启后域名策略为并集：allow_any_public_https 为真时放行任意
+    公网 HTTPS；allowed_domains 非空时额外放行其中的域名（含 http）。
+    所有请求仍受 flyai/netguard.py 的 SSRF/内网地址拦截。
+    """
+
+    enabled: bool = False
+    allow_any_public_https: bool = True
+    allowed_domains: List[str] = []
+    min_level: int = 0
+    max_bytes: int = 5 * 1024 * 1024
+    timeout: float = 15.0
+    per_minute: int = 60
+
+    @validator("min_level", pre=True)
+    def _clamp_level(cls, v):  # noqa: N805
+        try:
+            return max(0, min(int(v), 256))
+        except (TypeError, ValueError):
+            return 0
+
+    @validator("allowed_domains", pre=True)
+    def _clean_domains(cls, v):  # noqa: N805
+        if not isinstance(v, (list, tuple)):
+            return []
+        out = []
+        for item in v:
+            host = str(item or "").strip().lower().lstrip(".")
+            if host and "/" not in host and len(host) <= 253:
+                out.append(host)
+        return out
+
+    @validator("max_bytes", pre=True)
+    def _clamp_bytes(cls, v):  # noqa: N805
+        try:
+            return max(64 * 1024, min(int(v), 32 * 1024 * 1024))
+        except (TypeError, ValueError):
+            return 5 * 1024 * 1024
+
+    @validator("timeout", pre=True)
+    def _clamp_timeout(cls, v):  # noqa: N805
+        try:
+            return max(1.0, min(float(v), 60.0))
+        except (TypeError, ValueError):
+            return 15.0
+
+    @validator("per_minute", pre=True)
+    def _clamp_rate(cls, v):  # noqa: N805
+        try:
+            return max(1, min(int(v), 600))
+        except (TypeError, ValueError):
+            return 60
+
+
+class MvuSettings(BaseModel):
+    """原生 MVU 变量系统总开关（关闭后不解析、不注入）。"""
+
+    enabled: bool = True
+
+
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
@@ -1153,6 +1247,9 @@ class AppConfig(BaseModel):
     watchers: WatcherSettings = WatcherSettings()
     access: AccessSettings = AccessSettings()
     deepseek: DeepSeekSettings = DeepSeekSettings()
+    st_image: StImageSettings = StImageSettings()
+    st_net: StNetSettings = StNetSettings()
+    mvu: MvuSettings = MvuSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

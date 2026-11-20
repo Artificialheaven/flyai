@@ -12,6 +12,7 @@ import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { IconCheckedOutline14 } from '../base/icons.js'
 import { closeNewRoom, useNewRoomDialog } from './newRoomState.js'
+import { openingOptions } from './openingEntries.js'
 import styles from './NewRoomDialog.module.css'
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -30,8 +31,12 @@ const NewRoomContent = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
-  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
+  const [selected, setSelected] = useState<ReadonlySet<string>>(
+    () => new Set(useNewRoomDialog.getState().presetIds)
+  )
   const [worldId, setWorldId] = useState('')
+  const [greetingIndex, setGreetingIndex] = useState('0')
+  const [openingEntry, setOpeningEntry] = useState('')
   const [creating, setCreating] = useState(false)
 
   useEffect(() => {
@@ -41,6 +46,12 @@ const NewRoomContent = () => {
         if (!cancelled) {
           setCharacters(chars)
           setWorlds(ws)
+          // 预选 id 可能已失效（被删除/取消共享），按当前可见列表过滤
+          const known = new Set(chars.map((c) => c.id))
+          setSelected((previous) => {
+            const next = new Set([...previous].filter((id) => known.has(id)))
+            return next.size === previous.size ? previous : next
+          })
         }
       })
       .catch((err) => {
@@ -80,6 +91,30 @@ const NewRoomContent = () => {
     })
   }, [])
 
+  // 只有恰好选中一张卡时才能选开场白（多角色/Galgame 后端不播种）
+  const selectedCharacters = useMemo(
+    () => characters.filter((c) => selected.has(c.id)),
+    [characters, selected]
+  )
+  const singleCharacter = selectedCharacters.length === 1 ? selectedCharacters[0] : undefined
+  const alternateGreetings = useMemo(() => {
+    const list = singleCharacter?.alternate_greetings ?? []
+    return list
+      .map((text, index) => ({ index: index + 1, text: (text ?? '').trim() }))
+      .filter((item) => item.text)
+  }, [singleCharacter])
+
+  // 开局设定候选（「开局*」「序章*」世界书条目）；多角色时后端会忽略
+  const openings = useMemo(
+    () => openingOptions(singleCharacter?.table),
+    [singleCharacter]
+  )
+
+  useEffect(() => {
+    setGreetingIndex('0')
+    setOpeningEntry('')
+  }, [singleCharacter?.id, selected.size])
+
   const create = async () => {
     if (creating || selected.size === 0) {
       return
@@ -87,7 +122,13 @@ const NewRoomContent = () => {
     setCreating(true)
     setError('')
     try {
-      await startRoomChat([...selected], worldId || undefined)
+      const greeting = Number.parseInt(greetingIndex, 10)
+      await startRoomChat(
+        [...selected],
+        worldId || undefined,
+        Number.isFinite(greeting) && greeting > 0 ? greeting : undefined,
+        openingEntry || undefined
+      )
       closeNewRoom()
       showToast(t('newRoomCreated'))
     } catch (err) {
@@ -96,6 +137,22 @@ const NewRoomContent = () => {
       setCreating(false)
     }
   }
+
+  const greetingOptions = [
+    { value: '0', label: t('newRoomGreetingDefault') },
+    ...alternateGreetings.map((item) => ({
+      value: String(item.index),
+      label: t('newRoomGreetingAlt', {
+        index: item.index,
+        preview: item.text.replace(/\s+/g, ' ').slice(0, 40),
+      }),
+    })),
+  ]
+
+  const openingSelectOptions = [
+    { value: '', label: t('newRoomOpeningDefault') },
+    ...openings.map((item) => ({ value: item.title, label: item.title })),
+  ]
 
   const worldOptions = [
     { value: '', label: t('sessionWorldNone') },
@@ -142,6 +199,28 @@ const NewRoomContent = () => {
             onChange={setWorldId}
           />
         </div>
+        {alternateGreetings.length > 0 ? (
+          <div className={styles.worldPick}>
+            <span className={styles.worldLabel}>{t('newRoomGreeting')}</span>
+            <Select
+              value={greetingIndex}
+              options={greetingOptions}
+              disabled={creating}
+              onChange={setGreetingIndex}
+            />
+          </div>
+        ) : null}
+        {openings.length > 0 ? (
+          <div className={styles.worldPick}>
+            <span className={styles.worldLabel}>{t('newRoomOpening')}</span>
+            <Select
+              value={openingEntry}
+              options={openingSelectOptions}
+              disabled={creating}
+              onChange={setOpeningEntry}
+            />
+          </div>
+        ) : null}
       </div>
       {error ? <div className={styles.error}>{error}</div> : null}
       {loading ? (

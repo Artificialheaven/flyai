@@ -175,6 +175,24 @@ export type AdminConfig = {
   loop: { enabled: boolean }
   /** 权限门槛：所有登录用户可见 */
   access?: AccessSettingsView
+  /** 酒馆卡外链图片服务端代理（门槛/白名单；所有登录用户可见） */
+  st_image?: { enabled: boolean; min_level: number; allowed_domains?: string[] }
+  /** 卡片受控网络代理（任意公网 HTTPS 或白名单；所有登录用户可见） */
+  st_net?: {
+    enabled: boolean
+    min_level: number
+    allow_any_public_https?: boolean
+    allowed_domains?: string[]
+    max_bytes?: number
+    timeout?: number
+    per_minute?: number
+  }
+  /** 原生 MVU 总开关 */
+  mvu?: { enabled: boolean }
+  /** 当前用户是否可用图片代理（管理员按权限等级判定） */
+  st_image_available?: boolean
+  /** 当前用户是否可用网络代理（管理员按权限等级判定） */
+  st_net_available?: boolean
   /** DeepSeek 服务：仅 admin 视图包含 */
   deepseek?: DeepSeekSettingsView
   /** 邀请码注册设置：仅 admin 视图包含 */
@@ -213,6 +231,20 @@ export type MySettings = {
   image_enabled: boolean | null
   galgame_enabled: boolean | null
   galgame_max_loops: number | null
+  /** 第一人称自我记忆个人开关；默认关闭（非三态，不跟随全局） */
+  self_memory_enabled: boolean
+  /** 酒馆卡扩展：null = 跟随默认（正则/HTML/MVU 默认开，外链图/代理默认关） */
+  st_regex_prompt_enabled: boolean | null
+  st_regex_display_enabled: boolean | null
+  st_html_enabled: boolean | null
+  st_external_images_enabled: boolean | null
+  st_image_proxy_enabled: boolean | null
+  st_js_sandbox_enabled: boolean | null
+  mvu_enabled: boolean | null
+  /** L4 卡片授权动作/会话副本写入/网络代理（null = 跟随默认关） */
+  st_card_actions_enabled: boolean | null
+  st_card_write_enabled: boolean | null
+  st_net_proxy_enabled: boolean | null
 }
 
 export type MySettingsPayload = Omit<MySettings, 'active_preset_id'>

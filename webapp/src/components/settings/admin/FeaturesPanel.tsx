@@ -44,6 +44,17 @@ type FormState = {
   image: TriValue
   galgame: TriValue
   galgameLoops: string
+  selfMemory: boolean
+  stRegexPrompt: TriValue
+  stRegexDisplay: TriValue
+  stHtml: TriValue
+  stExternalImages: TriValue
+  stImageProxy: TriValue
+  stJsSandbox: TriValue
+  stCardActions: TriValue
+  stCardWrite: TriValue
+  stNetProxy: TriValue
+  mvu: TriValue
 }
 
 const tri = (value: boolean | null | undefined): TriValue =>
@@ -92,6 +103,17 @@ const toForm = (settings: Awaited<ReturnType<typeof getMySettings>>): FormState 
   image: tri(settings.image_enabled),
   galgame: tri(settings.galgame_enabled),
   galgameLoops: optText(settings.galgame_max_loops),
+  selfMemory: Boolean(settings.self_memory_enabled),
+  stRegexPrompt: tri(settings.st_regex_prompt_enabled),
+  stRegexDisplay: tri(settings.st_regex_display_enabled),
+  stHtml: tri(settings.st_html_enabled),
+  stExternalImages: tri(settings.st_external_images_enabled),
+  stImageProxy: tri(settings.st_image_proxy_enabled),
+  stJsSandbox: tri(settings.st_js_sandbox_enabled),
+  stCardActions: tri(settings.st_card_actions_enabled),
+  stCardWrite: tri(settings.st_card_write_enabled),
+  stNetProxy: tri(settings.st_net_proxy_enabled),
+  mvu: tri(settings.mvu_enabled),
 })
 
 export const FeaturesPanel = () => {
@@ -170,6 +192,17 @@ export const FeaturesPanel = () => {
       image_enabled: triBool(form.image),
       galgame_enabled: triBool(form.galgame),
       galgame_max_loops: optional(ints.galgame_max_loops),
+      self_memory_enabled: form.selfMemory,
+      st_regex_prompt_enabled: triBool(form.stRegexPrompt),
+      st_regex_display_enabled: triBool(form.stRegexDisplay),
+      st_html_enabled: triBool(form.stHtml),
+      st_external_images_enabled: triBool(form.stExternalImages),
+      st_image_proxy_enabled: triBool(form.stImageProxy),
+      st_js_sandbox_enabled: triBool(form.stJsSandbox),
+      st_card_actions_enabled: triBool(form.stCardActions),
+      st_card_write_enabled: triBool(form.stCardWrite),
+      st_net_proxy_enabled: triBool(form.stNetProxy),
+      mvu_enabled: triBool(form.mvu),
     }
     setSaving(true)
     setError('')
@@ -230,6 +263,12 @@ export const FeaturesPanel = () => {
               hint={t('featuresExtractEveryHint')}
               value={form.extractEvery}
               onChange={(value) => patch({ extractEvery: value })}
+            />
+            <SwitchRow
+              label={t('featuresSelfMemory')}
+              desc={t('featuresSelfMemoryDesc')}
+              checked={form.selfMemory}
+              onChange={(checked) => patch({ selfMemory: checked })}
             />
             <SwitchRow
               label={t('featuresLoreAutoInject')}
@@ -354,6 +393,77 @@ export const FeaturesPanel = () => {
               hint={globalInt(global?.galgame.max_loops)}
               value={form.galgameLoops}
               onChange={(value) => patch({ galgameLoops: value })}
+            />
+          </div>
+
+          <div className={styles.sectionTitle}>{t('featuresStTitle')}</div>
+          <div className={styles.hint}>{t('featuresStHint')}</div>
+          <div className={styles.rows}>
+            <TriRow
+              label={t('featuresStRegexPrompt')}
+              desc={t('featuresStRegexPromptDesc')}
+              value={form.stRegexPrompt === 'inherit' ? null : form.stRegexPrompt === 'on'}
+              onChange={(value) => patch({ stRegexPrompt: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStRegexDisplay')}
+              desc={t('featuresStRegexDisplayDesc')}
+              value={form.stRegexDisplay === 'inherit' ? null : form.stRegexDisplay === 'on'}
+              onChange={(value) => patch({ stRegexDisplay: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStHtml')}
+              desc={t('featuresStHtmlDesc')}
+              value={form.stHtml === 'inherit' ? null : form.stHtml === 'on'}
+              onChange={(value) => patch({ stHtml: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStJsSandbox')}
+              desc={t('featuresStJsSandboxDesc')}
+              value={form.stJsSandbox === 'inherit' ? null : form.stJsSandbox === 'on'}
+              onChange={(value) => patch({ stJsSandbox: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStExternalImages')}
+              desc={t('featuresStExternalImagesDesc')}
+              value={
+                form.stExternalImages === 'inherit' ? null : form.stExternalImages === 'on'
+              }
+              onChange={(value) => patch({ stExternalImages: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStCardActions')}
+              desc={t('featuresStCardActionsDesc')}
+              value={form.stCardActions === 'inherit' ? null : form.stCardActions === 'on'}
+              onChange={(value) => patch({ stCardActions: tri(value) })}
+            />
+            <TriRow
+              label={t('featuresStCardWrite')}
+              desc={t('featuresStCardWriteDesc')}
+              value={form.stCardWrite === 'inherit' ? null : form.stCardWrite === 'on'}
+              onChange={(value) => patch({ stCardWrite: tri(value) })}
+            />
+            {global?.st_image_available ? (
+              <TriRow
+                label={t('featuresStImageProxy')}
+                desc={t('featuresStImageProxyDesc')}
+                value={form.stImageProxy === 'inherit' ? null : form.stImageProxy === 'on'}
+                onChange={(value) => patch({ stImageProxy: tri(value) })}
+              />
+            ) : null}
+            {global?.st_net_available ? (
+              <TriRow
+                label={t('featuresStNetProxy')}
+                desc={t('featuresStNetProxyDesc')}
+                value={form.stNetProxy === 'inherit' ? null : form.stNetProxy === 'on'}
+                onChange={(value) => patch({ stNetProxy: tri(value) })}
+              />
+            ) : null}
+            <TriRow
+              label={t('featuresStMvu')}
+              desc={t('featuresStMvuDesc')}
+              value={form.mvu === 'inherit' ? null : form.mvu === 'on'}
+              onChange={(value) => patch({ mvu: tri(value) })}
             />
           </div>
         </>

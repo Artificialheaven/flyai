@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
+from ..lore.avatar_image import embed_avatar, materialize_avatar
 from ..lore.models import Character, LoreEntry, World
 from ..user import ADMIN_UID
 
@@ -75,6 +77,12 @@ class CharacterPayload(BaseModel):
     parent_id: str = ""
     alias: str = ""
     voice: str = ""
+    # 酒馆卡保真字段：None=调用方未提供（PUT 时保留原值；POST 时视为空），
+    # 显式 []/{} 表示清空。
+    regex_scripts: Optional[List[Dict[str, Any]]] = None
+    extensions: Optional[Dict[str, Any]] = None
+    alternate_greetings: Optional[List[str]] = None
+    assets: Optional[List[Dict[str, Any]]] = None
 
 
 class WorldPayload(BaseModel):
@@ -87,7 +95,27 @@ class WorldPayload(BaseModel):
     prompt_tools: str = ""
 
 
-def _build_character(payload) -> Character:
+def _build_character(payload, base: Optional[Character] = None) -> Character:
+    """payload → Character。保真字段为 None 时从 base 继承（PUT 保真），
+    显式 []/{} 表示清空；POST 不传 base 时 None 即空。"""
+    if payload.regex_scripts is not None:
+        regex_scripts = [dict(s) for s in payload.regex_scripts if isinstance(s, dict)]
+    else:
+        regex_scripts = list(base.regex_scripts or []) if base is not None else []
+    if payload.extensions is not None:
+        extensions = dict(payload.extensions)
+    else:
+        extensions = dict(base.extensions or {}) if base is not None else {}
+    if payload.alternate_greetings is not None:
+        alternate_greetings = [
+            str(g) for g in payload.alternate_greetings if str(g or "").strip()
+        ]
+    else:
+        alternate_greetings = list(base.alternate_greetings or []) if base is not None else []
+    if payload.assets is not None:
+        assets = [dict(a) for a in payload.assets if isinstance(a, dict)]
+    else:
+        assets = list(base.assets or []) if base is not None else []
     return Character(
         id=payload.id,
         name=payload.name,
@@ -105,6 +133,10 @@ def _build_character(payload) -> Character:
         parent_id=payload.parent_id or "",
         alias=payload.alias or "",
         voice=(payload.voice or "").strip(),
+        regex_scripts=copy.deepcopy(regex_scripts),
+        extensions=copy.deepcopy(extensions),
+        alternate_greetings=alternate_greetings,
+        assets=copy.deepcopy(assets),
     )
 
 
@@ -159,9 +191,9 @@ def update_character(cid: str, payload: CharacterPayload, request: Request):
         raise HTTPException(404, "角色不存在")
     if source == "shared":
         raise HTTPException(403, "共享角色卡不可修改，请先复制为我的角色卡")
-    c = _build_character(payload)
-    c.id = cid
     cur = sc.lore.get_character(cid)
+    c = _build_character(payload, base=cur)
+    c.id = cid
     c.author = cur.author  # 作者不可改
     c.public = cur.public
     sc.lore.save_character(c)
@@ -270,7 +302,12 @@ def export_character(cid: str, request: Request):
     c = sc.lore.get_character(cid)
     if c is None:
         raise HTTPException(404, "角色不存在")
-    body = {"type": "flyai-character", "version": 1, "name": c.name, "data": c.to_dict()}
+    data = c.to_dict()
+    # 头像内嵌：JSON 单独拷到别的设备/账号也能带回图片；失败则只留 URL。
+    image = embed_avatar(getattr(sc, "upload_dir", None), c.avatar)
+    if image is not None:
+        data["avatar_image"] = image
+    body = {"type": "flyai-character", "version": 1, "name": c.name, "data": data}
     return JSONResponse(
         content=body,
         headers={"Content-Disposition": f'attachment; filename="character-{c.id[:8]}.json"'},
@@ -279,12 +316,21 @@ def export_character(cid: str, request: Request):
 
 @router.post("/characters/import")
 def import_character(payload: LoreImportPayload, request: Request):
-    data = payload.data or {}
+    sc = _state(request)
+    data = dict(payload.data or {})
     if not (data.get("name") or "").strip():
         raise HTTPException(400, "导入的角色缺少名称")
+    blob = data.pop("avatar_image", None)
     c = Character.from_dict(data)
     c.id = uuid.uuid4().hex  # 重新生成 id 避免冲突
-    _state(request).lore.save_character(c)
+    # 作者/共享位由服务端决定，不信任 JSON 里的值
+    c.author = sc.uid
+    c.public = False
+    if blob is not None:
+        # 内嵌头像损坏/非法时丢弃图片，但不能留一个指向导出者目录的坏 URL
+        c.avatar = materialize_avatar(
+            getattr(sc, "upload_dir", None), sc.uid, blob) or ""
+    sc.lore.save_character(c)
     return c.to_dict()
 
 
@@ -355,7 +401,13 @@ async def import_character_card(request: Request, file: UploadFile = File(...)):
         (sc.upload_dir / fname).write_bytes(raw)
         c.avatar = f"/uploads/{sc.uid}/{fname}"
     sc.lore.save_character(c)
-    return c.to_dict()
+    report = card_import.import_report(c)
+    # 增量双形态：保留旧顶层字段（旧前端/旧调用方直接读 name/id），
+    # 同时附加 character/stats/warnings（世界书导入已有 stats 先例）。
+    body = c.to_dict()
+    body.update(report)
+    body["character"] = c.to_dict()
+    return body
 
 
 @router.post("/worlds/import-worldbook")

@@ -243,6 +243,66 @@ def test_build_character_carries_phi_and_first_mes():
     assert c2.post_history_instructions == "" and c2.first_mes == ""
 
 
+# ---- 保存保真字段（regex_scripts/extensions/alternate_greetings/assets） ----
+
+def _fidelity_character():
+    return Character(
+        id="c10", name="保真",
+        regex_scripts=[{"findRegex": "a", "replaceString": "b"}],
+        extensions={"depth_prompt": {"prompt": "深度"}},
+        alternate_greetings=["开场 A", "开场 B"],
+        assets=[{"type": "icon", "uri": "ccdefault:"}],
+    )
+
+
+def test_build_character_carries_fidelity_fields():
+    from flyai.api.routes_lore import CharacterPayload, _build_character
+
+    c = _build_character(CharacterPayload(
+        id="c11", name="新卡",
+        regex_scripts=[{"findRegex": "x", "replaceString": "y"}],
+        extensions={"world": "和睦小镇"},
+        alternate_greetings=["开场 1", "  ", "开场 2"],
+        assets=[{"type": "bg", "uri": "ccdefault:"}],
+    ))
+    assert c.regex_scripts == [{"findRegex": "x", "replaceString": "y"}]
+    assert c.extensions == {"world": "和睦小镇"}
+    # 空条目被过滤
+    assert c.alternate_greetings == ["开场 1", "开场 2"]
+    assert c.assets == [{"type": "bg", "uri": "ccdefault:"}]
+
+
+def test_build_character_missing_fidelity_fields_inherits_base():
+    from flyai.api.routes_lore import CharacterPayload, _build_character
+
+    base = _fidelity_character()
+    c = _build_character(CharacterPayload(id="c10", name="改名"), base=base)
+    assert c.name == "改名"
+    assert c.regex_scripts == base.regex_scripts
+    assert c.extensions == base.extensions
+    assert c.alternate_greetings == base.alternate_greetings
+    assert c.assets == base.assets
+    # 深拷贝：改新卡不影响 base
+    c.extensions["depth_prompt"]["prompt"] = "改了"
+    assert base.extensions["depth_prompt"]["prompt"] == "深度"
+
+
+def test_build_character_explicit_empty_clears_fidelity_fields():
+    from flyai.api.routes_lore import CharacterPayload, _build_character
+
+    c = _build_character(
+        CharacterPayload(
+            id="c10", name="清空",
+            regex_scripts=[], extensions={}, alternate_greetings=[], assets=[],
+        ),
+        base=_fidelity_character(),
+    )
+    assert c.regex_scripts == []
+    assert c.extensions == {}
+    assert c.alternate_greetings == []
+    assert c.assets == []
+
+
 # ---- 开场白/范例宏替换 ----
 
 def test_substitute_chat_macros():

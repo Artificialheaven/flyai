@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 
@@ -12,16 +13,20 @@ from typing import Dict, List, Optional
 
 from ..ids import InvalidName, check_safe_name
 from ..lore.diff import character_diff, world_diff
+from ..sessions import versions
 from ..sessions.models import RoomMember, Session, Thread
+from ..user import ADMIN_UID
 from ..sessions.resolve import (
     apply_room_compression,
     clear_character_override,
     effective_character,
     effective_world,
     fork_character,
+    fork_world,
     is_character_scoped,
     member_character,
     plan_room_compression,
+    primary_thread,
     room_base_signatures,
     set_character_override,
     set_world_override,
@@ -193,7 +198,18 @@ def get_session(sid: str, request: Request):
     s = sc.store.get(sid)
     if s is None:
         raise HTTPException(404, "会话不存在")
-    return _session_dict(s, with_messages=True, lore=sc.lore)
+    # P4 原生 MVU：会话加载时惰性初始化 InitVar，并按可见消息重算状态
+    from ..st import mvu as st_mvu
+
+    if st_mvu.sync_session_state(s, sc.lore):
+        sc.store.save(s)
+    return _session_dict(
+        s, with_messages=True, lore=sc.lore,
+        user_settings=getattr(sc, "user_settings", None),
+        cfg=getattr(request.app.state.flyai, "config", None),
+        level=int(getattr(sc, "level", 0) or 0),
+        is_admin=sc.uid == ADMIN_UID,
+    )
 
 
 @router.delete("/sessions/{sid}")
@@ -257,6 +273,10 @@ def delete_message_turn(sid: str, mid: str, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(400, "只能撤回自己发送的消息") from exc
+    # P4 MVU：撤回后按剩余可见消息重算变量状态
+    from ..st import mvu as st_mvu
+
+    st_mvu.recompute_state(s, messages)
     sc.store.save(s)
     return {
         "ok": True,
@@ -370,12 +390,252 @@ def session_character_export(sid: str, request: Request):
     eff = member_character(m, sc.lore) if m is not None else effective_character(s, sc.lore)
     if eff is None:
         raise HTTPException(404, "会话未绑定角色")
-    body = {"type": "flyai-character", "version": 1, "name": eff.name, "data": eff.to_dict()}
+    data = eff.to_dict()
+    from ..lore.avatar_image import embed_avatar
+
+    image = embed_avatar(getattr(sc, "upload_dir", None), eff.avatar)
+    if image is not None:
+        data["avatar_image"] = image
+    body = {"type": "flyai-character", "version": 1, "name": eff.name, "data": data}
     head = eff.id[:8] or "scoped"
     return JSONResponse(
         content=body,
         headers={"Content-Disposition": f'attachment; filename="character-{head}.json"'},
     )
+
+
+# ---- L4-B：酒馆卡沙箱的会话副本写入 ----
+#
+# 卡只发「意图」，用户在前端逐次确认后才会到达这里。所有写入只落会话副本
+# （member.override / session.*_override / 消息 stat_data），根卡与共享卡
+# 永不改动；写回要求用户开启 st_card_write_enabled，且有回答运行中时拒绝。
+
+_ST_MVU_MAX_BYTES = 128 * 1024
+_ST_MVU_MAX_DEPTH = 16
+_ST_MVU_MAX_OPS = 200
+_ST_MVU_MAX_PATH = 512
+_ST_MVU_OPS = frozenset({"add", "remove", "replace", "move", "copy", "test"})
+_ST_WORLD_MAX_ENTRIES = 500
+_ST_WORLD_MAX_BYTES = 2 * 1024 * 1024
+_ST_CHAR_MAX_BYTES = 1024 * 1024
+_ST_CHAR_FIELDS = frozenset({
+    "name", "intro", "background", "mes_example", "table",
+    "prompt_format", "prompt_tools", "system_prompt",
+    "post_history_instructions", "first_mes", "alternate_greetings",
+})
+_ST_CHAR_TEXT_FIELDS = _ST_CHAR_FIELDS - {
+    "table", "alternate_greetings",
+}
+
+
+def _json_size(value) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "数据不是合法 JSON")
+
+
+def _json_depth(value, limit: int) -> int:
+    """迭代求 JSON 嵌套深度；超过上限提前返回。"""
+    stack = [(value, 1)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > limit:
+            return depth
+        if isinstance(cur, dict):
+            stack.extend((v, depth + 1) for v in cur.values())
+        elif isinstance(cur, list):
+            stack.extend((v, depth + 1) for v in cur)
+    return 1
+
+
+def _st_write_guard(request, sid: str):
+    """L4-B 公共校验：会话存在、用户开启写回、非只读、无运行中的回答。"""
+    state = request.app.state.flyai
+    sc = state.user(request)
+    s = _must_get_session(sc, sid)
+    us = getattr(sc, "user_settings", None)
+    if not bool(getattr(us, "st_card_write_enabled", False)):
+        raise HTTPException(403, "卡内写回未开启")
+    if (getattr(s, "mode", "normal") or "normal") == "galgame":
+        raise HTTPException(400, "只读会话不支持卡内写回")
+    run_manager = getattr(state, "run_manager", None)
+    if run_manager is not None and run_manager.active_in_session(sc.uid, sid) is not None:
+        raise HTTPException(409, "回答正在进行中，请等待结束后再操作")
+    return state, sc, s
+
+
+def _st_dm_thread(s, tid: Optional[str]):
+    t = s.thread(tid) if tid else primary_thread(s)
+    if t is None:
+        raise HTTPException(404 if tid else 400, "私聊窗口不存在")
+    if t.kind != "dm":
+        raise HTTPException(400, "仅私聊窗口支持卡内写回")
+    return t
+
+
+def _st_last_assistant(t):
+    """该窗口最后一条可见且有正文的 assistant 消息；没有则 None。"""
+    for m in reversed(t.messages):
+        if m.role != "assistant":
+            continue
+        if getattr(m, "hidden", False) or getattr(m, "tombstone", None):
+            continue
+        if not (m.content or "").strip():
+            continue
+        return m
+    return None
+
+
+class StMvuBody(BaseModel):
+    mode: str = "patch"
+    stat_data: Optional[Dict] = None
+    ops: Optional[List[Dict]] = None
+    thread_id: Optional[str] = None
+
+
+@router.post("/sessions/{sid}/st/mvu")
+def st_write_mvu(sid: str, body: StMvuBody, request: Request):
+    """卡内变量写回：落点为本窗口最后一条可见 AI 消息的 stat_data 快照。"""
+    from ..st import mvu as st_mvu
+
+    _state, sc, s = _st_write_guard(request, sid)
+    t = _st_dm_thread(s, body.thread_id)
+    mode = (body.mode or "patch").strip().lower()
+    if mode not in ("patch", "replace"):
+        raise HTTPException(400, "mode 仅支持 patch/replace")
+
+    if mode == "replace":
+        if not isinstance(body.stat_data, dict):
+            raise HTTPException(400, "replace 需要 stat_data 对象")
+        if _json_size(body.stat_data) > _ST_MVU_MAX_BYTES:
+            raise HTTPException(413, "变量数据超过 128KB 上限")
+        if _json_depth(body.stat_data, _ST_MVU_MAX_DEPTH) > _ST_MVU_MAX_DEPTH:
+            raise HTTPException(400, "变量嵌套层级过深")
+        new_state = copy.deepcopy(body.stat_data)
+    else:
+        ops = body.ops
+        if not isinstance(ops, list) or not ops:
+            raise HTTPException(400, "patch 需要非空 ops 数组")
+        if len(ops) > _ST_MVU_MAX_OPS:
+            raise HTTPException(400, "ops 数量超过 200 上限")
+        for op in ops:
+            if not isinstance(op, dict):
+                raise HTTPException(400, "op 必须是对象")
+            name = str(op.get("op") or "").strip().lower()
+            if name not in _ST_MVU_OPS:
+                raise HTTPException(400, "不支持的 patch 操作: %s" % name)
+            path = op.get("path")
+            if not isinstance(path, str) or not path or len(path) > _ST_MVU_MAX_PATH:
+                raise HTTPException(400, "patch 路径非法")
+        if _json_size(ops) > _ST_MVU_MAX_BYTES:
+            raise HTTPException(413, "变量更新超过 128KB 上限")
+        if _json_depth(ops, _ST_MVU_MAX_DEPTH) > _ST_MVU_MAX_DEPTH:
+            raise HTTPException(400, "变量嵌套层级过深")
+        base = (getattr(_st_last_assistant(t), "stat_data", None)
+                or (s.mvu or {}).get("stat_data") or {})
+        try:
+            new_state = st_mvu.apply_patch(base, ops)
+        except st_mvu.PatchError as exc:
+            raise HTTPException(400, str(exc))
+
+    target = _st_last_assistant(t)
+    if target is None:
+        raise HTTPException(400, "当前窗口没有可写回的 AI 回复")
+    target.stat_data = copy.deepcopy(new_state)
+    versions.sync_active_reply(t, target)
+    s.mvu = dict(s.mvu or {})
+    s.mvu["stat_data"] = copy.deepcopy(new_state)
+    sc.store.save_merged(s)
+    return {"stat_data": new_state}
+
+
+class StWorldBody(BaseModel):
+    entries: List[Dict] = []
+
+
+@router.post("/sessions/{sid}/st/world")
+def st_write_world(sid: str, body: StWorldBody, request: Request):
+    """卡内世界书写回：只替换会话副本的条目表；未派生副本时先派生。"""
+    from ..lore.models import LoreEntry
+
+    _state, sc, s = _st_write_guard(request, sid)
+    raw = body.entries
+    if not isinstance(raw, list):
+        raise HTTPException(400, "entries 必须是数组")
+    if len(raw) > _ST_WORLD_MAX_ENTRIES:
+        raise HTTPException(400, "世界书条目超过 500 上限")
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "世界书条目必须是对象")
+        entries.append(LoreEntry.from_dict(item).to_dict())
+    if _json_size(entries) > _ST_WORLD_MAX_BYTES:
+        raise HTTPException(413, "世界书数据超过 2MB 上限")
+
+    if not s.world_override:
+        try:
+            fork_world(s, sc.lore)
+        except ValueError:
+            raise HTTPException(400, "world-not-bound")
+    override = dict(s.world_override or {})
+    override["table"] = entries
+    s.world_override = override
+    # 不能用 save_merged：world_override 在 MERGED_FIELDS 里，回填会把本次写入抹掉
+    sc.store.save(s)
+    return {"entries": entries, "scoped": True}
+
+
+class StCharacterBody(BaseModel):
+    fields: Dict = {}
+
+
+@router.post("/sessions/{sid}/st/character")
+def st_write_character(sid: str, body: StCharacterBody, request: Request):
+    """卡内角色副本写回：字段白名单，永不触碰 id/作者/公开/头像/音色等。"""
+    from ..lore.models import Character, LoreEntry
+
+    _state, sc, s = _st_write_guard(request, sid)
+    m = _single_ai_seat(s)
+    if m is None or primary_thread(s) is None:
+        raise HTTPException(400, "仅单角色私聊支持卡内写回角色")
+    fields = body.fields
+    if not isinstance(fields, dict) or not fields:
+        raise HTTPException(400, "fields 不能为空")
+    for key in fields:
+        if key not in _ST_CHAR_FIELDS:
+            raise HTTPException(400, "不允许写回的字段: %s" % key)
+    for key, value in fields.items():
+        if key in _ST_CHAR_TEXT_FIELDS and not isinstance(value, str):
+            raise HTTPException(400, "字段 %s 必须是字符串" % key)
+        if key == "alternate_greetings" and (
+            not isinstance(value, list)
+            or any(not isinstance(g, str) for g in value)
+        ):
+            raise HTTPException(400, "alternate_greetings 必须是字符串数组")
+        if key == "table" and not isinstance(value, list):
+            raise HTTPException(400, "table 必须是数组")
+    if _json_size(fields) > _ST_CHAR_MAX_BYTES:
+        raise HTTPException(413, "角色写回数据超过 1MB 上限")
+
+    base = member_character(m, sc.lore)
+    if base is None:
+        raise HTTPException(400, "会话未绑定角色")
+    data = base.to_dict()
+    patch = dict(fields)
+    if "table" in patch:
+        patch["table"] = [
+            LoreEntry.from_dict(e).to_dict()
+            for e in (patch["table"] or []) if isinstance(e, dict)
+        ]
+    data.update(patch)
+    char = Character.from_dict(data)
+    m.override = char.to_dict()
+    # 顶层仅作镜像（导出/effective_character 与座位保持一致）
+    s.character_override = copy.deepcopy(m.override)
+    # 不能用 save_merged：character_override 在 MERGED_FIELDS 里，回填会抹掉镜像
+    sc.store.save(s)
+    return {"character": char.to_dict(), "scoped": True}
 
 
 def _export_card(c, fallback_uid) -> dict:
@@ -407,7 +667,14 @@ def _build_export_data(sc, s) -> dict:
         cards.setdefault(d["ref"], d)
 
     return {
-        "session": {"id": s.id, "title": s.title, "created_at": s.created_at, "updated_at": s.updated_at, "attributes": s.attributes},
+        "session": {
+            "id": s.id,
+            "title": s.title,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+            "attributes": s.attributes,
+            "opening_entry": getattr(s, "opening_entry", "") or "",
+        },
         "character": char.to_dict() if char else None,
         "world": world.to_dict() if world else None,
         "messages": [m.to_dict() for m in s.messages],
@@ -492,6 +759,7 @@ def _build_imported_session(d: dict, fallback_name: str) -> Session:
         threads=[Thread.from_dict(t) for t in d.get("threads", []) or []],
         pinned=False,  # 不导入置顶，避免打乱当前排序
         mode=mode,
+        opening_entry=meta.get("opening_entry", "") or "",
         galgame=galgame,
         galgame_tts=galgame_tts,
     )
@@ -877,7 +1145,93 @@ def session_compress_save_as(sid: str, body: CompressSaveAsBody, request: Reques
     return {"characters": saved}
 
 
-def _session_dict(s, with_messages: bool = False, lore=None):
+def _st_payload(s, char, lore, user_settings, cfg=None,
+                level: int = 0, is_admin: bool = False) -> dict:
+    """会话打开时下发的酒馆扩展数据：正则脚本（展示侧）与开关状态。
+
+    只下发角色卡内的声明式数据；前端展示侧用原生 JS 正则解释。卡内
+    JavaScript 默认不执行，只有用户显式开启沙箱时，整页 HTML+JS 应用才会
+    在无同源权限的隔离 iframe 中运行。
+    """
+    def _flag(name, default):
+        if user_settings is None:
+            return default
+        value = getattr(user_settings, name, None)
+        return default if value is None else bool(value)
+
+    # 服务端图片代理（方案 4）：管理员开启且用户等级达标才可用
+    proxy_available = False
+    seg = getattr(cfg, "st_image", None) if cfg is not None else None
+    if seg is not None and bool(getattr(seg, "enabled", False)):
+        required = int(getattr(seg, "min_level", 256) or 0)
+        proxy_available = bool(is_admin) or int(level or 0) >= required
+    # 受控网络代理（L4-C）：默认关闭；管理员开启且等级达标才下发可用标志
+    net_available = False
+    net_seg = getattr(cfg, "st_net", None) if cfg is not None else None
+    if net_seg is not None and bool(getattr(net_seg, "enabled", False)):
+        required = int(getattr(net_seg, "min_level", 0) or 0)
+        net_available = bool(is_admin) or int(level or 0) >= required
+    flags = {
+        "regex_prompt": _flag("st_regex_prompt_enabled", True),
+        "regex_display": _flag("st_regex_display_enabled", True),
+        "html": _flag("st_html_enabled", True),
+        "external_images": _flag("st_external_images_enabled", False),
+        "image_proxy": proxy_available
+        and _flag("st_image_proxy_enabled", False),
+        "image_proxy_available": proxy_available,
+        # 沙箱执行卡内 JS：管理员默认开启，普通用户默认关闭（可在设置里自行打开）
+        "js_sandbox": _flag("st_js_sandbox_enabled", bool(is_admin)),
+        # L4：卡内授权动作 / 会话副本写入 / 受控网络（逐次确认，默认关闭）
+        "card_actions": _flag("st_card_actions_enabled", False),
+        "card_write": _flag("st_card_write_enabled", False),
+        "net_proxy": net_available and _flag("st_net_proxy_enabled", False),
+        "net_proxy_available": net_available,
+        "mvu": _flag("mvu_enabled", True),
+    }
+    mvu_cfg = getattr(cfg, "mvu", None) if cfg is not None else None
+    if mvu_cfg is not None and not bool(getattr(mvu_cfg, "enabled", True)):
+        flags["mvu"] = False
+    by_character = {}
+    if lore is not None:
+        ids = [getattr(m, "character_id", "") for m in s.members]
+        if s.character_id:
+            ids.append(s.character_id)
+        for raw_id in ids:
+            cid = (raw_id or "").strip() if isinstance(raw_id, str) else ""
+            if not cid or cid in by_character:
+                continue
+            try:
+                c = lore.get_character(cid)
+            except Exception:
+                c = None
+            scripts = getattr(c, "regex_scripts", None) if c is not None else None
+            if scripts:
+                by_character[cid] = scripts
+    from ..st.panels import detect_panels
+
+    fallback = list(getattr(char, "regex_scripts", None) or []) if char else []
+    return {
+        "regex_scripts": fallback,
+        "by_character": by_character,
+        "panels": detect_panels(char),
+        "html": {
+            "enabled": flags["html"],
+            "external_images": flags["external_images"],
+            "image_proxy": flags["image_proxy"],
+        },
+        "flags": flags,
+        "mvu": {
+            "enabled": bool(flags["mvu"]),
+            "stat_data": (
+                (getattr(s, "mvu", None) or {}).get("stat_data") or {}
+            ),
+        },
+    }
+
+
+def _session_dict(s, with_messages: bool = False, lore=None,
+                  user_settings=None, cfg=None, level: int = 0,
+                  is_admin: bool = False):
     d = {
         "id": s.id,
         "title": s.title,
@@ -893,6 +1247,7 @@ def _session_dict(s, with_messages: bool = False, lore=None):
         "threads": [t.to_dict() for t in s.threads],
         "token_usage": s.token_usage or {},
         "mode": getattr(s, "mode", "normal") or "normal",
+        "opening_entry": getattr(s, "opening_entry", "") or "",
         "galgame": getattr(s, "galgame", None) or {},
         "galgame_tts": getattr(s, "galgame_tts", None) or {},
         "max_tokens": int(getattr(s, "max_tokens", 0) or 0),
@@ -905,4 +1260,8 @@ def _session_dict(s, with_messages: bool = False, lore=None):
             world = effective_world(s, lore)
             d["character"] = char.to_dict() if char else None
             d["world"] = world.to_dict() if world else None
+            d["st"] = _st_payload(
+                s, char, lore, user_settings, cfg=cfg,
+                level=level, is_admin=is_admin,
+            )
     return d

@@ -1,16 +1,20 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
 import { continueReply, regenerateReply } from '../../services/chat/store.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
+import type { RegexScript, StPanel } from '../../services/flyai/types.js'
+import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
+import { CardAppHostContext, type CardAppHost } from '../markdown/CardAppFrame.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { IconButton } from '../base/IconButton.js'
 import { Button } from '../base/Button.js'
 import { Markdown } from '../markdown/Markdown.js'
+import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
 import { ReadAloudButton } from './ReadAloudButton.js'
@@ -21,6 +25,7 @@ import { PixivWall } from './PixivWall.js'
 import { buildPixivReveal } from '../../services/chat/markers.js'
 import { RecallNotice } from './RecallNotice.js'
 import { ReplyArea } from './ReplyArea.js'
+import { StatusPanelInline } from '../session/StatusPanel.js'
 import { useReplyView } from './useReplyView.js'
 import { ImageViewer } from '../images/ImageViewer.js'
 import type { ToolImage } from '../../services/chat/view.js'
@@ -41,6 +46,14 @@ export const AssistantMessage = memo(function AssistantMessage({
   editable,
   versions,
   onSelectVersion,
+  stScripts,
+  stDepth,
+  stHtml,
+  stVariables,
+  stPanels,
+  cardFeatures,
+  cardWriteContext,
+  threadId,
 }: {
   sessionId: string
   message: AssistantMessageType
@@ -53,8 +66,48 @@ export const AssistantMessage = memo(function AssistantMessage({
   editable: boolean
   versions: MessageVersions
   onSelectVersion: SelectMessageVersion
+  /** 酒馆展示侧正则（已按发言者角色卡选好）；只影响显示 */
+  stScripts?: RegexScript[]
+  /** 消息距对话末尾的深度（脚本 minDepth/maxDepth 用） */
+  stDepth?: number
+  /** 酒馆卡 HTML/外链图片策略；未启用时保持转义文本 */
+  stHtml?: MarkdownRenderOptions
+  /** MVU 变量快照：展开展示侧的变量宏 */
+  stVariables?: Record<string, unknown>
+  /** 卡内状态面板模板；开启「自动追加」时在该消息下方渲染自身快照 */
+  stPanels?: StPanel[]
+  /** 用户设置层面的卡片能力开关；缺省全部关闭（只读） */
+  cardFeatures?: CardAppCapabilities
+  /** 会话副本写入读侧快照（世界书、角色白名单字段） */
+  cardWriteContext?: CardAppWriteContext | null
+  /** 当前私聊窗口 id；卡片写入变量时回传给后端 */
+  threadId?: string
 }) {
   const t = useTranslate()
+  // 卡内能力随消息上下文下发：只有消息气泡提供宿主上下文，面板/抽屉保持只读
+  const cardHost = useMemo<CardAppHost>(
+    () => ({
+      sessionId,
+      messageId: message.id,
+      isLast,
+      editable,
+      streaming: streaming || busy,
+      threadId,
+      features: cardFeatures ?? { actions: false, write: false, net: false },
+      writeContext: cardWriteContext ?? null,
+    }),
+    [
+      busy,
+      cardFeatures,
+      cardWriteContext,
+      editable,
+      isLast,
+      message.id,
+      sessionId,
+      streaming,
+      threadId,
+    ]
+  )
   const view = useReplyView(message, streaming)
   const panelEntry = useSearchPanel((state) => state.entry)
   const notice = streaming ? null : describeReply(message)
@@ -84,7 +137,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   )
   const [viewerImage, setViewerImage] = useState<ToolImage | null>(null)
   return (
+    <CardAppHostContext.Provider value={cardHost}>
     <div className={styles.message}>
+      {message.origin === 'card' ? (
+        <div className={styles.originBadge}>{t('messageFromCard')}</div>
+      ) : null}
       {speaker ? (
         <div className={styles.speaker}>
           <span className={styles.speakerAvatar}>{Array.from(speaker)[0]}</span>
@@ -98,6 +155,10 @@ export const AssistantMessage = memo(function AssistantMessage({
           view={view}
           streaming={streaming}
           hasResponse={!!responseText}
+          stScripts={stScripts}
+          stDepth={stDepth}
+          stHtml={stHtml}
+          stVariables={stVariables}
         />
       )}
       {answer ? (
@@ -108,6 +169,10 @@ export const AssistantMessage = memo(function AssistantMessage({
           cacheKey={message.id}
           disableLink={false}
           sources={view.sources}
+          stScripts={stScripts}
+          stDepth={stDepth}
+          stHtml={stHtml}
+          stVariables={stVariables}
         />
       ) : null}
       {refused ? null : <GeneratedImages images={images} onOpen={setViewerImage} />}
@@ -122,6 +187,16 @@ export const AssistantMessage = memo(function AssistantMessage({
               onOpen={setViewerImage}
             />
           ))}
+      {!streaming && !refused && stPanels?.length ? (
+        <StatusPanelInline
+          panels={stPanels}
+          scripts={stScripts}
+          options={stHtml}
+          statData={message.statData}
+          sessionId={sessionId}
+          netEnabled={cardFeatures?.net === true}
+        />
+      ) : null}
       {waiting ? (
         <div className={styles.waiting}>
           {[0, 1, 2].map((index) => (
@@ -212,5 +287,6 @@ export const AssistantMessage = memo(function AssistantMessage({
         <ImageViewer image={viewerImage} onClose={() => setViewerImage(null)} />
       ) : null}
     </div>
+    </CardAppHostContext.Provider>
   )
 })

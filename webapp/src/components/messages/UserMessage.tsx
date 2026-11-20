@@ -116,6 +116,9 @@ export const UserMessage = memo(function UserMessage({
         </div>
       ) : (
         <>
+          {message.origin === 'card' ? (
+            <div className={styles.originBadge}>{t('messageFromCard')}</div>
+          ) : null}
           {message.content ? <div className={styles.bubble}>{message.content}</div> : null}
           <div className={styles.bottom}>
             <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>

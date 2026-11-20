@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from ..feature_prefs import self_memory_active
 from . import clock
 
 logger = logging.getLogger("flyai.live_ctx")
@@ -113,8 +114,8 @@ async def render_for_turn(state, sc, *, session_id: str,
 
     self_block = ""
     sm_store = getattr(state, "self_memory_store", None)
-    if sm_store is not None and getattr(getattr(cfg, "self_memory", None),
-                                        "enabled", True) and query.strip():
+    if sm_store is not None and self_memory_active(
+            cfg, getattr(sc, "user_settings", None)) and query.strip():
         try:
             self_block = await asyncio.to_thread(
                 sm_store.render_block, sc.uid, query, now

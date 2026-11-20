@@ -49,6 +49,7 @@ import type {
   Thread,
 } from '../flyai/types.js'
 import { importFlyaiConversation, importSessionFile } from '../flyai/transfer.js'
+import { pickCardCharacterFields } from '../st/cardActions.js'
 import * as db from './db.js'
 import {
   addDraftFiles,
@@ -60,7 +61,7 @@ import {
   setDraftText,
 } from './drafts.js'
 import { appendBranch, getVisibleMessages } from './branches.js'
-import { settleReply } from './reply.js'
+import { canContinueReply, settleReply } from './reply.js'
 import {
   toSessionSummary,
   type AssistantMessage,
@@ -140,6 +141,10 @@ const getStreamController = (id: string) => {
 
 const sessionAccess = new Map<string, number>()
 const deletingSessions = new Set<string>()
+/** 正在发送中的会话；新建会话用保留键。sendMessage 在首个 await 前同步占位，
+ * 直到 streamReply 注册好 controller 才释放，堵住连点/回车+点击的重复发送。 */
+const SEND_GUARD_NEW = '__new__'
+const sendsInFlight = new Set<string>()
 const streamFlushes = new Map<string, () => void>()
 /** 每个会话当前的后台运行号，停止/删除时通知后端取消 */
 const runIds = new Map<string, string>()
@@ -464,6 +469,9 @@ const mapMessage = (
       content: source.content ?? '',
       files,
       createdAt: 0,
+      ...(source.character_id ? { characterId: source.character_id } : {}),
+      ...(source.stat_data ? { statData: source.stat_data } : {}),
+      ...(source.origin === 'card' ? { origin: 'card' as const } : {}),
     }
     return { message, files: stored }
   }
@@ -501,9 +509,13 @@ const mapMessage = (
       // 后端给每条 AI 回复打了发言者标记；群聊窗口展示，私聊不使用
       speakerName: source.name ?? undefined,
       speakerId: source.actor_id ?? undefined,
+      characterId: source.character_id ?? undefined,
+      statData: source.stat_data ?? undefined,
+      ...(source.origin === 'card' ? { origin: 'card' as const } : {}),
       // 自动回忆挂在本次发言的回复上，重画/刷新后保持同样的折叠组
       recall: source.recall?.length ? toRecallItems(source.recall) : undefined,
-      prefix: false,
+      // 后端支持续写：历史消息同样可作为前缀，能力限制交给 canContinueReply
+      prefix: true,
       status: 'done',
       blocks,
     }
@@ -530,6 +542,8 @@ const mergeAssistantRounds = (
     ...base,
     thinking: base.thinking || next.thinking,
     blocks: [...base.blocks, ...next.blocks],
+    // 合并后的气泡代表整轮：状态快照取最新一轮（后续轮次的变量更新已包含前文）
+    ...(next.statData ? { statData: next.statData } : {}),
     ...(recall.length > 0 ? { recall } : {}),
   }
 }
@@ -646,6 +660,31 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
     detail.members.find((member) => !member.is_user)
   // 顶层角色（后端已为单 AI 房间同步）；旧房间没有顶层镜像时退回座位副本
   const character = detail.character ?? seat?.override ?? null
+  // L4-B：卡片写入读侧快照（世界书条目与角色白名单字段）。这里只下发副本的
+  // 有效内容；根卡/公共世界只读，写入由后端在会话副本上 fork 后落盘。
+  // 角色卡自带世界书的条目在 character.table，名称取自 CC 的 extensions.world，
+  // 让卡片 getWorldbookNames() 能检出卡内书名（导入后的挂载世界书名可能带后缀）。
+  const characterExtensions =
+    character &&
+    typeof (character as { extensions?: unknown }).extensions === 'object' &&
+    (character as { extensions?: Record<string, unknown> }).extensions
+      ? (character as { extensions?: Record<string, unknown> }).extensions ?? null
+      : null
+  const characterWorldName =
+    characterExtensions && typeof characterExtensions.world === 'string'
+      ? characterExtensions.world.trim()
+      : ''
+  const writeContext = detail.st
+    ? {
+        worldbook: detail.world
+          ? { name: detail.world.name, entries: detail.world.table }
+          : null,
+        characterWorldName,
+        character: pickCardCharacterFields(
+          character as unknown as Record<string, unknown> | null
+        ),
+      }
+    : undefined
   return {
     id: detail.id,
     title: detail.title,
@@ -666,6 +705,9 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
     worldName: detail.world?.name || undefined,
     aiMemberId: seat?.id,
     scoped: Boolean(detail.scoped || seat?.override),
+    st: detail.st
+      ? { ...detail.st, ...(writeContext ? { write_context: writeContext } : {}) }
+      : detail.st,
     members: detail.members,
     threads: detail.threads.map((item) => ({
       id: item.id,
@@ -883,8 +925,8 @@ const createReply = (): AssistantMessage => {
     model: MODEL,
     thinking,
     search,
-    // 后端暂无续写能力，不展示「继续生成」
-    prefix: false,
+    // 后端已支持续写：结束且未达限制的回复可把本消息作为前缀继续生成
+    prefix: true,
     status: 'pending',
     blocks: [],
   }
@@ -1131,7 +1173,9 @@ export const selectSession = (id: string) => {
  */
 export const startRoomChat = async (
   characterIds: string[],
-  worldId?: string
+  worldId?: string,
+  greetingIndex?: number,
+  openingEntry?: string
 ): Promise<string> => {
   if (get().importingHistory || characterIds.length === 0) {
     throw new Error('无法创建对话')
@@ -1139,6 +1183,8 @@ export const startRoomChat = async (
   const detail = await createRoom({
     character_ids: characterIds,
     world_id: worldId || undefined,
+    greeting_index: greetingIndex && greetingIndex > 0 ? greetingIndex : undefined,
+    opening_entry: openingEntry?.trim() || undefined,
   })
   const session = await mapSession(detail)
   applySession(session)
@@ -1796,6 +1842,10 @@ type StreamRequest = {
   images: { mediaType: string; blob: Blob }[]
   editMessageId?: string
   regenerateMessageId?: string
+  /** 续写：后端把目标回复作为 prefill，增量并回同一条消息 */
+  continueMessageId?: string
+  /** 发起方标记（卡片动作） */
+  origin?: 'card'
   /** 群聊点名：被 @ 的座位排到本轮发言顺序最前 */
   targetMemberIds?: string[]
   /** 群聊剩余发言顺序随机 */
@@ -2129,6 +2179,8 @@ const streamReply = async (
       disabled_tools: search ? [] : ['web_search', 'web_fetch'],
       edit_message_id: request.editMessageId,
       regenerate_message_id: request.regenerateMessageId,
+      continue_message_id: request.continueMessageId,
+      origin: request.origin,
     }
     try {
       const opened = await openChatStream(payload, controller.signal)
@@ -2142,6 +2194,20 @@ const streamReply = async (
           // 后端只在运行结束才落盘本轮回答，从 0 回放才能拼出整轮内容
           authoritative = true
           return await resumeChatStream(active, 0, controller.signal)
+        }
+        // 409 与查询之间上一轮恰好结束：后端在发完终态帧后还要做收尾才释放
+        // 单飞锁。稍等再试一次，别把这个瞬态冲突当成本轮发送失败。
+        await new Promise((resolve) => window.setTimeout(resolve, 400))
+        if (!controller.signal.aborted && alive()) {
+          try {
+            const retried = await openChatStream(payload, controller.signal)
+            runId = retried.runId ?? runId
+            return retried.response
+          } catch (retryError) {
+            if (!(retryError instanceof FlyApiError && retryError.status === 409)) {
+              throw retryError
+            }
+          }
         }
       }
       throw error
@@ -2332,81 +2398,127 @@ export const sendMessage = async (
   if (state.importingHistory || !state.ready) {
     return false
   }
-  if (targetSessionId !== null && getStreamController(targetSessionId)) {
+  // 同步占位：下面从建会话/存图到 streamReply 注册 controller 还有多个 await，
+  // 只查 getStreamController 挡不住连点或回车+点击的重复提交
+  const guardKey = targetSessionId ?? SEND_GUARD_NEW
+  if (sendsInFlight.has(guardKey) || getStreamController(guardKey)) {
     return false
   }
   const prepared = prepareDraftMessage(getDraft(targetSessionId), useUploads.getState().tasks)
   if (!prepared) {
     return false
   }
-  const { text, files } = prepared
-  let sessionId = targetSessionId
-  if (sessionId === null) {
-    try {
-      const created = await createRemoteSession()
-      sessionId = created.id
-      const summary = toSummary(created)
-      saveActiveSession(created.id)
-      set((current) => ({
-        activeId: created.id,
-        sessions: sortSessions([
-          ...current.sessions.filter((item) => item.id !== created.id),
-          summary,
-        ]),
-        sessionCache: {
-          ...current.sessionCache,
-          [created.id]: {
-            id: created.id,
-            title: created.title,
-            createdAt: summary.createdAt,
-            updatedAt: summary.updatedAt,
-            messages: [],
+  sendsInFlight.add(guardKey)
+  try {
+    const { text, files } = prepared
+    let sessionId = targetSessionId
+    if (sessionId === null) {
+      try {
+        const created = await createRemoteSession()
+        sessionId = created.id
+        const summary = toSummary(created)
+        saveActiveSession(created.id)
+        set((current) => ({
+          activeId: created.id,
+          sessions: sortSessions([
+            ...current.sessions.filter((item) => item.id !== created.id),
+            summary,
+          ]),
+          sessionCache: {
+            ...current.sessionCache,
+            [created.id]: {
+              id: created.id,
+              title: created.title,
+              createdAt: summary.createdAt,
+              updatedAt: summary.updatedAt,
+              messages: [],
+            },
           },
-        },
-      }))
-    } catch (error) {
-      db.reportStorageError('create session')(error)
-      showToast(error instanceof FlyApiError ? error.message : '新建对话失败')
+        }))
+      } catch (error) {
+        db.reportStorageError('create session')(error)
+        showToast(error instanceof FlyApiError ? error.message : '新建对话失败')
+        return false
+      }
+    }
+    const session = getSession(sessionId)
+    if (!session || session.readOnly || getStreamController(sessionId)) {
       return false
     }
+    const question: UserMessage = {
+      id: createId(),
+      role: 'user',
+      content: text,
+      files: files.map((file) => ({
+        id: file.id,
+        serverId: file.serverId,
+        name: file.name,
+        size: file.size,
+        isImage: file.isImage,
+        mimeType: file.mimeType,
+      })),
+      createdAt: Date.now(),
+    }
+    const reply = createReply()
+    try {
+      await db.saveFiles(files.map((file) => ({ id: file.id, blob: file.blob })))
+    } catch (error) {
+      db.reportStorageError('save images')(error)
+    }
+    updateSession(sessionId, (current) => ({
+      ...current,
+      messages: [...current.messages, question, reply],
+      updatedAt: Date.now(),
+      rootMessageId: undefined,
+    }))
+    clearSentDraft(targetSessionId)
+    // streamReply 首段是同步的：这里返回时 controller 已登记，后续发送会被拦住
+    void streamReply(sessionId, reply, {
+      text,
+      images: files.map((file) => ({ mediaType: file.mimeType, blob: file.blob })),
+      targetMemberIds: options.targetMemberIds,
+      shuffleSpeakers: options.shuffleSpeakers,
+    })
+    return true
+  } finally {
+    sendsInFlight.delete(guardKey)
+  }
+}
+
+/**
+ * 卡片授权发送：文本来自卡内确认弹窗，不读写聊天草稿，也不新建会话。
+ * 用户消息与回答都标记 `origin:'card'`，界面据此显示来源徽标；
+ * 只读/群聊/已有生成任务时拒绝。
+ */
+export const sendCardMessage = (sessionId: string, text: string): boolean => {
+  const state = get()
+  const content = text.trim()
+  if (state.importingHistory || !state.ready || !content) {
+    return false
+  }
+  if (sendsInFlight.has(sessionId) || getStreamController(sessionId)) {
+    return false
   }
   const session = getSession(sessionId)
-  if (!session || session.readOnly || getStreamController(sessionId)) {
+  if (!session || session.readOnly || session.threadKind === 'group') {
     return false
   }
   const question: UserMessage = {
     id: createId(),
     role: 'user',
-    content: text,
-    files: files.map((file) => ({
-      id: file.id,
-      serverId: file.serverId,
-      name: file.name,
-      size: file.size,
-      isImage: file.isImage,
-      mimeType: file.mimeType,
-    })),
+    content,
+    files: [],
     createdAt: Date.now(),
+    origin: 'card',
   }
-  const reply = createReply()
-  try {
-    await db.saveFiles(files.map((file) => ({ id: file.id, blob: file.blob })))
-  } catch (error) {
-    db.reportStorageError('save images')(error)
-  }
+  const reply = { ...createReply(), origin: 'card' as const }
   updateSession(sessionId, (current) => ({
     ...current,
     messages: [...current.messages, question, reply],
     updatedAt: Date.now(),
     rootMessageId: undefined,
   }))
-  clearSentDraft(targetSessionId)
-  void streamReply(sessionId, reply, {
-    text,
-    images: files.map((file) => ({ mediaType: file.mimeType, blob: file.blob })),
-    targetMemberIds: options.targetMemberIds,
-    shuffleSpeakers: options.shuffleSpeakers,
-  })
+  void streamReply(sessionId, reply, { text: content, images: [], origin: 'card' })
   return true
 }
 
@@ -2414,13 +2526,13 @@ export const sendMessage = async (
  * 重新生成：锚点是轮次的用户消息。后端只替换该轮回答，后续轮次保持不变；
  * 这里先在原位置放一个等待气泡，结束后再回读权威内容。
  */
-export const regenerateReply = (sessionId: string, messageId?: string) => {
+export const regenerateReply = (sessionId: string, messageId?: string): boolean => {
   if (get().importingHistory || getStreamController(sessionId)) {
-    return
+    return false
   }
   const session = getSession(sessionId)
   if (!session || session.readOnly || session.threadKind === 'group') {
-    return
+    return false
   }
   const path = getVisibleMessages(session)
   const index = messageId
@@ -2429,7 +2541,7 @@ export const regenerateReply = (sessionId: string, messageId?: string) => {
   const target = path[index]
   const question = index > 0 ? path[index - 1] : undefined
   if (target?.role !== 'assistant' || question?.role !== 'user') {
-    return
+    return false
   }
   const reply = createReply()
   updateSession(sessionId, (current) => ({
@@ -2444,6 +2556,7 @@ export const regenerateReply = (sessionId: string, messageId?: string) => {
     images: [],
     regenerateMessageId: question.id,
   })
+  return true
 }
 
 /**
@@ -2526,8 +2639,46 @@ export const selectMessageVersion = async (
   }
 }
 
-/** 后端暂不支持续写，保留空实现避免旧组件报错。 */
-export const continueReply = (_sessionId: string, _messageId: string) => {}
+/**
+ * 续写最后一条 AI 回复：后端把原内容作为 assistant prefill，增量并回同一条消息，
+ * 不新增消息。这里先就地标记为流式（保留已有内容块），事件按原消息 id 原位更新，
+ * 结束后回读权威历史对齐变量与版本快照。
+ */
+export const continueReply = (sessionId: string, messageId: string): boolean => {
+  if (get().importingHistory || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  if (!session || session.readOnly || session.threadKind === 'group') {
+    return false
+  }
+  const path = getVisibleMessages(session)
+  const index = path.findIndex((message) => message.id === messageId)
+  const target = path[index]
+  // 后端只接受本窗口最后一条可见 AI 回复，且要求无工具调用、内容非空
+  if (target?.role !== 'assistant' || index !== path.length - 1 || !canContinueReply(target)) {
+    return false
+  }
+  const reply: AssistantMessage = {
+    ...target,
+    status: 'streaming',
+    error: undefined,
+    stopReason: undefined,
+    stopDetails: undefined,
+  }
+  updateSession(sessionId, (current) => ({
+    ...current,
+    messages: current.messages.map((message) => (message.id === target.id ? reply : message)),
+    updatedAt: Date.now(),
+  }))
+  void streamReply(sessionId, reply, {
+    text: '',
+    images: [],
+    continueMessageId: messageId,
+    origin: 'card',
+  })
+  return true
+}
 
 /** 图片在本地生成，附件不存在上传失败重试。 */
 export const retryUpload = (_sessionId: string, _messageId: string) => {}

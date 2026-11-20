@@ -14,6 +14,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, validator
 
+from ..feature_prefs import self_memory_active
 from ..proactor import clock
 from ..user import ADMIN_UID, UserScope
 
@@ -197,8 +198,10 @@ async def self_memory_traces(request: Request, limit: int = 100,
 async def self_memory_add(body: SelfMemoryBody, request: Request):
     state = request.app.state.flyai
     sc = state.user(request)
-    _require_feature(getattr(state.config, "self_memory", None), "自我记忆")
     target_sc, _ = _resolve_target(state, sc, body.uid)
+    if not self_memory_active(getattr(state, "config", None),
+                              getattr(target_sc, "user_settings", None)):
+        raise HTTPException(400, "自我记忆未启用")
     try:
         row, created = await asyncio.to_thread(
             state.self_memory_store.put, target_sc.uid, body.statement,
@@ -215,8 +218,10 @@ async def self_memory_supersede(memory_id: int, body: SupersedeBody,
                                 request: Request):
     state = request.app.state.flyai
     sc = state.user(request)
-    _require_feature(getattr(state.config, "self_memory", None), "自我记忆")
     target_sc, _ = _resolve_target(state, sc, body.uid)
+    if not self_memory_active(getattr(state, "config", None),
+                              getattr(target_sc, "user_settings", None)):
+        raise HTTPException(400, "自我记忆未启用")
     try:
         row = await asyncio.to_thread(
             state.self_memory_store.supersede,

@@ -26,6 +26,10 @@ export type ChatSendPayload = {
   edit_message_id?: string
   /** 重新生成锚点（仅 dm，与 edit_message_id 互斥） */
   regenerate_message_id?: string
+  /** 续写锚点：目标必须是该窗口最后一条可见 AI 回复（仅 dm，与编辑/重生成互斥） */
+  continue_message_id?: string
+  /** 消息来源标记；目前只接受 'card' */
+  origin?: 'card'
 }
 
 /** 建立 /api/chat 流：返回响应体与后端分配的运行号（停止时用于 cancel） */

@@ -16,6 +16,7 @@ from ..lore.gen import _extract_json
 from ..providers.complete import complete
 from ..schemas import Message
 from ..agentdb.self_memory import QuotaExceeded
+from ..feature_prefs import self_memory_active
 from . import mood as mood_mod
 
 logger = logging.getLogger("flyai.proactor.integrate")
@@ -102,8 +103,10 @@ async def handle_post_turn_mood(state, sc, *, session_id: str,
 async def extract_self_after_turn(state, sc, transcript: str,
                                   now: Optional[float] = None) -> None:
     """从最新对话抽取第一人称自我记忆；配额用尽即停，不报错给用户。"""
-    cfg = getattr(state.config, "self_memory", None)
-    if cfg is None or not cfg.enabled or not transcript.strip():
+    if not self_memory_active(getattr(state, "config", None),
+                              getattr(sc, "user_settings", None)):
+        return
+    if not transcript.strip():
         return
     store = getattr(state, "self_memory_store", None)
     provider = state.get_provider()

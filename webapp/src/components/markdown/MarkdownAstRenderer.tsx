@@ -1,24 +1,123 @@
-import { createElement, memo, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react'
+import {
+  createElement,
+  memo,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import clsx from 'clsx'
 import type {
   BlockContent,
   DefinitionContent,
   List as ListNode,
+  Paragraph,
   PhrasingContent,
   Root,
   Table as TableNode,
 } from 'mdast'
+import { useTranslate } from '../../i18n/index.js'
+import type { CardAppNode } from '../../services/markdown/parse.js'
+import { MAX_CARD_APP_LENGTH } from '../../services/st/cardApp.js'
 import { CitationLink } from '../search/CitationLink.js'
+import { CardAppFrame, useCardAppVariables } from './CardAppFrame.js'
+import styles from './CardAppFrame.module.css'
 import { CodeBlock } from './CodeBlock.js'
 import { ImageAsLink, Link } from './Link.js'
 import { InlineMath, MathBlock } from './MathFormula.js'
+import { MAX_HTML_LENGTH, SanitizedHtml, useMarkdownRenderOptions } from './SanitizedHtml.js'
 
-const Html = memo(function Html({ value }: { value: string }) {
+const Html = memo(function Html({
+  value,
+  inline = false,
+}: {
+  value: string
+  inline?: boolean
+}) {
   if (/^<br\s*\/?>$/i.test(value)) {
     return <br />
   }
-  return <span className="ds-markdown-html">{value}</span>
+  return <SanitizedHtml value={value} inline={inline} />
 })
+
+/**
+ * 卡内整页 HTML 应用：沙箱可用时进 iframe。
+ *
+ * 沙箱未开启（或用户关掉了 HTML 渲染）时不能把几十 KB 的文档原样摊在
+ * 消息里：改为一张折叠卡片，静态内容放在限高滚动区，源码按需展开。
+ */
+const CardAppView = memo(function CardAppView({
+  node,
+  loading = false,
+}: {
+  node: CardAppNode
+  loading?: boolean
+}) {
+  const { htmlEnabled, jsSandbox, externalImages } = useMarkdownRenderOptions()
+  const variables = useCardAppVariables()
+  const t = useTranslate()
+  const [showSource, setShowSource] = useState(false)
+  const tooLarge = node.html.length > MAX_CARD_APP_LENGTH
+  if (htmlEnabled && jsSandbox && !tooLarge) {
+    return (
+      <CardAppFrame
+        html={node.html}
+        message={node.message}
+        variables={variables}
+        externalMedia={externalImages}
+      />
+    )
+  }
+  const previewable = htmlEnabled && !tooLarge && node.html.length <= MAX_HTML_LENGTH
+  return (
+    <div className={styles.host}>
+      <div className={styles.toolbar}>
+        <span className={styles.label}>{t('cardAppLabel')}</span>
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className={styles.sourceBtn}
+            onClick={() => setShowSource((value) => !value)}
+          >
+            {t(showSource ? 'cardAppHideSource' : 'cardAppShowSource')}
+          </button>
+        </div>
+      </div>
+      {previewable ? (
+        <>
+          <div className={styles.notice}>{t('cardAppStaticHint')}</div>
+          <div className={styles.preview}>
+            <SanitizedHtml value={node.html} />
+          </div>
+        </>
+      ) : (
+        <div className={styles.notice}>
+          {t(tooLarge ? 'cardAppTooLarge' : 'cardAppHtmlOff')}
+        </div>
+      )}
+      {showSource ? (
+        <CodeBlock code={node.html} infostring={node.lang || 'html'} loading={loading} />
+      ) : null}
+    </div>
+  )
+})
+
+/** 段落里只有一份卡内应用时不要包 `<p>`，避免块级应用嵌在行内元素里 */
+const singleCardApp = (node: Paragraph): CardAppNode | null => {
+  let found: CardAppNode | null = null
+  for (const child of node.children) {
+    if (child.type === 'cardApp') {
+      if (found) {
+        return null
+      }
+      found = child
+    } else if (child.type !== 'text' || child.value.trim() !== '') {
+      return null
+    }
+  }
+  return found
+}
 
 const List = memo(function List({ node, loading }: { node: ListNode; loading: boolean }) {
   const ListTag = node.ordered ? 'ol' : 'ul'
@@ -120,7 +219,7 @@ const MarkdownPhrasingContentItem = memo(function MarkdownPhrasingContentItem({
     case 'image':
       return <ImageAsLink node={node} />
     case 'html':
-      return <Html value={node.value} />
+      return <Html value={node.value} inline />
     case 'inlineCode':
       return <code>{node.value}</code>
     case 'link':
@@ -139,6 +238,8 @@ const MarkdownPhrasingContentItem = memo(function MarkdownPhrasingContentItem({
       return <TextContent>{node.value}</TextContent>
     case 'citation':
       return <CitationLink source={node.source} />
+    case 'cardApp':
+      return <CardAppView node={node} />
     default:
       // 删除线、脚注、引用式链接已在解析时换成文本
       return null
@@ -175,8 +276,23 @@ const MarkdownBlockContentOrDefinitionContent = memo(
               <MarkdownBlockContentOrDefinitionContent nodes={node.children} loading={loading} />
             </blockquote>
           )
-        case 'html':
-          return <Html key={index} value={node.value} />
+        case 'html': {
+          // 相邻 html 节点先合并再清洗，避免 <details>/<table> 等被拆段后闭合丢失
+          let start = index
+          while (start > 0 && nodes[start - 1].type === 'html') {
+            start -= 1
+          }
+          if (start !== index) {
+            return null
+          }
+          const parts: string[] = []
+          let end = index
+          while (end < nodes.length && nodes[end].type === 'html') {
+            parts.push((nodes[end] as { value: string }).value)
+            end += 1
+          }
+          return <Html key={index} value={parts.join('\n')} />
+        }
         case 'heading':
           return node.children.length === 0
             ? null
@@ -185,12 +301,17 @@ const MarkdownBlockContentOrDefinitionContent = memo(
                 { key: index },
                 <MarkdownPhrasingContent nodes={node.children} />
               )
-        case 'paragraph':
+        case 'paragraph': {
+          const app = singleCardApp(node)
+          if (app) {
+            return <CardAppView key={index} node={app} loading={loading} />
+          }
           return (
             <p key={index} className="ds-markdown-paragraph">
               <MarkdownPhrasingContent nodes={node.children} />
             </p>
           )
+        }
         case 'code':
           return (
             <CodeBlock

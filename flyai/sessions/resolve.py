@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 from ..lore.diff import content_signature
 from ..lore.merge import merge_character_patch, merge_world_patch
 from ..lore.models import Character, World
+from ..lore.opening import apply_opening_entry
 from .models import RoomMember, Session
 
 # 通过属性的 module+name 判断，避免循环导入
@@ -30,6 +31,18 @@ def effective_character(session: Session, lore) -> Optional[Character]:
     if session.character_id:
         return lore.get_character(session.character_id)
     return None
+
+
+def opening_character(session: Session, character: Optional[Character]) -> Optional[Character]:
+    """按会话选定的开局条目调整常驻注入；无选择/标题不存在时原样返回。
+
+    只用于构建发给模型的角色卡副本（聊天/主动发言），不用于导出、发布、
+    MVU 载体判定等场景——那些地方应看到作者的原始卡。
+    """
+    title = getattr(session, "opening_entry", "") or ""
+    if character is None or not title:
+        return character
+    return apply_opening_entry(character, title)
 
 
 def effective_world(session: Session, lore) -> Optional[World]:

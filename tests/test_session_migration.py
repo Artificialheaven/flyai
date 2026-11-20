@@ -58,3 +58,21 @@ def test_migration_persisted_with_stable_ids(tmp_path):
     assert [m.id for m in second.members] == member_ids
     # 按首次返回的 id 能直接找到窗口
     assert second.thread(tid) is not None
+
+
+def test_opening_entry_round_trip_and_legacy_default(tmp_path):
+    from flyai.sessions.json_store import session_from_dict, session_to_dict
+
+    s = Session(id="op1", title="开局", opening_entry="开局1")
+    data = session_to_dict(s)
+    assert data["opening_entry"] == "开局1"
+    assert session_from_dict(data).opening_entry == "开局1"
+
+    # 旧会话/存档快照没有该字段：读成空串（按卡默认），行为与改造前一致
+    data.pop("opening_entry")
+    assert session_from_dict(data).opening_entry == ""
+
+    # 落盘往返
+    store = JsonSessionStore(base_dir=tmp_path)
+    store.save(s)
+    assert store.get("op1").opening_entry == "开局1"

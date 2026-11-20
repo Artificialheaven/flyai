@@ -92,6 +92,11 @@ class Message:
     # 撤回墓碑：非 None 时此消息是一条"已撤回轮"占位（role 固定为 "tombstone"），
     # 载荷仅用于前端"重新编辑"回填；任何模型视图/脚本化消费都必须过滤
     tombstone: Optional[Dict[str, Any]] = None
+    # MVU 变量快照：该条助手消息生成后的 stat_data；用于回退/重算当前状态。
+    # 非 MVU 会话保持 None（旧数据兼容）
+    stat_data: Optional[Dict[str, Any]] = None
+    # 消息来源：空串=用户/AI 正常产生；"card"=酒馆卡沙箱在用户确认下发起
+    origin: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -115,6 +120,8 @@ class Message:
             "recall": self.recall,
             "images": [i.to_dict() for i in self.images] if self.images else None,
             "tombstone": self.tombstone,
+            "stat_data": self.stat_data,
+            "origin": self.origin,
         }
 
     @classmethod
@@ -142,4 +149,6 @@ class Message:
                 else None
             ),
             tombstone=data.get("tombstone"),
+            stat_data=data.get("stat_data"),
+            origin=data.get("origin") or "",
         )

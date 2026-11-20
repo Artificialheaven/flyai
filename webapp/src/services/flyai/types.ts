@@ -51,6 +51,68 @@ export type Tombstone = {
   name: string | null
 }
 
+/** 酒馆正则脚本（声明式数据；前端展示侧原生解释，绝不执行卡内 JS） */
+export type RegexScript = {
+  scriptName?: string
+  findRegex?: string
+  replaceString?: string
+  placement?: number | number[]
+  markdownOnly?: boolean
+  promptOnly?: boolean
+  runOnEdit?: boolean
+  trimStrings?: string[]
+  minDepth?: number | null
+  maxDepth?: number | null
+  disabled?: boolean
+  [key: string]: unknown
+}
+
+/** 卡内声明的状态面板：开场白里的字面量占位符 → 展示侧正则渲染出的 HTML */
+export type StPanel = {
+  /** 开场白中的字面量占位符（如 <StatusPlaceHolderImpl/>） */
+  token: string
+  /** 面板标题，缺省为占位符本身 */
+  title?: string
+}
+
+/** 会话打开时下发的酒馆扩展数据（GET /api/sessions/{sid}.st） */
+export type StPayload = {
+  regex_scripts: RegexScript[]
+  by_character?: Record<string, RegexScript[]>
+  panels?: StPanel[]
+  html?: { enabled?: boolean; external_images?: boolean; image_proxy?: boolean }
+  flags?: {
+    regex_prompt?: boolean
+    regex_display?: boolean
+    html?: boolean
+    external_images?: boolean
+    /** 外链图片经服务端代理（需管理员开启且权限等级达标） */
+    image_proxy?: boolean
+    /** 是否有资格使用图片代理（设置页据此显示开关） */
+    image_proxy_available?: boolean
+    mvu?: boolean
+    /** 整页 HTML + JS 应用放进沙箱 iframe（需管理员开启且用户选择） */
+    js_sandbox?: boolean
+    /** 卡片可在用户确认后发起发送/继续/重生成（仅单角色 DM 末条消息） */
+    card_actions?: boolean
+    /** 卡片可在用户确认后写入会话副本（变量/世界书/角色字段） */
+    card_write?: boolean
+    /** 卡片网络请求经服务端受控代理（需管理员开启且用户选择） */
+    net_proxy?: boolean
+    /** 是否有资格使用网络代理（设置页据此显示开关） */
+    net_proxy_available?: boolean
+  }
+  mvu?: { enabled?: boolean; stat_data?: Record<string, unknown> }
+  /** 宿主需要下发给卡片的副本快照：世界书条目与角色白名单字段 */
+  write_context?: CardWriteContext
+}
+
+/** 卡片写入上下文（会话副本快照；根卡/公共卡永不下发可变引用） */
+export type CardWriteContext = {
+  worldbook?: { name?: string; entries?: LoreEntry[] } | null
+  character?: Record<string, unknown> | null
+}
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'tombstone'
 
 export type Message = {
@@ -69,6 +131,12 @@ export type Message = {
   recall: RecallItem[] | null
   images: MessageImage[] | null
   tombstone: Tombstone | null
+  /** 发言者角色卡 id（酒馆正则展示侧按卡查表用） */
+  character_id?: string | null
+  /** 该条助手消息生成后的 MVU 变量快照（用于展示侧宏展开/回退） */
+  stat_data?: Record<string, unknown> | null
+  /** 消息来源：卡片在宿主确认后发起/发送的为 'card'，缺省为用户手动操作 */
+  origin?: string | null
 }
 
 /** 内容库角色卡（当前阶段只用到展示/绑定所需字段，完整编辑器类型后续补齐） */
@@ -115,6 +183,11 @@ export type Character = {
   voice: string
   author: string
   public: boolean
+  /** 酒馆卡保真字段（旧后端可能不返回，均为可选） */
+  regex_scripts?: Record<string, unknown>[]
+  extensions?: Record<string, unknown>
+  alternate_greetings?: string[]
+  assets?: Record<string, unknown>[]
 }
 
 export type World = {
@@ -169,4 +242,6 @@ export type SessionDetail = SessionSummary & {
   disabled_tools: string[]
   galgame: Record<string, unknown>
   galgame_tts: Record<string, unknown>
+  /** 酒馆扩展数据（正则脚本/HTML 开关/MVU 状态）；旧后端不返回 */
+  st?: StPayload
 }

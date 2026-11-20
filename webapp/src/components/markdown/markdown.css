@@ -11,6 +11,14 @@
   max-width: 100%;
 }
 
+/* 酒馆卡内联插图：点击打开全屏看图器 */
+.ds-markdown .ds-markdown-inline-image {
+  height: auto;
+  margin: 4px 0;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
 .ds-markdown {
   h1 {
     font: var(--dsw-font-markdown-h1);

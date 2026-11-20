@@ -179,12 +179,37 @@ export const RoomMembersDialog = ({
         <div className={styles.hint}>{t('roomMembersHint')}</div>
 
         {userSeat ? (
-          <div className={styles.seatRow}>
-            <div className={styles.avatarFallback}>{(nameOf(userSeat) || '?').slice(0, 1)}</div>
-            <div className={styles.seatInfo}>
-              <div className={styles.nameLine}>
-                <span className={styles.name}>{nameOf(userSeat)}</span>
-                <span className={styles.badge}>{t('roomUserSeat')}</span>
+          <div className={styles.memberCard}>
+            <div className={styles.seatRow}>
+              <div className={styles.avatarFallback}>{(nameOf(userSeat) || '?').slice(0, 1)}</div>
+              <div className={styles.seatInfo}>
+                <div className={styles.nameLine}>
+                  <span className={styles.name}>{nameOf(userSeat)}</span>
+                  <span className={styles.badge}>{t('roomUserSeat')}</span>
+                </div>
+                <div className={styles.sub}>
+                  {userSeat.character_id
+                    ? charById.get(userSeat.character_id)?.name || userSeat.character_id
+                    : t('roomUserCardHint')}
+                </div>
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldLabel}>{t('roomUserCard')}</div>
+              <div className={styles.fieldControl}>
+                <Select
+                  value={userSeat.character_id || ''}
+                  options={[
+                    { value: '', label: t('roomUserCardNone') },
+                    ...characterOptions,
+                  ]}
+                  disabled={Boolean(busy)}
+                  onChange={(value) =>
+                    void run(`${userSeat.id}:character`, async () => {
+                      await updateRoomMember(sessionId, userSeat.id, { characterId: value })
+                    })
+                  }
+                />
               </div>
             </div>
           </div>

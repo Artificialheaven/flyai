@@ -282,6 +282,9 @@ class PromptOptions:
     memory: str = ""
     current_attributes: Optional[Dict[str, Any]] = None
     cross_memory_hint: bool = False
+    # MVU 变量（stat_data）：仅当非 None 时展开常驻条目里的酒馆宏，
+    # 避免非 MVU 会话的 {{random}} 等宏被重复求值
+    variables: Optional[Dict[str, Any]] = None
 
 
 def build_prompt(character: Optional[Character], world: Optional[World], opts: PromptOptions) -> str:
@@ -291,7 +294,11 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
 
     if character:
         parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
-        pinned = _pinned_block(character.table, "角色常驻资料", rp)
+        pinned = _pinned_block(
+            character.table, "角色常驻资料", rp,
+            variables=opts.variables, char_name=character.name,
+            user_name=(opts.user_character.name if opts.user_character else ""),
+        )
         if pinned:
             parts.append(pinned)
         if character.intro:
@@ -318,7 +325,12 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
     if world and world.content:
         parts.append(f"【世界观】\n{fit_budget(world.content, _budget(rp, 'world_chars'))}")
     if world:
-        wpinned = _pinned_block(world.table, "世界常驻设定", rp)
+        wpinned = _pinned_block(
+            world.table, "世界常驻设定", rp,
+            variables=opts.variables,
+            char_name=(character.name if character else ""),
+            user_name=(opts.user_character.name if opts.user_character else ""),
+        )
         if wpinned:
             parts.append(wpinned)
         if world.table:
@@ -383,9 +395,33 @@ def _budget(rp: Optional[RoleplaySettings], field_name: str) -> int:
     return int(getattr(rp, field_name, 0) or 0)
 
 
-def _pinned_block(table: List[LoreEntry], label: str, rp: Optional[RoleplaySettings]) -> Optional[str]:
-    """渲染钉选条目为常驻块；无钉选返回 None。"""
-    blocks = [f"『{e.title or '(无标题)'}』\n{e.content or '(空内容)'}" for e in (table or []) if e.pinned]
+def _pinned_block(
+    table: List[LoreEntry],
+    label: str,
+    rp: Optional[RoleplaySettings],
+    variables: Optional[Dict[str, Any]] = None,
+    char_name: str = "",
+    user_name: str = "",
+) -> Optional[str]:
+    """渲染钉选条目为常驻块；无钉选返回 None。
+
+    variables 非 None 时（MVU 会话）展开条目内的酒馆宏（含
+    ``{{format_message_variable::stat_data.*}}``）；None 保持原样。
+    """
+    def _render(text: str) -> str:
+        if variables is None:
+            return text
+        from ..tavern import render_tavern_macros
+
+        return render_tavern_macros(
+            text or "", char_name=char_name, user_name=user_name or "用户",
+            variables=variables,
+        )
+
+    blocks = [
+        f"『{e.title or '(无标题)'}』\n{_render(e.content or '(空内容)')}"
+        for e in (table or []) if e.pinned
+    ]
     if not blocks:
         return None
     kept, _dropped = fit_blocks(blocks, _budget(rp, "pinned_chars"))
@@ -421,15 +457,20 @@ def build_system_prompt(
     base: str,
     roleplay: Optional[RoleplaySettings] = None,
     user_character: Optional[Character] = None,
+    variables: Optional[Dict[str, Any]] = None,
 ) -> str:
     """把角色卡 + 世界观并入系统提示词。无角色/世界则返回 base。
 
     user_character：用户扮演的自设（persona），可选。设置后告诉 AI 用户正以该角色登场。
+    variables：MVU stat_data；非 None 时常驻条目内的酒馆宏会被展开。
     """
     return build_prompt(
         character,
         world,
-        PromptOptions(base=base, roleplay=roleplay, user_character=user_character),
+        PromptOptions(
+            base=base, roleplay=roleplay, user_character=user_character,
+            variables=variables,
+        ),
     )
 
 
@@ -443,11 +484,13 @@ def build_member_system_prompt(
     base: str = "",
     roleplay: Optional[RoleplaySettings] = None,
     user_character: Optional[Character] = None,
+    variables: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Beta：为群聊中单个 AI 参与者构建系统提示词。
 
     在统一构建器上叠加该 AI 的本窗口记忆、当前属性与在场名单。
     name 参数保留兼容（扮演句使用角色卡名 character.name）。
+    variables：MVU stat_data；非 None 时常驻条目内的酒馆宏会被展开。
     """
     return build_prompt(
         character,
@@ -460,6 +503,7 @@ def build_member_system_prompt(
             memory=memory or "",
             current_attributes=attributes,
             cross_memory_hint=bool(audience),
+            variables=variables,
         ),
     )
 

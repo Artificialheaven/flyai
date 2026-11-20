@@ -90,7 +90,8 @@ def test_thresholds_gate_categories_by_level():
     cfg.access = AccessSettings(browser_min_level=10, pixiv_min_level=20,
                                 galgame_min_level=30, agent_min_level=40)
     reg = _registry()
-    us = UserSettings()
+    # 自我记忆默认关闭，这里显式打开以验证它的等级门槛
+    us = UserSettings(self_memory_enabled=True)
     gated = (
         "browser_open", "search_pixiv", "galgame_choice", "web_search",
         "text_to_speech", "fs_read", "custom_tool_list", "loop_request",

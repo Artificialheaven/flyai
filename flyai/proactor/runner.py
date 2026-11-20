@@ -20,6 +20,7 @@ from ..schemas import Message
 from ..sessions.resolve import (
     effective_world,
     member_character,
+    opening_character,
     primary_thread,
     user_seat,
 )
@@ -95,7 +96,7 @@ async def fire(state, uid: str, session_id: str, *, kind: str, brief: str,
 
     async def drive() -> None:
         try:
-            char = member_character(speaker, sc.lore)
+            char = opening_character(session, member_character(speaker, sc.lore))
             world = effective_world(session, sc.lore)
             user_char = member_character(user_seat(session), sc.lore)
             system_prompt = build_member_system_prompt(

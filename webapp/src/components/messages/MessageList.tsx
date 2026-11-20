@@ -8,6 +8,9 @@ import {
 import { selectMessageVersion } from '../../services/chat/store.js'
 import type { Session } from '../../services/chat/types.js'
 import { closeSearchPanel } from '../search/searchPanelState.js'
+import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
+import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
+import { CardAppCharacterContext } from '../markdown/CardAppFrame.js'
 import { AssistantMessage } from './AssistantMessage.js'
 import { ScrollToBottomContext } from './scrollContext.js'
 import { TombstoneNotice } from './TombstoneNotice.js'
@@ -141,6 +144,62 @@ export const MessageList = ({
   }, [isMobile, scrollToBottom])
 
   const lastIndex = messages.length - 1
+  // 酒馆展示侧正则：按消息所属角色卡取脚本，缺省用会话当前角色的卡。
+  // 会话缓存里的 st 对象保持稳定，因此脚本数组的引用也不变，Markdown 的 memo 有效。
+  const stScriptsFor = useMemo(() => {
+    const st = session.st
+    if (!st || st.flags?.regex_display === false) {
+      return (_characterId?: string) => undefined
+    }
+    const fallback = st.regex_scripts ?? []
+    const byCharacter = st.by_character ?? {}
+    return (characterId?: string) => {
+      const own = characterId ? byCharacter[characterId] : undefined
+      const scripts = own && own.length > 0 ? own : fallback
+      return scripts.length > 0 ? scripts : undefined
+    }
+  }, [session.st])
+  // 酒馆卡 MVU：每条消息优先用自己的变量快照，旧消息回退到会话当前状态。
+  // 只用于展开展示侧变量宏，不影响存储原文与复制/朗读。
+  const stVariablesFor = useMemo(() => {
+    const mvu = session.st?.mvu
+    if (!mvu?.enabled) {
+      return (_message: { statData?: Record<string, unknown> }) => undefined
+    }
+    const current = mvu.stat_data
+    return (message: { statData?: Record<string, unknown> }) =>
+      message.statData ?? current
+  }, [session.st])
+  // 酒馆卡 HTML：后端已按用户开关算好；关闭时保持旧的转义文本行为。
+  const stHtml = useMemo<MarkdownRenderOptions | undefined>(() => {
+    const st = session.st
+    if (!st || st.flags?.html === false || !st.html?.enabled) {
+      return undefined
+    }
+    return {
+      htmlEnabled: true,
+      externalImages: !!st.html.external_images,
+      imageProxy: !!st.html.image_proxy && !!st.flags?.image_proxy,
+      jsSandbox: st.flags?.js_sandbox === true,
+    }
+  }, [session.st])
+  // 卡内脚本可读取当前角色名/头像；头像源随 doc 进入 CSP img-src。
+  const cardCharacter = useMemo(() => {
+    const name = session.characterName
+    const avatar = session.characterAvatar
+    return name || avatar ? { name, avatar } : undefined
+  }, [session.characterName, session.characterAvatar])
+  // 卡片能力由后端按管理员配置 + 用户开关 + 权限等级算好；缺省全部关闭。
+  // 会话缓存里的 st 对象保持稳定，因此能力的引用也不变，消息组件 memo 有效。
+  const cardFeatures = useMemo<CardAppCapabilities>(
+    () => ({
+      actions: session.st?.flags?.card_actions === true,
+      write: session.st?.flags?.card_write === true,
+      net: session.st?.flags?.net_proxy === true,
+    }),
+    [session.st]
+  )
+  const cardWriteContext = (session.st?.write_context ?? null) as CardAppWriteContext | null
   const uploadRetryId = getUploadRetryId(messages, streaming)
   // 群聊窗口由后端按座位分别应答，暂不支持编辑/重新生成；只读会话同理。
   const editable = !session.readOnly && session.threadKind !== 'group'
@@ -148,45 +207,55 @@ export const MessageList = ({
     <ScrollToBottomContext.Provider value={scrollToBottom}>
       <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
         <div ref={isMobile ? scrollRef : undefined} className={styles.scroll}>
-          <div ref={contentRef} className={styles.column}>
-            {messages.map((message, index) =>
-              message.role === 'tombstone' ? (
-                <TombstoneNotice
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  isFirst={index === 0}
-                  busy={streaming}
-                />
-              ) : message.role === 'user' ? (
-                <UserMessage
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  retryUploadId={uploadRetryId}
-                  isFirst={index === 0}
-                  isLast={index === lastIndex || index === lastIndex - 1}
-                  busy={streaming}
-                  editable={editable}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
-              ) : (
-                <AssistantMessage
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  isLast={index === lastIndex}
-                  streaming={streaming && index === lastIndex}
-                  busy={streaming}
-                  showSpeaker={session.threadKind === 'group'}
-                  editable={editable}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
-              )
-            )}
-          </div>
+          <CardAppCharacterContext.Provider value={cardCharacter}>
+            <div ref={contentRef} className={styles.column}>
+              {messages.map((message, index) =>
+                message.role === 'tombstone' ? (
+                  <TombstoneNotice
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    isFirst={index === 0}
+                    busy={streaming}
+                  />
+                ) : message.role === 'user' ? (
+                  <UserMessage
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    retryUploadId={uploadRetryId}
+                    isFirst={index === 0}
+                    isLast={index === lastIndex || index === lastIndex - 1}
+                    busy={streaming}
+                    editable={editable}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                  />
+                ) : (
+                  <AssistantMessage
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    isLast={index === lastIndex}
+                    streaming={streaming && index === lastIndex}
+                    busy={streaming}
+                    showSpeaker={session.threadKind === 'group'}
+                    editable={editable}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                    stScripts={stScriptsFor(message.characterId ?? session.characterId)}
+                    stDepth={lastIndex - index}
+                    stHtml={stHtml}
+                    stVariables={stVariablesFor(message)}
+                    stPanels={session.st?.panels}
+                    cardFeatures={cardFeatures}
+                    cardWriteContext={cardWriteContext}
+                    threadId={session.threadId}
+                  />
+                )
+              )}
+            </div>
+          </CardAppCharacterContext.Provider>
         </div>
         {footer}
       </div>

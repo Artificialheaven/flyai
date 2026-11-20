@@ -606,6 +606,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
     from .api.routes_speech import router as speech_router
+    from .api.routes_st import router as st_router
     from .api.routes_usage import router as usage_router
 
     app.include_router(afdian_router)
@@ -629,6 +630,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(room_router)
     app.include_router(session_router)
     app.include_router(speech_router)
+    app.include_router(st_router)
     app.include_router(usage_router)
 
     # 静态资源与头像上传目录（挂载目录需先存在；各用户上传在 /uploads/<uid>/...）
