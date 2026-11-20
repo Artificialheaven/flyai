@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 from ..ids import InvalidName, check_safe_name
 from ..lore.diff import character_diff, world_diff
+from ..preset.apply import active_preset_regex_scripts
 from ..sessions import versions
 from ..sessions.models import RoomMember, Session, Thread
 from ..user import ADMIN_UID
@@ -209,6 +210,7 @@ def get_session(sid: str, request: Request):
         cfg=getattr(request.app.state.flyai, "config", None),
         level=int(getattr(sc, "level", 0) or 0),
         is_admin=sc.uid == ADMIN_UID,
+        preset_scripts=active_preset_regex_scripts(sc),
     )
 
 
@@ -1146,7 +1148,8 @@ def session_compress_save_as(sid: str, body: CompressSaveAsBody, request: Reques
 
 
 def _st_payload(s, char, lore, user_settings, cfg=None,
-                level: int = 0, is_admin: bool = False) -> dict:
+                level: int = 0, is_admin: bool = False,
+                preset_scripts=None) -> dict:
     """会话打开时下发的酒馆扩展数据：正则脚本（展示侧）与开关状态。
 
     只下发角色卡内的声明式数据；前端展示侧用原生 JS 正则解释。卡内
@@ -1210,8 +1213,13 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
     from ..st.panels import detect_panels
 
     fallback = list(getattr(char, "regex_scripts", None) or []) if char else []
+    # 启用预设附带的全局正则：与卡正则同受展示开关控制
+    global_scripts = (
+        list(preset_scripts or []) if flags["regex_display"] else []
+    )
     return {
         "regex_scripts": fallback,
+        "regex_scripts_global": global_scripts,
         "by_character": by_character,
         "panels": detect_panels(char),
         "html": {
@@ -1231,7 +1239,7 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
 
 def _session_dict(s, with_messages: bool = False, lore=None,
                   user_settings=None, cfg=None, level: int = 0,
-                  is_admin: bool = False):
+                  is_admin: bool = False, preset_scripts=None):
     d = {
         "id": s.id,
         "title": s.title,
@@ -1263,5 +1271,6 @@ def _session_dict(s, with_messages: bool = False, lore=None,
             d["st"] = _st_payload(
                 s, char, lore, user_settings, cfg=cfg,
                 level=level, is_admin=is_admin,
+                preset_scripts=preset_scripts,
             )
     return d

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
 from ..models_access import visible_providers
+from ..preset.apply import active_preset_regex_scripts
 from ..sessions.resolve import member_character
 from ..user import ADMIN_UID
 from .routes_session import _session_dict
@@ -240,6 +241,7 @@ def create_room(body: RoomCreate, request: Request):
         cfg=getattr(request.app.state.flyai, "config", None),
         level=int(getattr(sc, "level", 0) or 0),
         is_admin=sc.uid == ADMIN_UID,
+        preset_scripts=active_preset_regex_scripts(sc),
     )
 
 

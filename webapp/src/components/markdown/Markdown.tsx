@@ -48,7 +48,7 @@ export const Markdown = memo(function Markdown({
   disableLink: boolean
   sources?: Source[]
   /** 当前角色卡的酒馆正则脚本（展示侧，AI 消息 placement=2） */
-  stScripts?: RegexScript[]
+  stScripts?: readonly RegexScript[]
   /** 消息距对话末尾的深度；脚本设置 minDepth/maxDepth 时生效 */
   stDepth?: number
   /** 酒馆卡 HTML/外链图片策略；缺省按全部关闭处理 */

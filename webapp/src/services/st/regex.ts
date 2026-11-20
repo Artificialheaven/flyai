@@ -151,6 +151,25 @@ export const compileRegexScripts = (
   return out
 }
 
+/**
+ * 全局（预设）→ 本地（角色卡）顺序合并脚本。
+ * 空的一侧直接返回原数组引用，保证 compileRegexScripts 的 WeakMap 缓存可用。
+ */
+export const mergeRegexScripts = (
+  globalScripts: readonly RegexScript[] | null | undefined,
+  localScripts: readonly RegexScript[] | null | undefined
+): readonly RegexScript[] => {
+  const global = Array.isArray(globalScripts) ? globalScripts : []
+  const local = Array.isArray(localScripts) ? localScripts : []
+  if (local.length === 0) {
+    return global
+  }
+  if (global.length === 0) {
+    return local
+  }
+  return [...global, ...local]
+}
+
 const trimValue = (value: string, trims: string[]): string => {
   let out = value
   for (const piece of trims) {

@@ -10,6 +10,7 @@ import type { Session } from '../../services/chat/types.js'
 import { closeSearchPanel } from '../search/searchPanelState.js'
 import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
+import { mergeRegexScripts } from '../../services/st/regex.js'
 import { CardAppCharacterContext } from '../markdown/CardAppFrame.js'
 import { AssistantMessage } from './AssistantMessage.js'
 import { ScrollToBottomContext } from './scrollContext.js'
@@ -153,9 +154,20 @@ export const MessageList = ({
     }
     const fallback = st.regex_scripts ?? []
     const byCharacter = st.by_character ?? {}
+    const globalScripts = st.regex_scripts_global ?? []
+    // 每个角色缓存合并后的数组，避免每次渲染新建数组使 WeakMap 编译缓存失效
+    const mergedByCharacter = new Map<string, ReturnType<typeof mergeRegexScripts>>()
     return (characterId?: string) => {
+      const key = characterId ?? ''
+      const cached = mergedByCharacter.get(key)
+      if (cached) {
+        return cached.length > 0 ? cached : undefined
+      }
       const own = characterId ? byCharacter[characterId] : undefined
-      const scripts = own && own.length > 0 ? own : fallback
+      const local = own && own.length > 0 ? own : fallback
+      // 顺序：预设全局正则 → 角色卡正则
+      const scripts = mergeRegexScripts(globalScripts, local)
+      mergedByCharacter.set(key, scripts)
       return scripts.length > 0 ? scripts : undefined
     }
   }, [session.st])

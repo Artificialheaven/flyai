@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
-/** 内容库弹窗：角色 / 世界观两个标签页。 */
-export type LoreTab = 'characters' | 'worlds'
+/** 内容库弹窗：角色 / 世界观 / 模型预设三个标签页。 */
+export type LoreTab = 'characters' | 'worlds' | 'presets'
 
 export const useLoreDialog = create<{ open: boolean; tab: LoreTab }>(() => ({
   open: false,

@@ -79,7 +79,7 @@ export const ReplyArea = memo(function ReplyArea({
   view: ReplyView
   streaming: boolean
   hasResponse: boolean
-  stScripts?: RegexScript[]
+  stScripts?: readonly RegexScript[]
   stDepth?: number
   stHtml?: MarkdownRenderOptions
   stVariables?: Record<string, unknown>
@@ -152,7 +152,7 @@ const StepItem = ({
   sources: Source[]
   streaming: boolean
   isLast: boolean
-  stScripts?: RegexScript[]
+  stScripts?: readonly RegexScript[]
   stDepth?: number
   stHtml?: MarkdownRenderOptions
   stVariables?: Record<string, unknown>

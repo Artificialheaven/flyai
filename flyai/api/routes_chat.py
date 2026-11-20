@@ -848,19 +848,10 @@ def _effective_max_tokens(session, user_settings, preset_max: int = 0) -> Option
 
 
 def _load_active_preset(sc):
-    """读取该用户当前启用的预设；未启用/已删除/损坏一律返回 None（等于不使用）。"""
-    store = getattr(sc, "presets", None)
-    us = getattr(sc, "user_settings", None)
-    if store is None or us is None:
-        return None
-    pid = getattr(us, "active_preset_id", "") or ""
-    if not pid:
-        return None
-    try:
-        return store.get(pid)
-    except Exception:
-        logger.exception("启用预设读取失败")
-        return None
+    """读取该用户当前启用的预设（实现见 preset.apply，chat/session 共用）。"""
+    from ..preset.apply import load_active_preset
+
+    return load_active_preset(sc)
 
 
 def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
@@ -1389,8 +1380,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             # depth 块与世界书深度块合并；采样参数/jailbreak 前缀透传给 loop
             from ..preset.apply import render_preset
 
+            active_preset = _load_active_preset(sc)
             rendered_preset = render_preset(
-                _load_active_preset(sc),
+                active_preset,
                 char_name=getattr(character, "name", "") or "角色",
                 user_name=getattr(user_char, "name", "") if user_char else "",
                 group_names=[],
@@ -1412,11 +1404,18 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 query=req.message or "",
             )
             await _touch_proactor(state, sc, session.id)
-            # ST 正则（prompt 侧）：单聊按当前角色卡编译，作为全历史的兜底表
+            # ST 正则（prompt 侧）：单聊按当前角色卡编译，作为全历史的兜底表；
+            # 启用预设自带的全局正则放在 extra，先于卡正则生效
             st_scripts = _st_compile_scripts(
                 sc, getattr(character, "regex_scripts", None)
             )
+            preset_scripts = _st_compile_scripts(
+                sc, getattr(active_preset, "regex_scripts", None)
+            )
             st_regex = {"fallback": st_scripts} if st_scripts else None
+            if preset_scripts:
+                st_regex = dict(st_regex or {})
+                st_regex["extra"] = preset_scripts
             if mvu_on:
                 # MVU 更新块只从出站 prompt 剥离（存储原文留给展示侧正则）
                 st_regex = dict(st_regex or {})
@@ -1943,6 +1942,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             st_by_character = _st_regex_map(
                 sc, [m.character_id for m in speakers]
             )
+            # 启用预设的正则对所有角色生效（先于角色卡正则）
+            preset_st_scripts = _st_compile_scripts(
+                sc, getattr(active_preset, "regex_scripts", None)
+            )
             # P4 原生 MVU：本窗口以第一张声明 MVU 的卡作为会话级状态载体
             mvu_char = None
             for _spk in speakers:
@@ -2201,15 +2204,17 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     character_id=spk.character_id or "",
                     query=req.message or "",
                 )
-                # ST 正则 prompt 侧：本座位脚本表 + MVU 更新块剥离
+                # ST 正则 prompt 侧：本座位脚本表 + 预设全局脚本 + MVU 更新块剥离
                 spk_st_regex = None
-                if st_by_character or mvu_on:
+                if st_by_character or mvu_on or preset_st_scripts:
                     spk_st_regex = {
                         "by_character": st_by_character,
                         "fallback": st_by_character.get(
                             getattr(spk, "character_id", "") or "", []
                         ),
                     }
+                    if preset_st_scripts:
+                        spk_st_regex["extra"] = preset_st_scripts
                     if mvu_on:
                         spk_st_regex["strip_updates"] = True
                 while True:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Tuple
 
+from ..st.regex_scripts import sanitize_regex_scripts
 from ..tavern import lenient_json_loads
 from .models import Preset, PresetBlock, sanitize_params
 
@@ -27,6 +28,66 @@ _MAIN_MARKERS = {"main", "nsfw", "enhanceDefinitions"}
 
 ENVELOPE_TYPE = "flyai-preset"
 ENVELOPE_VERSION = 1
+
+# 酒馆「预设绑定正则」插件把脚本 JSON 存在该 identifier 的 prompt 块里
+_REGEX_BINDINGS_ID = "regexes-bindings"
+# 绑定数据可能包在这些键里（兼容不同版本的导出）
+_REGEX_BINDING_KEYS = (
+    "regex_scripts", "regexScripts", "scripts", "regexes", "bindings", "items",
+)
+
+
+def _decode_binding_content(content: Any) -> Any:
+    """把 binding 块 content 解成对象；兼容双重 JSON 编码与脏 JSON。"""
+    if isinstance(content, (list, dict)):
+        return content
+    if not isinstance(content, str) or not content.strip():
+        return None
+    text = content.strip()
+    for _attempt in range(2):
+        try:
+            data = json.loads(text, strict=False)
+        except (TypeError, ValueError):
+            try:
+                data = lenient_json_loads(text)
+            except (ValueError, TypeError):
+                return None
+        # 导出工具偶尔会把 JSON 再编码成字符串
+        if isinstance(data, str) and data.strip()[:1] in ("{", "["):
+            text = data.strip()
+            continue
+        return data
+    return None
+
+
+def _extract_binding_scripts(obj: Any) -> list:
+    """从已解码对象提取脚本候选：数组 / 包装键 / id→脚本映射 / 单条脚本。"""
+    if isinstance(obj, list):
+        return obj
+    if not isinstance(obj, dict):
+        return []
+    if obj.get("findRegex") or obj.get("scriptName"):
+        return [obj]
+    for key in _REGEX_BINDING_KEYS:
+        value = obj.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            return [value]
+    values = [v for v in obj.values() if isinstance(v, dict)]
+    if any(v.get("findRegex") for v in values):
+        return values
+    return []
+
+
+def _parse_regex_bindings(content: Any) -> Tuple[list, bool]:
+    """解析 regexes-bindings 块 → (清洗后脚本列表, 是否解析成功)。"""
+    if content is None or (isinstance(content, str) and not content.strip()):
+        return [], True
+    data = _decode_binding_content(content)
+    if data is None:
+        return [], False
+    return sanitize_regex_scripts(_extract_binding_scripts(data)), True
 
 
 class PresetImportError(ValueError):
@@ -89,7 +150,12 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
         if name:
             p.name = name
         p.id = ""  # 导入即新 id
-        return p, {"blocks": len(p.blocks), "enabled": sum(1 for b in p.blocks if b.enabled)}
+        return p, {
+            "blocks": len(p.blocks),
+            "enabled": sum(1 for b in p.blocks if b.enabled),
+            "regex_scripts": len(p.regex_scripts),
+            "regex_invalid": 0,
+        }
 
     params = sanitize_params(data)
     max_tokens = _as_int(data.get("openai_max_tokens"), 0)
@@ -99,13 +165,28 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
 
     blocks = []
     stats = {"blocks": 0, "enabled": 0, "main": 0, "depth": 0, "tail": 0,
-             "skipped": 0, "prefill": 0}
+             "skipped": 0, "prefill": 0, "regex_scripts": 0, "regex_invalid": 0}
     prefill = ""
+    regex_scripts: list = []
     prompts = data.get("prompts")
+    if not isinstance(prompts, list):
+        # 部分导出把完整设置收在 chatCompletionSettings 里
+        nested = data.get("chatCompletionSettings")
+        if isinstance(nested, dict) and isinstance(nested.get("prompts"), list):
+            prompts = nested["prompts"]
     if not isinstance(prompts, list):
         raise PresetImportError("缺少 prompts 列表，不是酒馆 OpenAI 预设")
     for raw in prompts:
         if not isinstance(raw, dict):
+            continue
+        identifier = str(raw.get("identifier") or "").strip().lower().replace("_", "-")
+        if identifier == _REGEX_BINDINGS_ID:
+            scripts, ok = _parse_regex_bindings(raw.get("content"))
+            if not ok:
+                stats["regex_invalid"] += 1
+            else:
+                regex_scripts.extend(scripts)
+            # 绑定块不是 prompt，绝不能注入上下文
             continue
         if not (raw.get("content") or "").strip():
             stats["skipped"] += 1
@@ -126,6 +207,15 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
     if not prefill and (data.get("assistant_prefill") or "").strip():
         prefill = str(data["assistant_prefill"]).strip()
         stats["prefill"] = 1
+    # 非插件格式的预设：顶层直接带 regex_scripts
+    if not regex_scripts and data.get("regex_scripts") is not None:
+        scripts, ok = _parse_regex_bindings(data.get("regex_scripts"))
+        if not ok:
+            stats["regex_invalid"] += 1
+        else:
+            regex_scripts.extend(scripts)
+    regex_scripts = sanitize_regex_scripts(regex_scripts)
+    stats["regex_scripts"] = len(regex_scripts)
 
     p = Preset(
         name=(name or str(data.get("name") or "")).strip() or "导入的预设",
@@ -135,6 +225,7 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
         max_tokens=max_tokens,
         assistant_prefill=prefill,
         blocks=blocks,
+        regex_scripts=regex_scripts,
     )
     return p, stats
 

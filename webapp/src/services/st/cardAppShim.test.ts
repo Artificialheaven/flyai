@@ -461,6 +461,25 @@ describe('L4 授权能力', () => {
     expect(toasts(posted)).toHaveLength(0)
   })
 
+  it('actions：斜杠管线按 ST 语义拆链，`|/trigger` 不混入发送文本', () => {
+    // 状态面板卡用 `triggerSlash(`/send ${text}|/trigger`)` 串发送与快捷回复；
+    // 不拆链会让 `|/trigger` 成为消息正文的一部分被发给模型。
+    const { sandbox, posted } = makeSandbox('x', null, null, actionsOnly)
+    const slash = sandbox.triggerSlash as (command: string) => string
+    slash('/send 你好|/trigger')
+    // `\|` 是转义的字面竖线，应保留
+    slash('/send a\\|b|/trigger')
+    // `/trigger` 单独调用无副作用（快捷回复未移植），也不应报只读
+    slash('/trigger')
+
+    const actions = posted.filter((item) => item.type === 'flyai-card-action')
+    expect(actions.map((item) => item.intent)).toEqual([
+      { kind: 'action', action: 'send', text: '你好' },
+      { kind: 'action', action: 'send', text: 'a|b' },
+    ])
+    expect(toasts(posted)).toHaveLength(0)
+  })
+
   it('write：设置变量乐观更新并发出 patch 意图，宿主快照可校正', () => {
     const { sandbox, posted, emitMessage } = makeSandbox(
       'x',

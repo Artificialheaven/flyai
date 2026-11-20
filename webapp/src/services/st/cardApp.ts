@@ -917,27 +917,75 @@ export const buildCardAppShim = (
     if (!isFinite(current)) current = 0;
     writeChatVariable(key, cmd === 'decvar' ? current - amount : current + amount);
   }
-  window.triggerSlash = function(command){
-    var text = String(command == null ? '' : command);
-    var match = /^\\s*\\/([A-Za-z_]+)\\b([\\s\\S]*)$/.exec(text);
-    if (match) {
-      var name = match[1].toLowerCase();
-      var rest = match[2].replace(/^\\s+/, '');
-      if (name === 'send') {
-        if (CAP_ACTIONS) { requestAction({ kind: 'action', action: 'send', text: rest }); return ''; }
-      } else if (name === 'continue' || name === 'cont') {
-        if (CAP_ACTIONS) { requestAction({ kind: 'action', action: 'continue' }); return ''; }
-      } else if (name === 'regenerate' || name === 'regen') {
-        if (CAP_ACTIONS) { requestAction({ kind: 'action', action: 'regenerate' }); return ''; }
-      } else if (name === 'setvar' || name === 'setchatvar') {
-        if (CAP_WRITE) { slashSetVar(rest); return ''; }
-      } else if (name === 'delvar' || name === 'delchatvar') {
-        if (CAP_WRITE) { deleteChatVariable(slashVariableKey(rest)); return ''; }
-      } else if (name === 'addvar' || name === 'incvar' || name === 'decvar') {
-        if (CAP_WRITE) { slashNumberVar(name, rest); return ''; }
+  // SillyTavern 的斜杠管线：多条命令用 | 串联，反斜杠 + | 表示字面竖线。
+  // 卡常写 triggerSlash('/send 文本|/trigger') 表示「发送后再触发快捷回复」；
+  // 不拆链的话 |/trigger 会整段混进发送文本，模型就收到这条尾巴。
+  function splitSlashChain(text){
+    var parts = [];
+    var current = '';
+    for (var i = 0; i < text.length; i += 1) {
+      var ch = text.charAt(i);
+      if (ch === '\\\\' && text.charAt(i + 1) === '|') {
+        current += '|';
+        i += 1;
+      } else if (ch === '|') {
+        parts.push(current);
+        current = '';
+      } else {
+        current += ch;
       }
     }
-    if (MUTATING_SLASH.test(text)) readOnly();
+    parts.push(current);
+    return parts;
+  }
+  // 返回 true 表示已识别（含不支持但无副作用的命令），false 表示未识别
+  function runSlashCommand(text){
+    var match = /^\\s*\\/([A-Za-z_]+)\\b([\\s\\S]*)$/.exec(text);
+    if (!match) return false;
+    var name = match[1].toLowerCase();
+    var rest = match[2].replace(/^\\s+/, '');
+    if (name === 'send') {
+      if (!CAP_ACTIONS) return false;
+      requestAction({ kind: 'action', action: 'send', text: rest });
+      return true;
+    }
+    if (name === 'continue' || name === 'cont') {
+      if (!CAP_ACTIONS) return false;
+      requestAction({ kind: 'action', action: 'continue' });
+      return true;
+    }
+    if (name === 'regenerate' || name === 'regen') {
+      if (!CAP_ACTIONS) return false;
+      requestAction({ kind: 'action', action: 'regenerate' });
+      return true;
+    }
+    if (name === 'setvar' || name === 'setchatvar') {
+      if (!CAP_WRITE) return false;
+      slashSetVar(rest);
+      return true;
+    }
+    if (name === 'delvar' || name === 'delchatvar') {
+      if (!CAP_WRITE) return false;
+      deleteChatVariable(slashVariableKey(rest));
+      return true;
+    }
+    if (name === 'addvar' || name === 'incvar' || name === 'decvar') {
+      if (!CAP_WRITE) return false;
+      slashNumberVar(name, rest);
+      return true;
+    }
+    // 快捷回复系统未移植：/trigger 在 ST 里只负责触发 QR，这里静默忽略
+    if (name === 'trigger') return true;
+    return false;
+  }
+  window.triggerSlash = function(command){
+    var text = String(command == null ? '' : command);
+    var parts = splitSlashChain(text);
+    for (var i = 0; i < parts.length; i += 1) {
+      var segment = parts[i].replace(/^\\s+/, '');
+      if (!segment) continue;
+      if (!runSlashCommand(segment) && MUTATING_SLASH.test(segment)) readOnly();
+    }
     return '';
   };
   window.substituteParams = function(value){

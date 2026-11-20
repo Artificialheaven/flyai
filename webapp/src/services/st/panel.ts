@@ -12,7 +12,7 @@ import { applyDisplayScripts } from './regex.js'
 /** 渲染面板：占位符 + 展示侧正则 + 变量宏 → HTML 文本 */
 export const renderPanel = (
   token: string,
-  scripts: RegexScript[] | undefined,
+  scripts: readonly RegexScript[] | undefined,
   variables: Record<string, unknown> | undefined
 ): string =>
   // 面板走白名单清洗，不抽沙箱应用（否则会残留哨兵）

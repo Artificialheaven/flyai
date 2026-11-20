@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -25,9 +26,66 @@ from ..schemas import Message
 MAX_SCRIPTS = 200
 MAX_PATTERN = 64 * 1024
 MAX_OUTPUT = 2 * 1024 * 1024
+# 持久化（预设 / 角色卡导入）时的整体 JSON 体积上限
+MAX_SERIALIZED = 2 * 1024 * 1024
 
 PLACEMENT_USER = 1
 PLACEMENT_AI = 2
+
+# 解释器认识的字段白名单；导入时其余字段一律丢弃
+SCRIPT_FIELDS = (
+    "scriptName",
+    "findRegex",
+    "replaceString",
+    "placement",
+    "disabled",
+    "markdownOnly",
+    "promptOnly",
+    "runOnEdit",
+    "minDepth",
+    "maxDepth",
+    "trimStrings",
+)
+
+
+def sanitize_regex_scripts(
+    raw: Any, limit: int = MAX_SCRIPTS,
+) -> List[Dict[str, Any]]:
+    """导入/持久化前的结构清洗：白名单字段 + 条数与体积上限。
+
+    只做结构安全校验（不编译正则）：无效正则留给运行期引擎跳过并计数。
+    返回新列表，不修改入参；超限条目被丢弃而不是截断内容。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    budget = MAX_SERIALIZED
+    for item in raw[:limit]:
+        if not isinstance(item, dict):
+            continue
+        find_regex = item.get("findRegex")
+        if not isinstance(find_regex, str) or not find_regex:
+            continue
+        if len(find_regex) > MAX_PATTERN:
+            continue
+        clean: Dict[str, Any] = {}
+        for key in SCRIPT_FIELDS:
+            if key not in item:
+                continue
+            value = item[key]
+            if isinstance(value, (str, int, float, bool, list, tuple)) or value is None:
+                clean[key] = value
+        if "findRegex" not in clean:
+            clean["findRegex"] = find_regex
+        try:
+            size = len(json.dumps(clean, ensure_ascii=False))
+        except (TypeError, ValueError):
+            continue
+        if size > budget:
+            break
+        budget -= size
+        out.append(clean)
+    return out
 
 # JS 命名分组 / 命名反向引用 → Python 语法
 _JS_NAMED_GROUP_RE = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
@@ -329,21 +387,27 @@ def apply_to_messages(
     by_character: Optional[Dict[str, Sequence[Script]]] = None,
     fallback: Optional[Sequence[Script]] = None,
     side: str = "prompt",
+    extra: Optional[Sequence[Script]] = None,
 ) -> List[Message]:
     """对消息列表应用 prompt 侧脚本。返回新列表（未命中的消息复用原对象）。
 
     depth 以「距离最新一条消息」计（ST 语义）。绝不原地修改，避免改动
     ``_actor_view`` 对当前 actor 返回的引用对象。
+
+    ``extra`` 是预设级全局脚本（与角色卡无关），先于按角色选出的脚本执行；
+    两者都命中的消息按 ``extra → 角色卡`` 顺序叠加。
     """
     msgs = list(messages)
     by_character = by_character or {}
     fallback = list(fallback or [])
-    if not by_character and not fallback:
+    extra = list(extra or [])
+    if not by_character and not fallback and not extra:
         return msgs
     total = len(msgs)
     out: List[Message] = []
     for i, m in enumerate(msgs):
-        scripts = scripts_for_message(m, by_character, fallback)
+        own = scripts_for_message(m, by_character, fallback)
+        scripts = (extra + list(own)) if extra else own
         if not scripts:
             out.append(m)
             continue

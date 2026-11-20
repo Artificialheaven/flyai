@@ -67,7 +67,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   versions: MessageVersions
   onSelectVersion: SelectMessageVersion
   /** 酒馆展示侧正则（已按发言者角色卡选好）；只影响显示 */
-  stScripts?: RegexScript[]
+  stScripts?: readonly RegexScript[]
   /** 消息距对话末尾的深度（脚本 minDepth/maxDepth 用） */
   stDepth?: number
   /** 酒馆卡 HTML/外链图片策略；未启用时保持转义文本 */

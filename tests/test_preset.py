@@ -537,6 +537,88 @@ def test_chat_thread_applies_active_preset(tmp_path):
     assert "深处块" not in contents and "尾块" not in contents and "（前缀）" not in contents
 
 
+def test_chat_thread_applies_preset_and_card_regex(tmp_path):
+    from flyai.agent.runs import ChatRunManager
+    from flyai.api.routes_chat import _chat_in_thread
+    from flyai.config import RoleplaySettings, ToolSettings
+    from flyai.lore.models import Character
+    from flyai.sessions.json_store import JsonSessionStore
+    from flyai.sessions.models import RoomMember, Session, Thread
+    from flyai.tools.registry import ToolRegistry
+    from flyai.user import ADMIN_LEVEL, UserSettings
+
+    store = JsonSessionStore(tmp_path / "sessions")
+    ch = Character(id="c1", name="角色1", regex_scripts=[
+        # 卡脚本把预设产物再替换一次，用于验证「预设 → 卡」顺序
+        {"findRegex": "/X/g", "replaceString": "Y", "placement": [1, 2]},
+    ])
+
+    s = Session(title="私聊")
+    s.members.append(RoomMember(name="你", is_user=True))
+    m = RoomMember(name=ch.name, character_id="c1")
+    s.members.append(m)
+    dm = Thread(kind="dm", title=m.name, member_ids=[m.id])
+    s.threads.append(dm)
+    store.save(s)
+
+    class _Lore:
+        def get_character(self, cid):
+            return ch if cid == "c1" else None
+
+    preset = Preset(name="正则预设", regex_scripts=[
+        {"findRegex": "/在吗/g", "replaceString": "X", "placement": [1, 2]},
+    ])
+    presets_store = PresetStore(tmp_path / "presets")
+    presets_store.save(preset)
+    settings = UserSettings(active_preset_id=preset.id, lore_auto_inject=False)
+
+    sc = SimpleNamespace(
+        uid="admin", level=ADMIN_LEVEL, store=store, lore=_Lore(),
+        upload_dir=tmp_path / "uploads", presets=presets_store,
+        user_settings=settings,
+        get_querier=None, save_user_settings=lambda: None,
+    )
+
+    captured = {}
+
+    class P:
+        async def stream_chat(self, messages, tool_specs, **kwargs):
+            if not captured:
+                captured["messages"] = list(messages)
+            yield StreamEvent(StreamEventType.CONTENT_DELTA, "好")
+
+    state = SimpleNamespace(
+        config=SimpleNamespace(
+            roleplay=RoleplaySettings(format_example=""),
+            tools=ToolSettings(enabled=False),
+            image_models=[], providers=[],
+        ),
+        registry=ToolRegistry(),
+        run_manager=ChatRunManager(),
+        galgame_tts_overlay={},
+    )
+
+    req = SimpleNamespace(message="在吗", thread_id=dm.id,
+                          target_member_ids=[], shuffle_speakers=False)
+
+    async def body():
+        resp = await _chat_in_thread(state, sc, s, req, P())
+        async for _frame in resp.body_iterator:
+            pass
+
+    _run(body())
+
+    sent = [m.content for m in captured["messages"] if m.role == "user"]
+    assert "Y" in sent
+    assert all("在吗" not in c for c in sent)
+    # 出站替换不改存储原文（房间形态会话的消息挂在 thread 上）
+    saved = store.get(s.id)
+    saved_thread = next(t for t in saved.threads if t.id == dm.id)
+    assert any(m.content == "在吗" for m in saved_thread.messages), [
+        (m.role, m.content) for m in saved_thread.messages
+    ]
+
+
 # ---- 提供商请求体 ----
 
 def test_openai_extra_params_override_cfg_but_max_tokens_wins():

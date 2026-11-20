@@ -22,7 +22,15 @@ import {
   updateCharacter,
   updateWorld,
 } from '../../services/flyai/lore.js'
-import type { Character, World } from '../../services/flyai/types.js'
+import {
+  clonePreset,
+  deletePreset,
+  exportPreset,
+  importPreset,
+  listPresets,
+  setActivePreset,
+} from '../../services/flyai/presets.js'
+import type { Character, Preset, World } from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
 import { openingOptions } from '../room/openingEntries.js'
 import { Button } from '../base/Button.js'
@@ -47,6 +55,7 @@ type View = { kind: 'list' } | { kind: 'character'; initial: Character | null } 
 type ConfirmTarget =
   | { kind: 'character'; item: Character }
   | { kind: 'world'; item: World }
+  | { kind: 'preset'; item: Preset }
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -66,6 +75,8 @@ const LoreContent = () => {
   const [view, setView] = useState<View>({ kind: 'list' })
   const [characters, setCharacters] = useState<Character[]>([])
   const [worlds, setWorlds] = useState<World[]>([])
+  const [presets, setPresets] = useState<Preset[]>([])
+  const [activePresetId, setActivePresetId] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
@@ -74,14 +85,21 @@ const LoreContent = () => {
   const [deleting, setDeleting] = useState(false)
   const charFile = useRef<HTMLInputElement>(null)
   const worldFile = useRef<HTMLInputElement>(null)
+  const presetFile = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     setLoadError('')
     try {
-      const [chars, ws] = await Promise.all([listCharacters(), listWorlds()])
+      const [chars, ws, presetData] = await Promise.all([
+        listCharacters(),
+        listWorlds(),
+        listPresets(),
+      ])
       setCharacters(chars)
       setWorlds(ws)
+      setPresets(presetData.presets)
+      setActivePresetId(presetData.activeId)
     } catch (err) {
       setLoadError(errorText(err))
     } finally {
@@ -124,6 +142,34 @@ const LoreContent = () => {
     }
     return worlds.filter((w) => `${w.name} ${w.content}`.toLowerCase().includes(q))
   }, [worlds, query])
+
+  const filteredPresets = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) {
+      return presets
+    }
+    return presets.filter((p) => `${p.name} ${p.note}`.toLowerCase().includes(q))
+  }, [presets, query])
+
+  /** 预设一行摘要：prompt 块数量 + 绑定正则 + 温度 + 输出上限 */
+  const presetMeta = (preset: Preset): string => {
+    const parts: string[] = []
+    if (preset.blocks.length > 0) {
+      parts.push(t('lorePresetBlocks', { count: preset.blocks.length }))
+    }
+    const regexCount = preset.regex_scripts?.length ?? 0
+    if (regexCount > 0) {
+      parts.push(t('lorePresetRegexes', { count: regexCount }))
+    }
+    const temp = preset.params.temperature
+    if (typeof temp === 'number') {
+      parts.push(`temp ${temp}`)
+    }
+    if (preset.max_tokens > 0) {
+      parts.push(t('lorePresetTokens', { count: preset.max_tokens }))
+    }
+    return parts.join(' · ')
+  }
 
   const run = async (id: string, action: () => Promise<void>, doneMessage?: string) => {
     setBusyId(id)
@@ -186,6 +232,44 @@ const LoreContent = () => {
       await exportWorld(world)
     })
 
+  const togglePreset = (preset: Preset) => {
+    const next = activePresetId === preset.id ? '' : preset.id
+    void run(preset.id, async () => {
+      const active = await setActivePreset(next)
+      setActivePresetId(active)
+      showToast(
+        active
+          ? t('lorePresetActivated', { name: preset.name })
+          : t('lorePresetDeactivated')
+      )
+    })
+  }
+
+  const clonePresetItem = (preset: Preset) =>
+    run(preset.id, async () => {
+      await clonePreset(preset.id)
+      await load()
+      showToast(t('lorePresetCloned'))
+    })
+
+  const exportPresetItem = (preset: Preset) =>
+    run(preset.id, async () => {
+      await exportPreset(preset)
+    })
+
+  const importPresetFile = async (file: File) => {
+    setBusyId('import')
+    try {
+      await importPreset(file)
+      await load()
+      showToast(t('loreImported'))
+    } catch (err) {
+      showToast(t('loreImportFailed', { message: errorText(err) }))
+    } finally {
+      setBusyId('')
+    }
+  }
+
   const deleteTarget = async () => {
     if (!confirmTarget || deleting) {
       return
@@ -194,8 +278,10 @@ const LoreContent = () => {
     try {
       if (confirmTarget.kind === 'character') {
         await deleteCharacter(confirmTarget.item.id)
-      } else {
+      } else if (confirmTarget.kind === 'world') {
         await deleteWorld(confirmTarget.item.id)
+      } else {
+        await deletePreset(confirmTarget.item.id)
       }
       setConfirmTarget(null)
       await load()
@@ -411,13 +497,77 @@ const LoreContent = () => {
     </div>
   )
 
+  const renderPresetCard = (preset: Preset) => {
+    const active = preset.id === activePresetId
+    const meta = presetMeta(preset)
+    return (
+      <div className={clsx(styles.card, active && styles.cardActive)} key={preset.id}>
+        <div className={styles.avatarFallback}>{(preset.name || '?').slice(0, 1)}</div>
+        <div className={styles.info}>
+          <div className={styles.nameLine}>
+            <div className={styles.name}>{preset.name || preset.id}</div>
+            <span className={styles.badge}>
+              {preset.source === 'tavern' ? t('lorePresetSourceTavern') : t('lorePresetSourceFlyai')}
+            </span>
+            {active ? (
+              <span className={clsx(styles.badge, styles.badgeActive)}>{t('lorePresetActive')}</span>
+            ) : null}
+          </div>
+          <div className={styles.sub}>{subtitle(preset.note) || meta || preset.id}</div>
+          {preset.note && meta ? <div className={styles.sub}>{meta}</div> : null}
+        </div>
+        <div className={styles.actions}>
+          <Button
+            variant={active ? 'outlined' : 'primary'}
+            size="s"
+            disabled={busyId === preset.id}
+            onClick={() => void togglePreset(preset)}
+          >
+            {active ? t('lorePresetDeactivate') : t('lorePresetActivate')}
+          </Button>
+          <button
+            type="button"
+            className={styles.iconAction}
+            title={t('lorePresetClone')}
+            aria-label={t('lorePresetClone')}
+            disabled={busyId === preset.id}
+            onClick={() => void clonePresetItem(preset)}
+          >
+            <IconCopyOutline16 />
+          </button>
+          <button
+            type="button"
+            className={styles.iconAction}
+            title={t('loreExport')}
+            aria-label={t('loreExport')}
+            disabled={busyId === preset.id}
+            onClick={() => void exportPresetItem(preset)}
+          >
+            <IconDownloadOutline16 />
+          </button>
+          <button
+            type="button"
+            className={styles.iconAction}
+            title={t('delete')}
+            aria-label={t('delete')}
+            onClick={() => setConfirmTarget({ kind: 'preset', item: preset })}
+          >
+            <IconTrashOutline16 />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const list = (
     <>
       <div className={styles.toolbar}>
         <input
           className={styles.searchInput}
           value={query}
-          placeholder={t('loreSearchPlaceholder')}
+          placeholder={
+            tab === 'presets' ? t('lorePresetSearchPlaceholder') : t('loreSearchPlaceholder')
+          }
           onChange={(event) => setQuery(event.target.value)}
         />
         <div className={styles.toolbarActions}>
@@ -448,7 +598,7 @@ const LoreContent = () => {
                 }}
               />
             </>
-          ) : (
+          ) : tab === 'worlds' ? (
             <>
               <Button
                 variant="outlined"
@@ -470,6 +620,30 @@ const LoreContent = () => {
                   const file = event.target.files?.[0]
                   if (file) {
                     void importWorldFile(file)
+                  }
+                  event.target.value = ''
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outlined"
+                size="m"
+                disabled={busyId === 'import'}
+                onClick={() => presetFile.current?.click()}
+              >
+                <IconUploadOutline14 /> {t('lorePresetImport')}
+              </Button>
+              <input
+                ref={presetFile}
+                className={styles.fileInput}
+                type="file"
+                accept=".json,.txt,application/json,text/plain"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) {
+                    void importPresetFile(file)
                   }
                   event.target.value = ''
                 }}
@@ -507,10 +681,23 @@ const LoreContent = () => {
             ) : null}
           </>
         )
-      ) : filteredWorlds.length === 0 ? (
-        <div className={styles.empty}>{t('loreMyWorldsEmpty')}</div>
+      ) : tab === 'worlds' ? (
+        filteredWorlds.length === 0 ? (
+          <div className={styles.empty}>{t('loreMyWorldsEmpty')}</div>
+        ) : (
+          <div className={styles.list}>{filteredWorlds.map(renderWorldCard)}</div>
+        )
       ) : (
-        <div className={styles.list}>{filteredWorlds.map(renderWorldCard)}</div>
+        <>
+          <div className={clsx(styles.hint, styles.presetHint)}>{t('lorePresetHint')}</div>
+          {filteredPresets.length === 0 ? (
+            <div className={styles.empty}>
+              {query.trim() ? t('loreEmpty') : t('lorePresetEmpty')}
+            </div>
+          ) : (
+            <div className={styles.list}>{filteredPresets.map(renderPresetCard)}</div>
+          )}
+        </>
       )}
     </>
   )
@@ -534,6 +721,22 @@ const LoreContent = () => {
         onSave={saveWorld}
       />
     ) : null
+
+  const confirmTitle = !confirmTarget
+    ? ''
+    : confirmTarget.kind === 'character'
+      ? t('loreDeleteTitle')
+      : confirmTarget.kind === 'world'
+        ? t('loreDeleteWorldTitle')
+        : t('lorePresetDeleteTitle')
+
+  const confirmDesc = !confirmTarget
+    ? ''
+    : confirmTarget.kind === 'character'
+      ? t('loreDeleteDesc', { name: confirmTarget.item.name })
+      : confirmTarget.kind === 'world'
+        ? t('loreDeleteWorldDesc', { name: confirmTarget.item.name })
+        : t('lorePresetDeleteDesc', { name: confirmTarget.item.name })
 
   return (
     <>
@@ -565,17 +768,23 @@ const LoreContent = () => {
             {t('loreWorlds')}
             <span className={styles.badge}>{worlds.length}</span>
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'presets'}
+            className={clsx(styles.navItem, tab === 'presets' && styles.navItemActive)}
+            onClick={() => switchTab('presets')}
+          >
+            {t('lorePresets')}
+            <span className={styles.badge}>{presets.length}</span>
+          </button>
         </div>
         <div className={styles.content}>{editor ?? list}</div>
       </Modal>
 
       {confirmTarget ? (
         <Modal
-          title={
-            confirmTarget.kind === 'character'
-              ? t('loreDeleteTitle')
-              : t('loreDeleteWorldTitle')
-          }
+          title={confirmTitle}
           closable
           onClose={() => setConfirmTarget(null)}
           footer={
@@ -589,11 +798,7 @@ const LoreContent = () => {
             </div>
           }
         >
-          <p>
-            {confirmTarget.kind === 'character'
-              ? t('loreDeleteDesc', { name: confirmTarget.item.name })
-              : t('loreDeleteWorldDesc', { name: confirmTarget.item.name })}
-          </p>
+          <p>{confirmDesc}</p>
         </Modal>
       ) : null}
     </>

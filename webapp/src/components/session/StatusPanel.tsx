@@ -102,7 +102,7 @@ const PanelBody = ({
   panels: StPanel[]
   statData: Record<string, unknown> | undefined
   options: MarkdownRenderOptions
-  scripts: RegexScript[] | undefined
+  scripts: readonly RegexScript[] | undefined
   /** 沙箱面板可读取的角色名/头像（抽屉在消息列表之外，需显式传入） */
   cardCharacter?: CardAppCharacter
   /** 面板沙箱的网络代理需要会话 id 计账 */
@@ -338,7 +338,7 @@ export const StatusPanelInline = ({
   netEnabled = false,
 }: {
   panels?: StPanel[]
-  scripts?: RegexScript[]
+  scripts?: readonly RegexScript[]
   /** 未启用 HTML 渲染时传 undefined，直接不渲染 */
   options?: MarkdownRenderOptions
   /** 该条消息自己的 stat_data 快照 */

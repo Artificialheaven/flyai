@@ -134,6 +134,10 @@
   &:hover {
     background-color: var(--dsw-alias-interactive-bg-hover);
   }
+
+  &.cardActive {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 
 .avatar {
@@ -202,6 +206,11 @@
   line-height: 18px;
 }
 
+.badgeActive {
+  background-color: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
 .actions {
   display: flex;
   flex-shrink: 0;
@@ -240,6 +249,10 @@
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 18px;
+}
+
+.presetHint {
+  padding: 2px 0 10px;
 }
 
 .error {

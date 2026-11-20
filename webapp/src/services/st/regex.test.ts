@@ -5,6 +5,7 @@ import {
   applyDisplayScriptsToUser,
   applyRegexScripts,
   compileRegexScripts,
+  mergeRegexScripts,
   renderVariableMacros,
   splitRegexLiteral,
   stripUpdateBlocks,
@@ -204,5 +205,31 @@ describe('applyDisplayScripts', () => {
       { findRegex: 'a', replaceString: 'c', placement: 2 },
     ]
     expect(applyDisplayScriptsToUser('a', scripts)).toBe('b')
+  })
+})
+
+describe('mergeRegexScripts', () => {
+  const globalScripts: RegexScript[] = [
+    { findRegex: '甲', replaceString: 'A', placement: 2 },
+  ]
+  const localScripts: RegexScript[] = [
+    { findRegex: 'A', replaceString: 'B', placement: 2 },
+  ]
+
+  it('预设脚本排在角色卡脚本之前，按顺序叠加执行', () => {
+    const merged = mergeRegexScripts(globalScripts, localScripts)
+    expect(merged).toEqual([...globalScripts, ...localScripts])
+    expect(applyDisplayScripts('甲', merged)).toBe('B')
+  })
+
+  it('空的一侧原样返回，保持数组引用稳定', () => {
+    expect(mergeRegexScripts(globalScripts, [])).toBe(globalScripts)
+    expect(mergeRegexScripts([], localScripts)).toBe(localScripts)
+    expect(mergeRegexScripts(undefined, localScripts)).toBe(localScripts)
+    expect(mergeRegexScripts(globalScripts, null)).toBe(globalScripts)
+  })
+
+  it('两侧皆空返回空数组', () => {
+    expect(mergeRegexScripts(undefined, [])).toEqual([])
   })
 })

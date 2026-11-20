@@ -354,8 +354,9 @@ async def run_agent_loop(
     自停/滚动压缩/安全点打断与干净停止；依赖 services 中的 loop_state、
     loop_compact、interrupt_hub、loop_settings 钩子（缺失时相应保护降级）。
     st_regex：酒馆正则脚本 prompt 侧上下文
-    ``{"by_character": {cid: [Script]}, "fallback": [Script]}``；对请求副本
-    应用（绝不改 history 中的原文），无效脚本已在编译期跳过。
+    ``{"by_character": {cid: [Script]}, "fallback": [Script], "extra": [Script]}``；
+    对请求副本应用（绝不改 history 中的原文），无效脚本已在编译期跳过。
+    ``extra`` 是启用预设附带的全局脚本，先于角色卡脚本执行，对全部消息生效。
     """
 
     registry.set_timeout(settings.timeout_seconds)
@@ -437,6 +438,7 @@ async def run_agent_loop(
                 by_character=st_regex.get("by_character") or {},
                 fallback=st_regex.get("fallback") or [],
                 side="prompt",
+                extra=st_regex.get("extra") or [],
             )
         # MVU：更新块只从出站副本剥离（存储原文保留给展示侧正则美化）
         if st_regex and st_regex.get("strip_updates"):

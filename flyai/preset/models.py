@@ -12,10 +12,13 @@
 
 from __future__ import annotations
 
+import copy
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
+
+from ..st.regex_scripts import sanitize_regex_scripts
 
 # 允许透传给 OpenAI 兼容 / Anthropic 提供商的采样参数
 SAMPLING_KEYS = (
@@ -84,6 +87,8 @@ class Preset:
     max_tokens: int = 0              # 回复 token 上限；0=不覆盖
     assistant_prefill: str = ""
     blocks: List[PresetBlock] = field(default_factory=list)
+    # 预设绑定正则（酒馆 Regex Preset Binder 写入 prompts 的 regexes-bindings）
+    regex_scripts: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -105,6 +110,7 @@ class Preset:
             "max_tokens": int(self.max_tokens or 0),
             "assistant_prefill": self.assistant_prefill or "",
             "blocks": [b.to_dict() for b in self.blocks],
+            "regex_scripts": copy.deepcopy(list(self.regex_scripts or [])),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -121,6 +127,7 @@ class Preset:
             assistant_prefill=str(d.get("assistant_prefill") or ""),
             blocks=[PresetBlock.from_dict(b) for b in (d.get("blocks") or [])
                     if isinstance(b, dict)],
+            regex_scripts=sanitize_regex_scripts(d.get("regex_scripts")),
             created_at=str(d.get("created_at") or ""),
             updated_at=str(d.get("updated_at") or ""),
         )

@@ -177,6 +177,33 @@ def test_apply_to_messages_no_scripts_returns_same_objects():
     assert out[0] is msg
 
 
+# ---- 预设级全局脚本（extra）：先于角色卡脚本 ----
+
+def test_extra_applies_before_character_scripts():
+    extra, _ = compile_scripts([{"findRegex": "/甲/g", "replaceString": "A"}])
+    own, _ = compile_scripts([{"findRegex": "/A/g", "replaceString": "B"}])
+    msg = Message(role="assistant", content="甲", character_id="c1")
+    out = apply_to_messages([msg], by_character={"c1": own}, extra=extra)
+    # 预设脚本先跑：甲→A，再跑卡脚本 A→B
+    assert out[0].content == "B"
+    assert msg.content == "甲"
+
+
+def test_extra_applies_to_unmapped_messages_and_keeps_original():
+    extra, _ = compile_scripts([{"findRegex": "/旧/g", "replaceString": "新"}])
+    first = Message(role="assistant", content="旧一", character_id="missing")
+    second = Message(role="assistant", content="旧二")
+    out = apply_to_messages([first, second], extra=extra)
+    assert [m.content for m in out] == ["新一", "新二"]
+    assert first.content == "旧一" and second.content == "旧二"
+
+
+def test_empty_extra_keeps_existing_behaviour():
+    msg = Message(role="assistant", content="保持")
+    out = apply_to_messages([msg], extra=[])
+    assert out[0] is msg
+
+
 # ---- 上限 ----
 
 def test_script_count_limit():

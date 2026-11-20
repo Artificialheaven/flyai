@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -54,10 +54,14 @@ class PresetPayload(BaseModel):
     max_tokens: int = 0
     assistant_prefill: str = ""
     blocks: List[PresetBlockPayload] = []
+    # None = 编辑时保留现有正则；显式 [] 才清空
+    regex_scripts: Optional[List[Dict[str, Any]]] = None
 
 
 def _build_preset(payload: PresetPayload, pid: str = "") -> Preset:
     data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    if data.get("regex_scripts") is None:
+        data["regex_scripts"] = []
     data["source"] = "flyai"
     if pid:
         data["id"] = pid
@@ -93,7 +97,11 @@ def update_preset(pid: str, payload: PresetPayload, request: Request):
     cur = sc.presets.get(pid)
     if cur is None:
         raise HTTPException(404, "预设不存在")
+    keep_regex = payload.regex_scripts is None
     p = _build_preset(payload, pid=pid)
+    if keep_regex:
+        # 旧客户端不发送该字段；编辑名称/块时不能把已导入的正则弄丢
+        p.regex_scripts = [dict(s) for s in (cur.regex_scripts or [])]
     p.source = cur.source  # 来源标记不因编辑改变
     p.created_at = cur.created_at
     sc.presets.save(p)
@@ -174,8 +182,9 @@ async def import_preset(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, "预设解析失败：%s" % e)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, "预设 JSON 解析失败：%s" % e)
-    if not p.blocks and not p.params and not p.assistant_prefill:
-        raise HTTPException(400, "预设里没有可用的参数或 prompt 块")
+    if (not p.blocks and not p.params and not p.assistant_prefill
+            and not p.regex_scripts):
+        raise HTTPException(400, "预设里没有可用的参数、prompt 块或正则")
     p.id = uuid.uuid4().hex
     sc.presets.save(p)
     return {"preset": p.to_dict(), "stats": stats}

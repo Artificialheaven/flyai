@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..tavern import render_tavern_macros
 from .models import Preset
+
+logger = logging.getLogger(__name__)
+
+
+def load_active_preset(sc) -> Optional[Preset]:
+    """读取该用户当前启用的预设；未启用/已删除/损坏一律返回 None（等于不使用）。"""
+    store = getattr(sc, "presets", None)
+    us = getattr(sc, "user_settings", None)
+    if store is None or us is None:
+        return None
+    pid = getattr(us, "active_preset_id", "") or ""
+    if not pid:
+        return None
+    try:
+        return store.get(pid)
+    except Exception:
+        logger.exception("启用预设读取失败")
+        return None
+
+
+def active_preset_regex_scripts(sc) -> List[Dict[str, Any]]:
+    """启用预设附带的原始正则脚本（已清洗）；是否生效由调用侧开关决定。"""
+    preset = load_active_preset(sc)
+    if preset is None:
+        return []
+    return list(getattr(preset, "regex_scripts", None) or [])
 
 
 @dataclass

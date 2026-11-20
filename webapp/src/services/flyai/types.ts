@@ -78,6 +78,8 @@ export type StPanel = {
 /** 会话打开时下发的酒馆扩展数据（GET /api/sessions/{sid}.st） */
 export type StPayload = {
   regex_scripts: RegexScript[]
+  /** 启用预设附带的全局正则；先于角色卡正则应用（展示开关关闭时为空） */
+  regex_scripts_global?: RegexScript[]
   by_character?: Record<string, RegexScript[]>
   panels?: StPanel[]
   html?: { enabled?: boolean; external_images?: boolean; image_proxy?: boolean }
@@ -198,6 +200,39 @@ export type World = {
   table: LoreEntry[]
   prompt_format: string
   prompt_tools: string
+}
+
+/** 预设 prompt 块（酒馆 prompt manager 概念）：main 并入系统提示、depth 插历史、tail 放在历史后 */
+export type PresetBlock = {
+  name: string
+  content: string
+  enabled: boolean
+  role: 'system' | 'user' | 'assistant'
+  position: 'main' | 'depth' | 'tail'
+  depth: number
+  insert_order: number
+  identifier: string
+}
+
+/** 模型预设：采样参数 + prompt 块 + assistant 前缀，按用户隔离 */
+export type Preset = {
+  id: string
+  name: string
+  note: string
+  source: 'tavern' | 'flyai'
+  params: Record<string, string | number>
+  max_tokens: number
+  assistant_prefill: string
+  blocks: PresetBlock[]
+  /** 预设绑定的酒馆正则（导入 regexes-bindings 块得到；启用即生效） */
+  regex_scripts?: RegexScript[]
+  created_at: string
+  updated_at: string
+}
+
+export type PresetImportResult = {
+  preset: Preset
+  stats: Record<string, unknown>
 }
 
 export type RoomMember = {
