@@ -90,6 +90,23 @@ def _parse_regex_bindings(content: Any) -> Tuple[list, bool]:
     return sanitize_regex_scripts(_extract_binding_scripts(data)), True
 
 
+def _dedupe_scripts(scripts: list) -> list:
+    """按完整内容去重，保留首次出现的顺序。
+
+    SPreset 等插件会把同一批正则同时写进 extensions.regex_scripts 和
+    regexes-bindings 块；两边都读时不希望脚本被执行两遍。
+    """
+    seen = set()
+    out = []
+    for script in scripts:
+        key = json.dumps(script, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(script)
+    return out
+
+
 class PresetImportError(ValueError):
     """预设格式无法识别。"""
 
@@ -167,11 +184,11 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
     stats = {"blocks": 0, "enabled": 0, "main": 0, "depth": 0, "tail": 0,
              "skipped": 0, "prefill": 0, "regex_scripts": 0, "regex_invalid": 0}
     prefill = ""
-    regex_scripts: list = []
+    binding_scripts: list = []
     prompts = data.get("prompts")
+    nested = data.get("chatCompletionSettings")
     if not isinstance(prompts, list):
         # 部分导出把完整设置收在 chatCompletionSettings 里
-        nested = data.get("chatCompletionSettings")
         if isinstance(nested, dict) and isinstance(nested.get("prompts"), list):
             prompts = nested["prompts"]
     if not isinstance(prompts, list):
@@ -185,7 +202,7 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
             if not ok:
                 stats["regex_invalid"] += 1
             else:
-                regex_scripts.extend(scripts)
+                binding_scripts.extend(scripts)
             # 绑定块不是 prompt，绝不能注入上下文
             continue
         if not (raw.get("content") or "").strip():
@@ -207,14 +224,29 @@ def preset_from_dict(data: Dict[str, Any], name: str = "") -> Tuple[Preset, Dict
     if not prefill and (data.get("assistant_prefill") or "").strip():
         prefill = str(data["assistant_prefill"]).strip()
         stats["prefill"] = 1
-    # 非插件格式的预设：顶层直接带 regex_scripts
-    if not regex_scripts and data.get("regex_scripts") is not None:
-        scripts, ok = _parse_regex_bindings(data.get("regex_scripts"))
+    # 酒馆新版把预设正则存在 extensions.regex_scripts（原样导出或收在
+    # chatCompletionSettings 里）；旧版插件写 regexes-bindings 块；再兜底
+    # 顶层 regex_scripts（非插件格式）。extensions 是权威来源，排在最前。
+    raw_sources: list = []
+    for doc in (data, nested):
+        if not isinstance(doc, dict):
+            continue
+        ext = doc.get("extensions")
+        if isinstance(ext, dict) and ext.get("regex_scripts") is not None:
+            raw_sources.append(ext.get("regex_scripts"))
+    raw_sources.extend(binding_scripts)
+    if data.get("regex_scripts") is not None:
+        raw_sources.append(data.get("regex_scripts"))
+    elif isinstance(nested, dict) and nested.get("regex_scripts") is not None:
+        raw_sources.append(nested.get("regex_scripts"))
+    regex_scripts: list = []
+    for value in raw_sources:
+        scripts, ok = _parse_regex_bindings(value)
         if not ok:
             stats["regex_invalid"] += 1
         else:
             regex_scripts.extend(scripts)
-    regex_scripts = sanitize_regex_scripts(regex_scripts)
+    regex_scripts = _dedupe_scripts(sanitize_regex_scripts(regex_scripts))
     stats["regex_scripts"] = len(regex_scripts)
 
     p = Preset(

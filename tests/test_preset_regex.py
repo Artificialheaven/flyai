@@ -17,8 +17,10 @@ from fastapi import HTTPException
 
 from flyai.api.routes_preset import (
     PresetPayload,
+    RegexFlagPayload,
     create_preset,
     import_preset,
+    toggle_preset_regex,
     update_preset,
 )
 from flyai.api.routes_session import _st_payload
@@ -131,6 +133,50 @@ def test_import_top_level_regex_scripts_and_nested_prompts():
     assert len(p.blocks) == 1
 
 
+def test_import_extensions_regex_scripts():
+    """酒馆新版预设把正则存在 extensions.regex_scripts（仓鼠之神格式）。"""
+    doc = {
+        "name": "ext",
+        "prompts": [_prompt("main", "主")],
+        "extensions": {"regex_scripts": _SCRIPTS + [
+            {"scriptName": "关", "findRegex": "/丙/g", "replaceString": "C",
+             "disabled": True},
+        ]},
+    }
+    p, stats = preset_from_text(json.dumps(doc))
+    assert [s["findRegex"] for s in p.regex_scripts] == ["/甲/g", "/乙/g", "/丙/g"]
+    assert p.regex_scripts[2]["disabled"] is True
+    assert stats["regex_scripts"] == 3
+
+
+def test_import_extensions_nested_in_chat_completion_settings():
+    doc = {
+        "prompts": [_prompt("main", "主")],
+        "chatCompletionSettings": {
+            "extensions": {"regex_scripts": _SCRIPTS},
+        },
+    }
+    p, _ = preset_from_text(json.dumps(doc))
+    assert len(p.regex_scripts) == 2
+
+
+def test_import_dedupes_extensions_and_binding_block():
+    """同一批正则同时出现在 extensions 与绑定块时只保留一份。"""
+    doc = _preset_doc(json.dumps(_SCRIPTS))
+    doc["extensions"] = {"regex_scripts": _SCRIPTS}
+    p, stats = preset_from_text(json.dumps(doc))
+    assert p.regex_scripts == _SCRIPTS
+    assert stats["regex_scripts"] == 2
+
+
+def test_import_dedupe_keeps_disabled_variant():
+    """内容不同（如 disabled 不同）的脚本不是重复项。"""
+    doc = _preset_doc(json.dumps(_SCRIPTS))
+    doc["extensions"] = {"regex_scripts": [_SCRIPTS[0], dict(_SCRIPTS[1], disabled=True)]}
+    p, _ = preset_from_text(json.dumps(doc))
+    assert len(p.regex_scripts) == 3
+
+
 def test_envelope_roundtrip_keeps_regex():
     p = Preset(name="往返", regex_scripts=_SCRIPTS)
     text = json.dumps(preset_to_envelope(p))
@@ -203,6 +249,44 @@ def test_api_put_preserves_regex_when_omitted(tmp_path):
     cleared = update_preset(pid, PresetPayload(name="清空", regex_scripts=[]),
                             env.request)
     assert cleared["regex_scripts"] == []
+
+
+def test_api_toggle_single_regex(tmp_path):
+    env = _env(tmp_path)
+    created = create_preset(PresetPayload(name="p", regex_scripts=_SCRIPTS),
+                            env.request)
+    pid = created["id"]
+    out = toggle_preset_regex(pid, 1, RegexFlagPayload(disabled=True), env.request)
+    assert out["regex_scripts"][1]["disabled"] is True
+    assert "disabled" not in out["regex_scripts"][0]
+    # 落盘
+    stored = env.store.get(pid)
+    assert stored.regex_scripts[1]["disabled"] is True
+
+    back = toggle_preset_regex(pid, 1, RegexFlagPayload(disabled=False), env.request)
+    assert back["regex_scripts"][1]["disabled"] is False
+    # 其余字段不丢
+    assert back["regex_scripts"][1]["findRegex"] == "/乙/g"
+
+
+def test_api_toggle_regex_out_of_range(tmp_path):
+    env = _env(tmp_path)
+    created = create_preset(PresetPayload(name="p", regex_scripts=_SCRIPTS),
+                            env.request)
+    pid = created["id"]
+    for idx in (-1, 2):
+        with pytest.raises(HTTPException) as e:
+            toggle_preset_regex(pid, idx, RegexFlagPayload(disabled=True),
+                                env.request)
+        assert e.value.status_code == 404
+
+
+def test_api_toggle_regex_missing_preset(tmp_path):
+    env = _env(tmp_path)
+    with pytest.raises(HTTPException) as e:
+        toggle_preset_regex("nope", 0, RegexFlagPayload(disabled=True),
+                            env.request)
+    assert e.value.status_code == 404
 
 
 # ---- 展示侧下发 ----

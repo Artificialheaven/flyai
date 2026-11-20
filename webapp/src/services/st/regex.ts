@@ -28,6 +28,27 @@ export type CompiledRegexScript = {
 
 export type RegexSide = 'display' | 'prompt'
 
+/** 正则实际生效的侧：两个 only 标记同时为真时两侧都被排除 */
+export type RegexScriptSideInfo = 'prompt' | 'display' | 'both' | 'inactive'
+
+export const regexScriptSide = (
+  raw: RegexScript | null | undefined
+): RegexScriptSideInfo => {
+  if (!raw || typeof raw !== 'object') {
+    return 'inactive'
+  }
+  if (raw.markdownOnly && raw.promptOnly) {
+    return 'inactive'
+  }
+  if (raw.promptOnly) {
+    return 'prompt'
+  }
+  if (raw.markdownOnly) {
+    return 'display'
+  }
+  return 'both'
+}
+
 const MAX_SCRIPTS = 200
 const MAX_PATTERN = 64 * 1024
 const MAX_OUTPUT = 2 * 1024 * 1024

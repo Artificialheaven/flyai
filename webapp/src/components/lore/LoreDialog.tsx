@@ -29,9 +29,11 @@ import {
   importPreset,
   listPresets,
   setActivePreset,
+  setPresetRegexDisabled,
 } from '../../services/flyai/presets.js'
 import type { Character, Preset, World } from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
+import { regexScriptSide } from '../../services/st/regex.js'
 import { openingOptions } from '../room/openingEntries.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
@@ -41,6 +43,7 @@ import {
   IconDownloadOutline16,
   IconEditOutline16,
   IconNewChatOutline20,
+  IconSettingsOutline16,
   IconTrashOutline16,
   IconUploadOutline14,
 } from '../base/icons.js'
@@ -83,6 +86,8 @@ const LoreContent = () => {
   const [busyId, setBusyId] = useState('')
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [regexTarget, setRegexTarget] = useState<Preset | null>(null)
+  const [regexBusy, setRegexBusy] = useState(-1)
   const charFile = useRef<HTMLInputElement>(null)
   const worldFile = useRef<HTMLInputElement>(null)
   const presetFile = useRef<HTMLInputElement>(null)
@@ -256,6 +261,27 @@ const LoreContent = () => {
     run(preset.id, async () => {
       await exportPreset(preset)
     })
+
+  /** 正则开关接口返回整份预设：列表与打开的弹窗同步替换 */
+  const applyPresetUpdate = (updated: Preset) => {
+    setPresets((list) => list.map((p) => (p.id === updated.id ? updated : p)))
+    setRegexTarget((cur) => (cur && cur.id === updated.id ? updated : cur))
+  }
+
+  const toggleRegex = async (index: number, disabled: boolean) => {
+    if (!regexTarget || regexBusy >= 0) {
+      return
+    }
+    setRegexBusy(index)
+    try {
+      const updated = await setPresetRegexDisabled(regexTarget.id, index, disabled)
+      applyPresetUpdate(updated)
+    } catch (err) {
+      showToast(t('loreActionFailed', { message: errorText(err) }))
+    } finally {
+      setRegexBusy(-1)
+    }
+  }
 
   const importPresetFile = async (file: File) => {
     setBusyId('import')
@@ -525,6 +551,17 @@ const LoreContent = () => {
           >
             {active ? t('lorePresetDeactivate') : t('lorePresetActivate')}
           </Button>
+          {(preset.regex_scripts?.length ?? 0) > 0 ? (
+            <button
+              type="button"
+              className={styles.iconAction}
+              title={t('lorePresetRegexManage')}
+              aria-label={t('lorePresetRegexManage')}
+              onClick={() => setRegexTarget(preset)}
+            >
+              <IconSettingsOutline16 />
+            </button>
+          ) : null}
           <button
             type="button"
             className={styles.iconAction}
@@ -738,6 +775,25 @@ const LoreContent = () => {
         ? t('loreDeleteWorldDesc', { name: confirmTarget.item.name })
         : t('lorePresetDeleteDesc', { name: confirmTarget.item.name })
 
+  const regexSideLabel = (script: { markdownOnly?: boolean; promptOnly?: boolean }): string => {
+    const side = regexScriptSide(script)
+    if (side === 'prompt') {
+      return t('lorePresetRegexSidePrompt')
+    }
+    if (side === 'display') {
+      return t('lorePresetRegexSideDisplay')
+    }
+    if (side === 'both') {
+      return t('lorePresetRegexSideBoth')
+    }
+    return t('lorePresetRegexSideInactive')
+  }
+
+  const regexPreview = (find: unknown): string => {
+    const text = typeof find === 'string' ? find.replace(/\s+/g, ' ') : ''
+    return text.length > 80 ? `${text.slice(0, 80)}…` : text
+  }
+
   return (
     <>
       <Modal
@@ -799,6 +855,65 @@ const LoreContent = () => {
           }
         >
           <p>{confirmDesc}</p>
+        </Modal>
+      ) : null}
+
+      {regexTarget ? (
+        <Modal
+          title={t('lorePresetRegexTitle', {
+            name: regexTarget.name || regexTarget.id,
+          })}
+          closable
+          className={styles.regexDialog}
+          mainClassName={styles.regexScroll}
+          onClose={() => setRegexTarget(null)}
+          footer={
+            <div className={styles.editorActions}>
+              <Button variant="outlined" size="m" onClick={() => setRegexTarget(null)}>
+                {t('close')}
+              </Button>
+            </div>
+          }
+        >
+          <div className={clsx(styles.hint, styles.regexHint)}>
+            {t('lorePresetRegexHint')}
+          </div>
+          {(regexTarget.regex_scripts?.length ?? 0) === 0 ? (
+            <div className={styles.empty}>{t('lorePresetRegexEmpty')}</div>
+          ) : (
+            <div className={styles.regexList}>
+              {(regexTarget.regex_scripts ?? []).map((script, index) => {
+                const off = Boolean(script.disabled)
+                const rawName = typeof script.scriptName === 'string' ? script.scriptName.trim() : ''
+                const name = rawName || t('lorePresetRegexUnnamed')
+                return (
+                  <div
+                    className={clsx(styles.regexRow, off && styles.regexRowOff)}
+                    key={index}
+                  >
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={!off}
+                      aria-label={t('lorePresetRegexToggle', { name })}
+                      className={clsx(styles.regexSwitch, !off && styles.regexSwitchOn)}
+                      disabled={regexBusy >= 0}
+                      onClick={() => void toggleRegex(index, !off)}
+                    >
+                      <span className={styles.regexKnob} />
+                    </button>
+                    <div className={styles.regexInfo}>
+                      <div className={styles.regexNameLine}>
+                        <span className={styles.regexName}>{name}</span>
+                        <span className={styles.regexSide}>{regexSideLabel(script)}</span>
+                      </div>
+                      <code className={styles.regexFind}>{regexPreview(script.findRegex)}</code>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </Modal>
       ) : null}
     </>

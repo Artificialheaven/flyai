@@ -6,6 +6,7 @@ import {
   applyRegexScripts,
   compileRegexScripts,
   mergeRegexScripts,
+  regexScriptSide,
   renderVariableMacros,
   splitRegexLiteral,
   stripUpdateBlocks,
@@ -231,5 +232,21 @@ describe('mergeRegexScripts', () => {
 
   it('两侧皆空返回空数组', () => {
     expect(mergeRegexScripts(undefined, [])).toEqual([])
+  })
+})
+
+describe('regexScriptSide', () => {
+  it('按 markdownOnly / promptOnly 归类生效侧', () => {
+    expect(regexScriptSide({ findRegex: 'a' })).toBe('both')
+    expect(regexScriptSide({ findRegex: 'a', markdownOnly: true })).toBe('display')
+    expect(regexScriptSide({ findRegex: 'a', promptOnly: true })).toBe('prompt')
+    expect(
+      regexScriptSide({ findRegex: 'a', markdownOnly: true, promptOnly: true })
+    ).toBe('inactive')
+  })
+
+  it('空值返回 inactive', () => {
+    expect(regexScriptSide(null)).toBe('inactive')
+    expect(regexScriptSide(undefined)).toBe('inactive')
   })
 })

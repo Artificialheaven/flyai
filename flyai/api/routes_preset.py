@@ -21,6 +21,7 @@ from ..preset.tavern import (
     preset_from_text,
     preset_to_envelope,
 )
+from ..st.regex_scripts import sanitize_regex_scripts
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
@@ -106,6 +107,28 @@ def update_preset(pid: str, payload: PresetPayload, request: Request):
     p.created_at = cur.created_at
     sc.presets.save(p)
     return p.to_dict()
+
+
+class RegexFlagPayload(BaseModel):
+    disabled: bool
+
+
+@router.put("/{pid}/regex/{index}")
+def toggle_preset_regex(pid: str, index: int, payload: RegexFlagPayload,
+                        request: Request):
+    """按列表下标开关预设内单条正则（不改动其余字段）。"""
+    sc = _sc(request)
+    _safe_pid(pid)
+    cur = sc.presets.get(pid)
+    if cur is None:
+        raise HTTPException(404, "预设不存在")
+    scripts = [dict(s) for s in (cur.regex_scripts or [])]
+    if index < 0 or index >= len(scripts):
+        raise HTTPException(404, "正则不存在")
+    scripts[index]["disabled"] = bool(payload.disabled)
+    cur.regex_scripts = sanitize_regex_scripts(scripts)
+    sc.presets.save(cur)
+    return cur.to_dict()
 
 
 @router.delete("/{pid}")
