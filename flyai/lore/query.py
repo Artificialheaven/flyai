@@ -157,12 +157,16 @@ class LoreQuerier:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[: int(top_k or 4)]
 
-    async def trigger_block(self, text: str, embedder=None) -> str:
+    async def trigger_block(self, text: str, embedder=None, *,
+                            char_name: str = "", user_name: str = "",
+                            group_names: Optional[List[str]] = None,
+                            variables: Optional[Dict[str, Any]] = None) -> str:
         """扫描本轮用户消息，返回自动注入的【相关设定】块（无命中返回 ""）。
 
         关键词/模糊命中优先；配了 embedder 时再用语义检索补足至多
         SEMANTIC_TOP_UP 条关键词未命中的相关条目。pinned 条目不参与
-        （已由常驻块注入）。
+        （已由常驻块注入）。条目内容与触发词都会按当前角色/用户/MVU 变量
+        渲染，保证模型看到的键名与提示词一致。
         """
         text = (text or "").strip()
         if not text:
@@ -171,12 +175,23 @@ class LoreQuerier:
             (KIND_CHARACTER, self.character.table if self.character else []),
             (KIND_WORLD, self.world.table if self.world else []),
         ]
-        picked = _trigger.keyword_hits(tables, text)
+        from ..tavern import render_name_macros
+
+        def _render_key(value: str) -> str:
+            return render_name_macros(
+                value, char_name=char_name, user_name=user_name,
+                group_names=group_names,
+            )
+
+        picked = _trigger.keyword_hits(tables, text, _render_key)
         if embedder is not None and len(picked) < _trigger.MAX_TRIGGER_ENTRIES:
             picked.extend(
                 await self._semantic_triggers(tables, text, embedder, picked)
             )
-        return _trigger.render_trigger_block(_trigger.dedupe(picked))
+        return _trigger.render_trigger_block(
+            _trigger.dedupe(picked), char_name=char_name,
+            user_name=user_name, group_names=group_names, variables=variables,
+        )
 
     def depth_block_specs(self, rng=None) -> List[Dict[str, Any]]:
         """收集 pinned + position="depth" 的角色/世界条目（酒馆 @depth 注入）。
@@ -287,10 +302,30 @@ class PromptOptions:
     variables: Optional[Dict[str, Any]] = None
 
 
+def _prompt_renderer(character: Optional[Character], opts: PromptOptions):
+    """构建本会话统一的卡内文本宏渲染器（角色/用户名、群名、MVU 变量）。"""
+    from ..tavern import render_tavern_macros
+
+    char_name = getattr(character, "name", "") if character else ""
+    user_name = opts.user_character.name if opts.user_character else ""
+
+    def _render(text: str) -> str:
+        return render_tavern_macros(
+            text or "",
+            char_name=char_name,
+            user_name=user_name,
+            group_names=opts.audience or [],
+            variables=opts.variables,
+        )
+
+    return _render
+
+
 def build_prompt(character: Optional[Character], world: Optional[World], opts: PromptOptions) -> str:
     """把角色卡 + 世界观（含常驻条目/范例/预算截断）并入系统提示词。"""
     rp = opts.roleplay
     parts: List[str] = []
+    render = _prompt_renderer(character, opts)
 
     if character:
         parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
@@ -298,14 +333,18 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
             character.table, "角色常驻资料", rp,
             variables=opts.variables, char_name=character.name,
             user_name=(opts.user_character.name if opts.user_character else ""),
+            group_names=opts.audience or [],
         )
         if pinned:
             parts.append(pinned)
         if character.intro:
-            parts.append(f"【角色简介】\n{fit_budget(character.intro, _budget(rp, 'intro_chars'))}")
+            parts.append(
+                f"【角色简介】\n{fit_budget(render(character.intro), _budget(rp, 'intro_chars'))}"
+            )
         if character.background:
             parts.append(
-                f"【角色经历】\n{fit_budget(character.background, _budget(rp, 'background_chars'))}"
+                f"【角色经历】\n"
+                f"{fit_budget(render(character.background), _budget(rp, 'background_chars'))}"
             )
         example = _mes_example_block(character, opts)
         if example:
@@ -318,18 +357,21 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
         # 无角色卡：回退到通用 AI 助手人格，不使用扮演口吻
         parts.append(GENERAL_ASSISTANT_PROMPT)
 
-    persona = _persona_block(opts.user_character)
+    persona = _persona_block(opts.user_character, render)
     if persona:
         parts.append(persona)
 
     if world and world.content:
-        parts.append(f"【世界观】\n{fit_budget(world.content, _budget(rp, 'world_chars'))}")
+        parts.append(
+            f"【世界观】\n{fit_budget(render(world.content), _budget(rp, 'world_chars'))}"
+        )
     if world:
         wpinned = _pinned_block(
             world.table, "世界常驻设定", rp,
             variables=opts.variables,
             char_name=(character.name if character else ""),
             user_name=(opts.user_character.name if opts.user_character else ""),
+            group_names=opts.audience or [],
         )
         if wpinned:
             parts.append(wpinned)
@@ -369,11 +411,11 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
 
     # 角色卡自定义的系统级提示词（高优先级系统指令）
     if character and character.system_prompt and character.system_prompt.strip():
-        parts.append(f"【系统提示】\n{character.system_prompt.strip()}")
+        parts.append(f"【系统提示】\n{render(character.system_prompt.strip())}")
 
     # 无角色卡也无世界观时：以有用助手身份回答，不注入扮演格式/工具要求
     if character or world:
-        req = _requirements_block(character, world, rp)
+        req = _requirements_block(character, world, rp, render)
         if req:
             parts.append(req)
 
@@ -402,20 +444,20 @@ def _pinned_block(
     variables: Optional[Dict[str, Any]] = None,
     char_name: str = "",
     user_name: str = "",
+    group_names: Optional[List[str]] = None,
 ) -> Optional[str]:
     """渲染钉选条目为常驻块；无钉选返回 None。
 
-    variables 非 None 时（MVU 会话）展开条目内的酒馆宏（含
-    ``{{format_message_variable::stat_data.*}}``）；None 保持原样。
+    variables 非 None 时（MVU 会话）完整展开条目内的酒馆宏（含
+    ``{{format_message_variable::stat_data.*}}``）；非 MVU 会话只展开
+    角色/用户名并剥 EJS，``{{random}}`` 等保持原样，避免重复求值。
     """
     def _render(text: str) -> str:
-        if variables is None:
-            return text
-        from ..tavern import render_tavern_macros
+        from ..tavern import render_card_text
 
-        return render_tavern_macros(
+        return render_card_text(
             text or "", char_name=char_name, user_name=user_name or "用户",
-            variables=variables,
+            group_names=group_names or [], variables=variables,
         )
 
     blocks = [
@@ -508,19 +550,21 @@ def build_member_system_prompt(
     )
 
 
-def _persona_block(user_character: Optional[Character]) -> Optional[str]:
+def _persona_block(user_character: Optional[Character],
+                   render=None) -> Optional[str]:
     """组装「用户扮演的自设（persona）」提示片段。无自设返回 None。"""
     if user_character is None:
         return None
     name = user_character.name or "用户"
+    render = render or (lambda text: text or "")
     lines = [
         f"【你对话的用户】用户正在扮演角色「{name}」，把自己当作这个人物本身来对待："
         f"把用户所说的话都当作「{name}」说的，始终用「{name}」称呼他，并围绕他扮演的这一人物展开互动。"
     ]
     if user_character.intro:
-        lines.append(f"【用户简介】\n{user_character.intro}")
+        lines.append(f"【用户简介】\n{render(user_character.intro)}")
     if user_character.background:
-        lines.append(f"【用户经历】\n{user_character.background}")
+        lines.append(f"【用户经历】\n{render(user_character.background)}")
     try:
         if user_character.attributes:
             import json
@@ -537,6 +581,7 @@ def _requirements_block(
     character: Optional[Character],
     world: Optional[World],
     roleplay: Optional[RoleplaySettings],
+    render=None,
 ) -> Optional[str]:
     """组装「对白格式要求 + 工具使用要求」。
 
@@ -544,23 +589,24 @@ def _requirements_block(
     - 对白格式：取角色卡的 prompt_format，其次内置 format_instruction（需 format_enabled）。
     - 工具使用：取角色卡 → 世界观 → 内置 tool_instruction（内置需 format_enabled）。
     """
+    render = render or (lambda text: text or "")
     blocks: List[str] = []
 
     fmt = None
     if character and character.prompt_format and character.prompt_format.strip():
-        fmt = character.prompt_format.strip()
+        fmt = render(character.prompt_format.strip())
     elif roleplay and roleplay.format_enabled and roleplay.format_instruction:
-        fmt = roleplay.format_instruction.strip()
+        fmt = render(roleplay.format_instruction.strip())
     if fmt:
         blocks.append(f"【对白格式要求】\n{fmt}")
 
     tools = None
     if character and character.prompt_tools and character.prompt_tools.strip():
-        tools = character.prompt_tools.strip()
+        tools = render(character.prompt_tools.strip())
     elif world and world.prompt_tools and world.prompt_tools.strip():
-        tools = world.prompt_tools.strip()
+        tools = render(world.prompt_tools.strip())
     elif roleplay and roleplay.format_enabled and roleplay.tool_instruction:
-        tools = roleplay.tool_instruction.strip()
+        tools = render(roleplay.tool_instruction.strip())
     if tools:
         blocks.append(f"【工具使用要求】\n{tools}")
 

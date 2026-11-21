@@ -8,7 +8,7 @@
  */
 
 import clsx from 'clsx'
-import { useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMobile } from '../../app/viewport.js'
 import {
@@ -35,6 +35,7 @@ import {
   CardAppHostContext,
   type CardAppHost,
 } from '../markdown/CardAppFrame.js'
+import { MarkdownMacroNamesContext } from '../markdown/Markdown.js'
 import {
   MarkdownRenderOptionsContext,
   SanitizedHtml,
@@ -113,6 +114,7 @@ const PanelBody = ({
   runScripts?: boolean
 }) => {
   const t = useTranslate()
+  const macroNames = useContext(MarkdownMacroNamesContext)
   const htmlEnabled = options.htmlEnabled
   const cardVariables = useMemo(
     () => (statData ? { stat_data: statData } : undefined),
@@ -140,7 +142,9 @@ const PanelBody = ({
     const variables = { stat_data: statData }
     return panels
       .map((panel) => {
-        const html = renderPanel(panel.token, scripts, variables)
+        const html = renderPanel(
+          panel.token, scripts, variables, macroNames
+        )
         return {
           key: panel.token,
           title: (panel.title || '').trim() || t('statusPanelTitle'),
@@ -148,7 +152,7 @@ const PanelBody = ({
         }
       })
       .filter((item) => item.html.trim())
-  }, [htmlEnabled, statData, panels, scripts, t])
+  }, [htmlEnabled, statData, panels, scripts, macroNames, t])
   const rows = useMemo(() => (statData ? statDataRows(statData) : []), [statData])
 
   if (rendered.length > 0) {
@@ -328,7 +332,13 @@ export const StatusPanelDrawer = ({
   )
 }
 
-/** 开关 C：在每条助手回复下方追加该消息快照对应的面板 */
+/**
+ * 开关 C：在每条助手回复下方追加该消息快照对应的面板。
+ *
+ * `always` 用于最后一条助手消息：卡内应用依赖模型主动输出占位符，模型漏写时
+ * 消息正文里就不会出现面板；宿主在这里按该消息自己的 stat_data 快照补一份，
+ * 保证「当前状态」总是可见（不改变历史消息的显示行为）。
+ */
 export const StatusPanelInline = ({
   panels,
   scripts,
@@ -336,6 +346,7 @@ export const StatusPanelInline = ({
   statData,
   sessionId,
   netEnabled = false,
+  always = false,
 }: {
   panels?: StPanel[]
   scripts?: readonly RegexScript[]
@@ -347,9 +358,16 @@ export const StatusPanelInline = ({
   sessionId?: string
   /** 卡片网络代理开关；与聊天正文卡片保持一致 */
   netEnabled?: boolean
+  /** 即使未开启「自动追加」也为该消息渲染面板（最后一条消息使用） */
+  always?: boolean
 }) => {
   const autoAppend = usePanelPrefs((state) => state.autoAppend)
-  if (!autoAppend || !options?.htmlEnabled || !hasData(statData) || !panels?.length) {
+  if (
+    !(autoAppend || always) ||
+    !options?.htmlEnabled ||
+    !hasData(statData) ||
+    !panels?.length
+  ) {
     return null
   }
   return (

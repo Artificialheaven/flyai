@@ -11,9 +11,11 @@
  * token；CSP 默认 `connect-src 'none'`，卡内脚本无法把数据外传。
  */
 
-// 内置 jQuery（MIT，见 vendor/README.md）：卡片引用 jQuery 时内联注入，
-// 断网或 CDN 被屏蔽也能初始化脚本。
+// 内置 jQuery / lodash（MIT，见 vendor/README.md）：卡片引用时内联注入，
+// 断网或 CDN 被屏蔽也能初始化脚本。酒馆主界面本来就带 lodash 全局 `_`，
+// 大量卡内应用直接 `_.get(stat_data, …)`，缺了会在 render 里直接抛错。
 import JQUERY_SOURCE from './vendor/jquery-3.6.0.min.js?raw'
+import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
 
 /** 正则引擎在替换结果外层加的哨兵；U+0000 不会出现在正常文本里 */
 export const APP_START = '\u0000FLYAI_APP_START\u0000'
@@ -423,6 +425,30 @@ export const needsJQuery = (html: string): boolean => {
 export const stripJQueryTags = (html: string): string => {
   JQUERY_TAG_RE.lastIndex = 0
   return html.replace(JQUERY_TAG_RE, '')
+}
+
+const LODASH_TAG_RE =
+  /<script\b[^>]*\bsrc\s*=\s*["'][^"']*lodash[^"']*["'][^>]*>\s*<\/script\s*>/gi
+// `_.get(…)` / `_(…)` / `lodash.get(…)`；前面排除单词字符，
+// 避免把 `snake_case`、`foo_bar` 这类普通标识符误判成 lodash。
+const LODASH_HINT_RE = /(^|[^\w$])_(?:\s*\.\s*[A-Za-z_$]|\s*\()|\blodash\s*\./
+
+/**
+ * 卡片是否需要 lodash：显式引用 lodash 的 `<script src>`，或脚本里直接用了
+ * `_` / `lodash`。酒馆主界面自带 lodash 全局，卡内应用默认按它存在来写。
+ */
+export const needsLodash = (html: string): boolean => {
+  LODASH_TAG_RE.lastIndex = 0
+  if (LODASH_TAG_RE.test(html)) {
+    return true
+  }
+  return LODASH_HINT_RE.test(html)
+}
+
+/** 去掉卡片自己的 lodash CDN 标签，避免与内置版本重复加载/联网 */
+export const stripLodashTags = (html: string): string => {
+  LODASH_TAG_RE.lastIndex = 0
+  return html.replace(LODASH_TAG_RE, '')
 }
 
 /** 以内联脚本嵌入任意 JS 源码；`</script` 做防御性转义 */
@@ -1527,7 +1553,7 @@ export type CardAppDocOptions = {
 
 /**
  * 组装 iframe 的 srcDoc：注入 CSP 与 shim，并保证 shim 先于卡内脚本执行。
- * 卡片引用 jQuery 时先内联内置版本，再移除卡片自己的 CDN 标签。
+ * 卡片引用 jQuery / lodash 时先内联内置版本，再移除卡片自己的 CDN 标签。
  * 缺 `<html>` 的片段会被补成完整文档。
  */
 export const buildCardAppDoc = (
@@ -1542,6 +1568,10 @@ export const buildCardAppDoc = (
   if (withJQuery) {
     doc = stripJQueryTags(doc)
   }
+  const withLodash = needsLodash(doc)
+  if (withLodash) {
+    doc = stripLodashTags(doc)
+  }
   if (!/<html[\s>]/i.test(doc)) {
     doc = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${doc}</body></html>`
   }
@@ -1553,6 +1583,14 @@ export const buildCardAppDoc = (
       avatarOrigin ? [avatarOrigin] : []
     )}">` +
     (withJQuery ? inlineScript(JQUERY_SOURCE) : '') +
+    // lodash 全局 `_`：包在函数作用域里，避免卡内声明同名变量时冲突；
+    // 卡片自己已经定义了 `_` 时不覆盖。
+    (withLodash
+      ? inlineScript(
+          `(function(){${LODASH_SOURCE}\n` +
+            `if (typeof window._ === 'undefined') window._ = __lodashVendor;})();`
+        )
+      : '') +
     `<script>${buildCardAppShim(
       options.message,
       options.variables,

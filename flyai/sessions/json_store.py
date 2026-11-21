@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from ..config import PROJECT_ROOT
 from ..ids import safe_child
@@ -100,6 +101,7 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         },
         mode=data.get("mode", "normal") or "normal",
         opening_entry=data.get("opening_entry", "") or "",
+        greeting_index=int(data.get("greeting_index", 0) or 0),
         galgame=data.get("galgame", {}) or {},
         galgame_tts=data.get("galgame_tts", {}) or {},
         max_tokens=int(data.get("max_tokens", 0) or 0),
@@ -129,6 +131,7 @@ def session_to_dict(session: Session) -> Dict:
         "context_warned": session.context_warned or {},
         "mode": session.mode,
         "opening_entry": session.opening_entry or "",
+        "greeting_index": int(getattr(session, "greeting_index", 0) or 0),
         "galgame": session.galgame or {},
         "galgame_tts": session.galgame_tts or {},
         "max_tokens": int(session.max_tokens or 0),
@@ -141,6 +144,10 @@ class JsonSessionStore(SessionStore):
     def __init__(self, base_dir: Path = None):
         self._dir = base_dir or (PROJECT_ROOT / "data" / "sessions")
         self._dir.mkdir(parents=True, exist_ok=True)
+        # 列表摘要缓存：路径 -> ((mtime_ns, size), 摘要 dict / None=解析失败)。
+        # 只缓存列表用的轻量摘要，正文与图片每次仍从磁盘读（get 必须是最新）。
+        self._summary_lock = threading.RLock()
+        self._summary_cache: Dict[str, Tuple[Tuple[int, int], Optional[Dict]]] = {}
 
     def _path(self, sid: str) -> Path:
         # 外部 id 直接拼文件名：穿越/分隔符/.. 在这里收口（路由层另有 400 预检）
@@ -186,31 +193,59 @@ class JsonSessionStore(SessionStore):
         # (文件 mtime_ns, session)：updated_at 只有秒级精度，同秒内保存的会话
         # 靠纳秒 mtime 分出真实先后，避免顺序随 glob 结果翻转
         entries = []
+        live_paths = set()
         for p in self._dir.glob("*.json"):
+            key = str(p)
             try:
-                mtime_ns = p.stat().st_mtime_ns
-                with open(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                s = Session(
-                    id=data.get("id", p.stem),
-                    title=data.get("title", "新会话"),
-                    provider_id=data.get("provider_id", ""),
-                    created_at=data.get("created_at", ""),
-                    updated_at=data.get("updated_at", ""),
-                    messages=[],
-                    pinned=bool(data.get("pinned", False)),
-                    mode=data.get("mode", "normal") or "normal",
-                    token_usage=dict(data.get("token_usage") or {}),
-                    message_count=_count_messages(data),
-                )
-            except Exception:
+                st = p.stat()
+            except OSError:
                 continue
-            entries.append((mtime_ns, s))
+            stamp = (st.st_mtime_ns, st.st_size)
+            live_paths.add(key)
+            with self._summary_lock:
+                cached = self._summary_cache.get(key)
+            if cached is not None and cached[0] == stamp:
+                summary = cached[1]
+            else:
+                summary = self._read_summary(p)
+                with self._summary_lock:
+                    self._summary_cache[key] = (stamp, summary)
+            if summary is None:
+                continue
+            entries.append((st.st_mtime_ns, dict(summary)))
+        # 删除磁盘上已不存在的会话缓存，避免改名/删除后无限增长
+        with self._summary_lock:
+            for key in [k for k in self._summary_cache if k not in live_paths]:
+                del self._summary_cache[key]
         # 先按落盘时间倒序，再以稳定排序把置顶提至最前
         entries.sort(key=lambda e: e[0], reverse=True)
-        out = [s for _, s in entries]
+        out = []
+        for _, summary in entries:
+            summary["messages"] = []
+            out.append(Session(**summary))
         out.sort(key=lambda s: not s.pinned)
         return out
+
+    @staticmethod
+    def _read_summary(p: Path) -> Optional[Dict]:
+        """读取列表摘要；解析失败返回 None（也会被缓存，坏文件不再反复解析）。"""
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "id": data.get("id", p.stem),
+                "title": data.get("title", "新会话"),
+                "provider_id": data.get("provider_id", ""),
+                "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
+                "pinned": bool(data.get("pinned", False)),
+                "mode": data.get("mode", "normal") or "normal",
+                "token_usage": dict(data.get("token_usage") or {}),
+                "message_count": _count_messages(data),
+            }
+        except Exception:
+            return None
+
 
     def save(self, session: Session) -> None:
         session.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -220,9 +255,16 @@ class JsonSessionStore(SessionStore):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, p)
+        self._forget(p)
 
     def delete(self, sid: str) -> None:
-        self._path(sid).unlink(missing_ok=True)
+        p = self._path(sid)
+        p.unlink(missing_ok=True)
+        self._forget(p)
+
+    def _forget(self, path: Path) -> None:
+        with self._summary_lock:
+            self._summary_cache.pop(str(path), None)
 
     def clear(self, sid: str) -> None:
         s = self.get(sid)

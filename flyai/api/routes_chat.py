@@ -351,6 +351,20 @@ def _st_regex_map(sc, character_ids) -> Dict[str, list]:
     return out
 
 
+def _render_card_text(text, character, user_char, group_names=None,
+                      variables=None) -> str:
+    """角色卡文本（PHI 等）统一宏渲染：与系统提示词使用同一组名字/变量。"""
+    from ..tavern import render_tavern_macros
+
+    return render_tavern_macros(
+        text or "",
+        char_name=getattr(character, "name", "") or "",
+        user_name=(getattr(user_char, "name", "") if user_char else ""),
+        group_names=group_names or [],
+        variables=variables,
+    )
+
+
 def _lore_depth_specs(querier, character, user_char, last_message,
                       group_names=None, variables=None) -> List[dict]:
     """世界书/角色表的 @depth 常驻条目 + 卡级 depth_prompt：宏替换后返回注入规格。
@@ -1195,7 +1209,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     from ..st import mvu as st_mvu
 
     mvu_on = st_mvu.mvu_active(character, _us, state.config)
-    if st_mvu.ensure_session_state(session, character):
+    _mvu_user_name = str(getattr(user_char, "name", "") or "") if user_char else ""
+    if st_mvu.ensure_session_state(session, character,
+                                   user_name=_mvu_user_name):
         sc.store.save_merged(session)
     mvu_vars = (
         dict((session.mvu or {}).get("stat_data") or {}) if mvu_on else None
@@ -1245,6 +1261,12 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     services["usage_meter"] = metering.make_usage_meter(state, sc)
     if character or world:
         services["lore"] = _get_querier(sc, character, world)
+    services["macro_ctx"] = {
+        "char_name": getattr(character, "name", "") or "",
+        "user_name": getattr(user_char, "name", "") if user_char else "",
+        "group_names": [],
+        "variables": mvu_vars,
+    }
     # 图生图自动取参考图：让工具扫历史
     services["history"] = session.messages
     # web_fetch 分页缓存
@@ -1369,6 +1391,10 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 try:
                     lore_block = await services["lore"].trigger_block(
                         req.message or "", services.get("embedder"),
+                        char_name=getattr(character, "name", "") or "",
+                        user_name=getattr(user_char, "name", "") if user_char else "",
+                        group_names=[],
+                        variables=mvu_vars,
                     )
                 except Exception:
                     logger.exception("内容表触发词注入失败")
@@ -1391,12 +1417,16 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 user_name=getattr(user_char, "name", "") if user_char else "",
                 group_names=[],
                 last_message=req.message or "",
+                variables=mvu_vars,
             )
             system_extra = injected
             if rendered_preset.main_text:
                 system_extra += "\n\n" + rendered_preset.main_text
             phi_parts = [
-                getattr(character, "post_history_instructions", "") or "",
+                _render_card_text(
+                    getattr(character, "post_history_instructions", "") or "",
+                    character, user_char, group_names=[], variables=mvu_vars,
+                ),
                 rendered_preset.tail_text,
             ]
             phi = "\n\n".join(p for p in phi_parts if p.strip())
@@ -1455,6 +1485,14 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 extra_tools=loop_extras,
                 loop_ctx=loop_ctx,
                 st_regex=st_regex,
+                macro_ctx={
+                    "char_name": getattr(character, "name", "") or "",
+                    "user_name": (
+                        getattr(user_char, "name", "") if user_char else ""
+                    ),
+                    "group_names": [],
+                    "variables": mvu_vars,
+                },
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -1959,7 +1997,11 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     break
             mvu_on = mvu_char is not None
             mvu_char_id = str(getattr(mvu_char, "id", "") or "")
-            if st_mvu.ensure_session_state(session, mvu_char):
+            _mvu_user_name = (
+                str(getattr(user_char, "name", "") or "") if user_char else ""
+            )
+            if st_mvu.ensure_session_state(session, mvu_char,
+                                           user_name=_mvu_user_name):
                 sc.store.save_merged(session)
             mvu_vars = (
                 dict((session.mvu or {}).get("stat_data") or {}) if mvu_on else None
@@ -2036,6 +2078,14 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 services["usage_meter"] = metering.make_usage_meter(state, sc)
                 if char or world:
                     services["lore"] = _get_querier(sc, char, world)
+                services["macro_ctx"] = {
+                    "char_name": getattr(char, "name", "") or spk.name,
+                    "user_name": (
+                        getattr(user_char, "name", "") if user_char else ""
+                    ),
+                    "group_names": others,
+                    "variables": spk_vars,
+                }
                 # 图生图自动取参考图：让工具能扫该窗口历史
                 services["history"] = history
                 # web_fetch 分页缓存
@@ -2139,6 +2189,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     try:
                         lore_block = await services["lore"].trigger_block(
                             req.message or "", services.get("embedder"),
+                            char_name=getattr(char, "name", "") or spk.name,
+                            user_name=(
+                                getattr(user_char, "name", "") if user_char else ""
+                            ),
+                            group_names=others,
+                            variables=spk_vars,
                         )
                     except Exception:
                         logger.exception("内容表触发词注入失败")
@@ -2166,13 +2222,18 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     user_name=getattr(user_char, "name", "") if user_char else "",
                     group_names=others,
                     last_message=req.message or "",
+                    variables=spk_vars,
                 )
                 preset_sys = (
                     "\n\n" + rendered_preset.main_text
                     if rendered_preset.main_text else ""
                 )
                 preset_phi_parts = [
-                    getattr(char, "post_history_instructions", "") or "",
+                    _render_card_text(
+                        getattr(char, "post_history_instructions", "") or "",
+                        char, user_char, group_names=others,
+                        variables=spk_vars,
+                    ),
                     rendered_preset.tail_text,
                 ]
                 preset_phi = "\n\n".join(
@@ -2268,6 +2329,17 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             loop_ctx if spk is speakers[0] else None
                         ),
                         st_regex=spk_st_regex,
+                        macro_ctx={
+                            "char_name": (
+                                getattr(char, "name", "") or spk.name
+                            ),
+                            "user_name": (
+                                getattr(user_char, "name", "")
+                                if user_char else ""
+                            ),
+                            "group_names": others,
+                            "variables": spk_vars,
+                        },
                     ):
                         if ev == "done":
                             done_data = data
@@ -2580,6 +2652,24 @@ async def memory_snapshot(rid: str, request: Request,
         default_provider = None
         _snap_us = getattr(sc, "user_settings", None)
         snap_tools = feature_prefs.effective_tool_settings(state.config, _snap_us)
+        # P4 MVU：存档同样按载体卡渲染常驻条目/PHI（不写状态，只读当前快照）
+        from ..st import mvu as st_mvu
+
+        carrier = st_mvu.carrier_character(session, sc.lore)
+        if carrier is not None and st_mvu.ensure_session_state(
+            session, carrier,
+            user_name=(getattr(user_char, "name", "") if user_char else ""),
+        ):
+            sc.store.save_merged(session)
+        mvu_on = bool(
+            carrier is not None
+            and st_mvu.mvu_active(carrier, _snap_us, state.config)
+        )
+        carrier_id = str(getattr(carrier, "id", "") or "") if carrier else ""
+        state_vars = (
+            dict((session.mvu or {}).get("stat_data") or {})
+            if mvu_on else None
+        )
         # 存档只需要内容表/记忆类 base 工具，不暴露联网/绘图等用户功能
         _snap_registry = getattr(state, "registry", None)
         snap_allowed = (
@@ -2588,6 +2678,11 @@ async def memory_snapshot(rid: str, request: Request,
         )
         for spk in speakers:
             char = opening_character(session, member_character(spk, sc.lore))
+            spk_vars = (
+                state_vars
+                if (mvu_on and str(getattr(char, "id", "") or "") == carrier_id)
+                else None
+            )
             if (spk.provider_id or "").strip():
                 spk_provider = _resolve_visible_provider(
                     state, sc, spk.provider_id)
@@ -2626,11 +2721,20 @@ async def memory_snapshot(rid: str, request: Request,
                 base=DEFAULT_SYSTEM_PROMPT,
                 roleplay=feature_prefs.effective_roleplay(state.config, _snap_us),
                 user_character=user_char,
+                variables=spk_vars,
             ) + _SNAPSHOT_DIRECTIVE
 
             services = {}
             if char or world:
                 services["lore"] = _get_querier(sc, char, world)
+            services["macro_ctx"] = {
+                "char_name": getattr(char, "name", "") or spk.name,
+                "user_name": (
+                    getattr(user_char, "name", "") if user_char else ""
+                ),
+                "group_names": [n for n in audience_names if n != spk.name],
+                "variables": spk_vars,
+            }
             services["store"] = sc.store
             services["session"] = session
             services["member"] = spk
@@ -2661,9 +2765,22 @@ async def memory_snapshot(rid: str, request: Request,
                 services=services,
                 actor=spk.id,
                 allowed_tools=snap_allowed,
-                post_history_instructions=getattr(
-                    char, "post_history_instructions", ""
-                ) or "",
+                post_history_instructions=_render_card_text(
+                    getattr(char, "post_history_instructions", "") or "",
+                    char, user_char,
+                    group_names=[n for n in audience_names if n != spk.name],
+                    variables=spk_vars,
+                ),
+                macro_ctx={
+                    "char_name": getattr(char, "name", "") or spk.name,
+                    "user_name": (
+                        getattr(user_char, "name", "") if user_char else ""
+                    ),
+                    "group_names": [
+                        n for n in audience_names if n != spk.name
+                    ],
+                    "variables": spk_vars,
+                },
                 uid=sc.uid,
                 level=sc.level,
                 is_admin=(sc.uid == ADMIN_UID),

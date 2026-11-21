@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request, HTTPException
@@ -224,16 +225,29 @@ def create_room(body: RoomCreate, request: Request):
         # 与 update_member 换座后的同步规则保持一致。
         s.character_id = cid
         s.character_override = None
+        # 持久化选择：备用问候里的内联 <InitVar> 也要参与 MVU 初始化
+        s.greeting_index = int(body.greeting_index or 0)
         greeting = _pick_greeting(ch, body.greeting_index)
         if greeting:
             from ..lore.query import substitute_chat_macros
             from ..schemas import Message
+            from ..st import mvu as st_mvu
 
-            greeting = substitute_chat_macros(greeting, ch.name, "你")
-            s.threads[0].messages.append(
-                Message(role="assistant", content=greeting,
-                        actor_id=seat.id, character_id=cid or "")
-            )
+            # 与提示词侧宏回退一致：房间创建时没有用户 persona，用户名是“用户”
+            user_name = "用户"
+            greeting = substitute_chat_macros(greeting, ch.name, user_name)
+            msg = Message(role="assistant", content=greeting,
+                          actor_id=seat.id, character_id=cid or "")
+            cfg = getattr(request.app.state.flyai, "config", None)
+            us = getattr(sc, "user_settings", None)
+            if st_mvu.mvu_active(ch, us, cfg):
+                st_mvu.ensure_session_state(s, ch, user_name="")
+                cur = dict((s.mvu or {}).get("stat_data") or {})
+                cur, _applied, _warns = st_mvu.apply_updates(cur, greeting)
+                s.mvu["stat_data"] = cur
+                # 开场白里的更新块同样落快照，后续 recompute 才不会回退
+                msg.stat_data = copy.deepcopy(cur)
+            s.threads[0].messages.append(msg)
     sc.store.save(s)
     return _session_dict(
         s, with_messages=True, lore=sc.lore,

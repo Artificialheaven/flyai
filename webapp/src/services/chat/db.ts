@@ -1,4 +1,4 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction } from 'idb'
 import { toSessionSummary, type Session, type SessionSummary } from './types.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
@@ -123,20 +123,55 @@ export const renameSession = async (id: string, title: string): Promise<void> =>
   ])
 }
 
+type ChatTx = IDBPTransaction<ChatDB, ['sessions', 'sessionSummaries', 'files'], 'readwrite'>
+
+/** 在一个事务里删除若干会话、摘要，并回收不再被任何摘要引用的原件。 */
+const removeSessionsTx = async (tx: ChatTx, ids: readonly string[]): Promise<void> => {
+  const summaries = tx.objectStore('sessionSummaries')
+  for (const id of ids) {
+    const summary = await summaries.get(id)
+    await tx.objectStore('sessions').delete(id)
+    await summaries.delete(id)
+    for (const fileId of summary?.fileIds ?? []) {
+      if ((await summaries.index('fileIds').count(fileId)) === 0) {
+        await tx.objectStore('files').delete(fileId)
+      }
+    }
+  }
+}
+
 /** 删除会话，仅清理已无会话引用的本地原件；远端文件不删。 */
 export const deleteSession = async (sessionId: string): Promise<void> => {
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
   await Promise.all([
     (async () => {
       try {
-        const summaries = tx.objectStore('sessionSummaries')
-        const summary = await summaries.get(sessionId)
-        await tx.objectStore('sessions').delete(sessionId)
-        await summaries.delete(sessionId)
-        for (const id of summary?.fileIds ?? []) {
-          if ((await summaries.index('fileIds').count(id)) === 0) {
-            await tx.objectStore('files').delete(id)
-          }
+        await removeSessionsTx(tx, [sessionId])
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
+}
+
+/**
+ * 按服务端列表清理本地缓存：删除服务端已不存在的会话与无引用原件。
+ * 只在列表请求成功后调用；历史上「导入」的数据写完暂存即丢弃（见 replaceHistory），
+ * 正式表只会有服务端回读写穿的快照，不会误删用户数据。
+ */
+export const pruneCachedSessions = async (validIds: ReadonlySet<string>): Promise<number> => {
+  const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
+  let removed = 0
+  await Promise.all([
+    (async () => {
+      try {
+        const keys = await tx.objectStore('sessions').getAllKeys()
+        const stale = keys.filter((key) => !validIds.has(key))
+        removed = stale.length
+        if (stale.length > 0) {
+          await removeSessionsTx(tx, stale)
         }
       } catch (error) {
         abortTransaction(tx)
@@ -145,6 +180,50 @@ export const deleteSession = async (sessionId: string): Promise<void> => {
     })(),
     tx.done,
   ])
+  return removed
+}
+
+/**
+ * 本地缓存的归属标记：换账号或缓存结构升级时整体清空，避免把上一个账号的
+ * 会话/图片渲染给下一个账号，或读到不兼容的旧 Session 结构。
+ */
+const CACHE_OWNER_KEY = 'flyai-chat-cache-owner'
+const CACHE_VERSION = 'v1'
+let ownerMemo: string | null = null
+
+const readOwner = (): string | null => {
+  try {
+    return localStorage.getItem(CACHE_OWNER_KEY) ?? ownerMemo
+  } catch {
+    return ownerMemo
+  }
+}
+
+const writeOwner = (value: string): void => {
+  ownerMemo = value
+  try {
+    localStorage.setItem(CACHE_OWNER_KEY, value)
+  } catch {
+    // 隐私模式等无法写入时只保留内存标记，本次会话不再重复清库。
+  }
+}
+
+/** 当前登录用户与缓存版本一致时直接返回；否则清空会话/摘要/原件与导入暂存。 */
+export const syncCacheOwner = async (uid: string): Promise<void> => {
+  const owner = `${uid || 'anon'}:${CACHE_VERSION}`
+  if (readOwner() === owner) {
+    return
+  }
+  const stores = [
+    'sessions',
+    'sessionSummaries',
+    'files',
+    'sessionsStaging',
+    'filesStaging',
+  ] as const
+  const tx = (await getDB()).transaction(stores, 'readwrite')
+  await Promise.all([...stores.map((name) => tx.objectStore(name).clear()), tx.done])
+  writeOwner(owner)
 }
 
 const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {

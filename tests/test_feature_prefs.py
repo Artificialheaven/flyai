@@ -199,6 +199,17 @@ def test_self_memory_flag_roundtrip_in_user_settings():
     assert UserSettings.from_dict(legacy).self_memory_enabled is False
 
 
+def test_real_time_flag_roundtrip_in_user_settings():
+    """真实时间默认关；落盘/反序列化保持个人选择，老文件缺键回退关闭。"""
+    assert UserSettings().real_time_enabled is False
+    saved = UserSettings(real_time_enabled=True).to_dict()
+    assert saved["real_time_enabled"] is True
+    assert UserSettings.from_dict(saved).real_time_enabled is True
+    legacy = UserSettings().to_dict()
+    legacy.pop("real_time_enabled", None)
+    assert UserSettings.from_dict(legacy).real_time_enabled is False
+
+
 def test_category_map_covers_registered_feature_tools():
     """防漏网：app 注册的全部功能工具名都必须在类别表里（tts 除外也行，已登记）。"""
     from flyai.app import AppState

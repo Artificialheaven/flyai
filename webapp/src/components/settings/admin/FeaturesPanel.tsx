@@ -45,6 +45,7 @@ type FormState = {
   galgame: TriValue
   galgameLoops: string
   selfMemory: boolean
+  realTime: boolean
   stRegexPrompt: TriValue
   stRegexDisplay: TriValue
   stHtml: TriValue
@@ -104,6 +105,7 @@ const toForm = (settings: Awaited<ReturnType<typeof getMySettings>>): FormState 
   galgame: tri(settings.galgame_enabled),
   galgameLoops: optText(settings.galgame_max_loops),
   selfMemory: Boolean(settings.self_memory_enabled),
+  realTime: Boolean(settings.real_time_enabled),
   stRegexPrompt: tri(settings.st_regex_prompt_enabled),
   stRegexDisplay: tri(settings.st_regex_display_enabled),
   stHtml: tri(settings.st_html_enabled),
@@ -193,6 +195,7 @@ export const FeaturesPanel = () => {
       galgame_enabled: triBool(form.galgame),
       galgame_max_loops: optional(ints.galgame_max_loops),
       self_memory_enabled: form.selfMemory,
+      real_time_enabled: form.realTime,
       st_regex_prompt_enabled: triBool(form.stRegexPrompt),
       st_regex_display_enabled: triBool(form.stRegexDisplay),
       st_html_enabled: triBool(form.stHtml),
@@ -269,6 +272,12 @@ export const FeaturesPanel = () => {
               desc={t('featuresSelfMemoryDesc')}
               checked={form.selfMemory}
               onChange={(checked) => patch({ selfMemory: checked })}
+            />
+            <SwitchRow
+              label={t('featuresRealTime')}
+              desc={t('featuresRealTimeDesc')}
+              checked={form.realTime}
+              onChange={(checked) => patch({ realTime: checked })}
             />
             <SwitchRow
               label={t('featuresLoreAutoInject')}

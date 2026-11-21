@@ -319,6 +319,7 @@ async def run_agent_loop(
     extra_tools: Optional[List["Tool"]] = None,
     loop_ctx: Optional[LoopContext] = None,
     st_regex: Optional[Dict[str, Any]] = None,
+    macro_ctx: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -417,6 +418,18 @@ async def run_agent_loop(
 
     def build_request(loop_notice: str = "", idle_nudge: bool = False):
         """组装单轮请求消息与工具 specs（超长重试时按最新历史重建）。"""
+        macro_render = None
+        if macro_ctx:
+            from ..tavern import render_card_text
+
+            def macro_render(text: str) -> str:
+                return render_card_text(
+                    text,
+                    char_name=macro_ctx.get("char_name", "") or "",
+                    user_name=macro_ctx.get("user_name", "") or "",
+                    group_names=macro_ctx.get("group_names") or [],
+                    variables=macro_ctx.get("variables"),
+                )
         # extra_tools 为请求级自定义工具（每用户独立，不进全局注册表）；
         # 仅在非空时传 extras，保持对精简测试注册表（无该形参）的兼容
         if not settings.enabled:
@@ -439,6 +452,7 @@ async def run_agent_loop(
                 fallback=st_regex.get("fallback") or [],
                 side="prompt",
                 extra=st_regex.get("extra") or [],
+                render=macro_render,
             )
         # MVU：更新块只从出站副本剥离（存储原文保留给展示侧正则美化）
         if st_regex and st_regex.get("strip_updates"):

@@ -194,3 +194,27 @@ async def test_trigger_block_embedder_failure_falls_back_to_keywords():
     q = _querier(char_entries=[LoreEntry("铁剑", "寒铁铸造", keys=["铁剑"])])
     block = await q.trigger_block("我的铁剑", _TriggerEmbedder(fail=True))
     assert "『铁剑』" in block
+
+
+# ---- 宏渲染：触发条目也要按当前角色/用户/MVU 变量展开 ----
+
+def test_render_trigger_block_expands_name_and_variable_macros():
+    e = LoreEntry(
+        "{{char}}的资料",
+        "{{user}}的体力={{format_message_variable::stat_data.体力}}",
+    )
+    out = trigger.render_trigger_block(
+        [("character", e)],
+        char_name="零号", user_name="小明",
+        variables={"stat_data": {"体力": 9}},
+    )
+    assert "零号的资料" in out
+    assert "小明的体力=9" in out
+    assert "{{" not in out
+
+
+def test_entry_triggers_expands_name_macros_for_matching():
+    e = LoreEntry("", "", keys=["{{user}}"])
+    assert trigger.entry_triggers(
+        e, lambda s: s.replace("{{user}}", "小明")
+    ) == ["小明"]

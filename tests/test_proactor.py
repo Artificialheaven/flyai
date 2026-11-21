@@ -54,6 +54,7 @@ from flyai.tools.proactor_tools import (
     RememberSelfTool,
 )
 from flyai.tools.registry import ToolRegistry
+from flyai.user import UserSettings
 
 ZONE = clock.get_zone("Asia/Shanghai")
 
@@ -721,6 +722,15 @@ def test_build_live_block_sections_and_limit(tmp_path):
     assert block.count("\n- #") <= 10  # 约定上限 10 条
 
 
+def test_build_live_block_without_clock():
+    assert live_ctx.build_live_block(
+        now=NOW, tzname="Asia/Shanghai", include_clock=False) == ""
+    block = live_ctx.build_live_block(
+        now=NOW, tzname="Asia/Shanghai", include_clock=False,
+        mood_view={"mood": 50.0, "dims": {}})
+    assert "【现在时刻】" not in block and "【当前心情】50/100" in block
+
+
 def test_render_for_turn_gates_and_degrades(tmp_path):
     config = AppConfig()
     config.mood.enabled = True
@@ -744,11 +754,19 @@ def test_render_for_turn_gates_and_degrades(tmp_path):
     assert "内心独白·只宣布一次" in block
     assert "拿铁" in block and "【未结约定】" in block
     assert live_ctx.had_pending_announce(block)
+    # 默认不向模型提供真实时间
+    assert "【现在时刻】" not in block
     # 空 query 不出自我记忆段；无 character_id 不出心情段
     block2 = _run(live_ctx.render_for_turn(
         state, sc, session_id="s1", character_id="", query="", now=NOW))
     assert "【当前心情】" not in block2 and "我的自我记忆" not in block2
-    assert "【现在时刻】" in block2  # 时钟行始终保留
+    assert "【现在时刻】" not in block2
+    # 个人打开「真实时间」后时钟行恢复
+    sc_on = SimpleNamespace(
+        uid="admin", user_settings=UserSettings(real_time_enabled=True))
+    block3 = _run(live_ctx.render_for_turn(
+        state, sc_on, session_id="s1", character_id="", query="", now=NOW))
+    assert "【现在时刻】" in block3
 
 
 def test_had_pending_announce_marker():

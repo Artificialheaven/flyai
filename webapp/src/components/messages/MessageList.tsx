@@ -12,6 +12,7 @@ import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
 import { mergeRegexScripts } from '../../services/st/regex.js'
 import { CardAppCharacterContext } from '../markdown/CardAppFrame.js'
+import { MarkdownMacroNamesContext } from '../markdown/Markdown.js'
 import { AssistantMessage } from './AssistantMessage.js'
 import { ScrollToBottomContext } from './scrollContext.js'
 import { TombstoneNotice } from './TombstoneNotice.js'
@@ -201,6 +202,18 @@ export const MessageList = ({
     const avatar = session.characterAvatar
     return name || avatar ? { name, avatar } : undefined
   }, [session.characterName, session.characterAvatar])
+  // 展示侧正则替换串里的 {{char}}/{{user}}/{{group}}
+  const macroNames = useMemo(
+    () => ({
+      char: session.characterName,
+      user: session.userName,
+      group: (session.members ?? [])
+        .filter((member) => !member.is_user)
+        .map((member) => member.name)
+        .filter(Boolean),
+    }),
+    [session.characterName, session.userName, session.members]
+  )
   // 卡片能力由后端按管理员配置 + 用户开关 + 权限等级算好；缺省全部关闭。
   // 会话缓存里的 st 对象保持稳定，因此能力的引用也不变，消息组件 memo 有效。
   const cardFeatures = useMemo<CardAppCapabilities>(
@@ -216,8 +229,9 @@ export const MessageList = ({
   // 群聊窗口由后端按座位分别应答，暂不支持编辑/重新生成；只读会话同理。
   const editable = !session.readOnly && session.threadKind !== 'group'
   return (
-    <ScrollToBottomContext.Provider value={scrollToBottom}>
-      <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
+    <MarkdownMacroNamesContext.Provider value={macroNames}>
+      <ScrollToBottomContext.Provider value={scrollToBottom}>
+        <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
         <div ref={isMobile ? scrollRef : undefined} className={styles.scroll}>
           <CardAppCharacterContext.Provider value={cardCharacter}>
             <div ref={contentRef} className={styles.column}>
@@ -271,6 +285,7 @@ export const MessageList = ({
         </div>
         {footer}
       </div>
-    </ScrollToBottomContext.Provider>
+      </ScrollToBottomContext.Provider>
+    </MarkdownMacroNamesContext.Provider>
   )
 }

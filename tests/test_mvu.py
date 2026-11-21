@@ -506,3 +506,71 @@ def test_render_tavern_macros_variables():
     )
     # 未提供 variables 时变量宏按未知宏剥除，且不影响其它文本
     assert render_tavern_macros(text) == "体力="
+
+
+# ---- InitVar 宏与旧会话迁移 ----
+
+
+def test_load_init_var_expands_user_char_macros():
+    content = "{{user}}:\n  累计: 0\n属性:\n  {{char}}: 1\n"
+    state, warnings = mvu.load_init_var(
+        [{"title": "[InitVar]", "content": content}],
+        char_name="零号", user_name="小明",
+    )
+    assert warnings == []
+    assert state["小明"] == {"累计": 0}
+    assert state["属性"] == {"零号": 1}
+
+    # 与提示词侧一致：缺省回退成 用户/角色
+    fallback, _ = mvu.load_init_var(
+        [{"title": "[InitVar]", "content": content}]
+    )
+    assert "用户" in fallback
+    assert fallback["属性"] == {"角色": 1}
+
+
+def test_build_initial_state_expands_user_macro():
+    card = _card(table=[{
+        "title": "[InitVar]",
+        "content": "{{user}}:\n  累计核销金额: 0\n",
+    }])
+    state, _ = mvu.build_initial_state(card, user_name="小明")
+    assert state["stat_data"] == {"小明": {"累计核销金额": 0}}
+    fallback, _ = mvu.build_initial_state(card)
+    assert fallback["stat_data"] == {"用户": {"累计核销金额": 0}}
+
+
+def test_ensure_session_state_migrates_macro_keys_and_replays_updates():
+    card = _mvu_card()
+    s = Session()
+    assert mvu.ensure_session_state(s, card) is True
+    # 模拟旧版本留下的字面量宏键
+    s.mvu["initial"] = {"{{user}}": {"累计": 0}}
+    s.mvu["stat_data"] = {"{{user}}": {"累计": 0}}
+    msg = Message(
+        role="assistant", character_id=card.id,
+        content=(
+            "<UpdateVariable><JSONPatch>"
+            '[{"op": "delta", "path": "/用户/累计", "value": 5}]'
+            "</JSONPatch></UpdateVariable>"
+        ),
+    )
+    s.messages = [msg]
+
+    assert mvu.ensure_session_state(s, card) is True
+    assert s.mvu["initial"] == {"用户": {"累计": 0}}
+    assert s.mvu["stat_data"] == {"用户": {"累计": 5}}
+    assert msg.stat_data == {"用户": {"累计": 5}}
+    # 迁移幂等
+    assert mvu.ensure_session_state(s, card) is False
+
+
+def test_selected_greeting_is_used_for_inline_init_var():
+    card = _card(
+        first_mes="<InitVar>\na: 1\n</InitVar>",
+        alternate_greetings=["<InitVar>\na: 2\n</InitVar>"],
+    )
+    text = mvu.selected_greeting(card, 1)
+    state, warnings = mvu.build_initial_state(card, first_mes=text)
+    assert warnings == []
+    assert state["stat_data"] == {"a": 2}

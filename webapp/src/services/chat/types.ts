@@ -209,6 +209,8 @@ export type Session = {
   /** 会话绑定的角色（单 AI 房间的顶层镜像；群聊时取第一个 AI 座位） */
   characterId?: string
   characterName?: string
+  /** 用户 persona 名（无 persona 时为“用户”），展示侧展开 {{user}} 用 */
+  userName?: string
   characterAvatar?: string
   /** 绑定世界观 */
   worldId?: string

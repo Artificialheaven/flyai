@@ -1,9 +1,9 @@
-import { memo, useMemo } from 'react'
+import { createContext, memo, useContext, useMemo } from 'react'
 import type { Source } from '../../services/chat/view.js'
 import type { RegexScript } from '../../services/flyai/types.js'
 import { toMdAst } from '../../services/markdown/parse.js'
 import { extractCardApps } from '../../services/st/cardApp.js'
-import { applyDisplayScripts } from '../../services/st/regex.js'
+import { applyDisplayScripts, type MacroNames } from '../../services/st/regex.js'
 import { useScrollToBottom } from '../messages/scrollContext.js'
 import { MarkdownAstRenderer } from './MarkdownAstRenderer.js'
 import { CardAppVariablesContext } from './CardAppFrame.js'
@@ -22,6 +22,11 @@ const DISABLED_OPTIONS: MarkdownRenderOptions = {
   imageProxy: false,
   jsSandbox: false,
 }
+
+/** 展示侧 {{char}}/{{user}}/{{group}} 展开用的当前会话名字。 */
+export const MarkdownMacroNamesContext = createContext<MacroNames | undefined>(
+  undefined
+)
 
 /**
  * 渲染链路：节流 → 酒馆展示侧正则 → 解析 AST → 渲染。
@@ -57,10 +62,14 @@ export const Markdown = memo(function Markdown({
   stVariables?: Record<string, unknown>
 }) {
   const scrollToBottom = useScrollToBottom()
+  const macroNames = useContext(MarkdownMacroNamesContext)
   const throttledMarkdown = useThrottleMarkdownRender(content, loading)
   const displayMarkdown = useMemo(
-    () => applyDisplayScripts(throttledMarkdown, stScripts, stDepth, stVariables),
-    [throttledMarkdown, stScripts, stDepth, stVariables]
+    () =>
+      applyDisplayScripts(throttledMarkdown, stScripts, stDepth, stVariables, {
+        macroNames,
+      }),
+    [throttledMarkdown, stScripts, stDepth, stVariables, macroNames]
   )
   // 展示正则会产出带脚本的整页 HTML：抽成占位符，交给 cardApp 节点渲染
   const extracted = useMemo(() => extractCardApps(displayMarkdown), [displayMarkdown])

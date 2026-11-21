@@ -313,6 +313,9 @@ def test_make_client_proxy():
 def test_make_client_no_proxy():
     c = mod._make_client(_settings(proxy=""))
     try:
-        assert not c._mounts
+        # httpx 0.28 无代理时也会挂 http:// / https:// 直连 mount，
+        # 代理则是 all:// 通配 mount，按 pattern 判断更稳
+        patterns = [getattr(k, "pattern", None) for k in c._mounts]
+        assert "all://" not in patterns
     finally:
         asyncio.run(c.aclose())

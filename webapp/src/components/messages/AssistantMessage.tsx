@@ -74,7 +74,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   stHtml?: MarkdownRenderOptions
   /** MVU 变量快照：展开展示侧的变量宏 */
   stVariables?: Record<string, unknown>
-  /** 卡内状态面板模板；开启「自动追加」时在该消息下方渲染自身快照 */
+  /**
+   * 卡内状态面板模板；开启「自动追加」时在每条消息下方渲染自身快照，
+   * 最后一条消息即使未开启也会渲染（正文已内嵌面板时不重复）。
+   */
   stPanels?: StPanel[]
   /** 用户设置层面的卡片能力开关；缺省全部关闭（只读） */
   cardFeatures?: CardAppCapabilities
@@ -114,6 +117,19 @@ export const AssistantMessage = memo(function AssistantMessage({
   // 安全拒绝：已下发的思考与正文按协议丢弃，只显示模板答复。
   const refused = message.stopReason === 'refusal'
   const answer = refused ? null : view.answer
+  // 消息原文里已经带面板占位符时，展示侧正则会把它渲染在正文里；
+  // 此时不再追加宿主面板，避免出现两份。模型漏写占位符时由最后一条消息兜底。
+  const embeddedPanel = useMemo(
+    () =>
+      Boolean(
+        stScripts?.length &&
+          stPanels?.some(
+            (panel) =>
+              panel.token && (answer?.text || '').includes(panel.token)
+          )
+      ),
+    [answer?.text, stPanels, stScripts]
+  )
   const responseText = [answer?.text, notice?.presentation === 'response' ? notice.text : null]
     .filter(Boolean)
     .join('\n\n')
@@ -187,7 +203,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               onOpen={setViewerImage}
             />
           ))}
-      {!streaming && !refused && stPanels?.length ? (
+      {!streaming && !refused && stPanels?.length && !embeddedPanel ? (
         <StatusPanelInline
           panels={stPanels}
           scripts={stScripts}
@@ -195,6 +211,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           statData={message.statData}
           sessionId={sessionId}
           netEnabled={cardFeatures?.net === true}
+          always={isLast}
         />
       ) : null}
       {waiting ? (

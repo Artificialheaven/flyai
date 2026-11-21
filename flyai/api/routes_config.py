@@ -649,6 +649,8 @@ class MySettingsPayload(BaseModel):
     galgame_max_loops: Optional[int] = None
     # 第一人称自我记忆个人开关（默认关闭；非覆盖项，不与全局做三态合并）
     self_memory_enabled: bool = False
+    # 向模型提供真实当前时间（默认关闭；纯个人开关）
+    real_time_enabled: bool = False
 
     # 酒馆卡扩展（None=跟随默认：正则/HTML/MVU 默认开，外链插图/代理默认关）
     st_regex_prompt_enabled: Optional[bool] = None
@@ -737,6 +739,7 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
     us.galgame_max_loops = _opt_int(
         payload.galgame_max_loops, "galgame_max_loops", 1, 100)
     us.self_memory_enabled = bool(payload.self_memory_enabled)
+    us.real_time_enabled = bool(payload.real_time_enabled)
 
     scope.save_user_settings()
     return scope.user_settings.to_dict()

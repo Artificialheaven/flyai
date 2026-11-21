@@ -1,61 +1,96 @@
 import { apiUrl, authHeaders, FlyApiError, readDetail, request } from './client.js'
 import { downloadBlob } from '../native.js'
+import { invalidateCatalog, loadCatalog } from './catalogCache.js'
 import type { AttributeDef, Character, World } from './types.js'
 
 /** 角色卡 / 世界观：登录态（Bearer）由 request 统一注入。 */
 
-export const listCharacters = async (): Promise<Character[]> => {
-  const data = await request<{ characters: Character[] }>('/api/characters')
-  return data.characters ?? []
+export const listCharacters = (options?: { force?: boolean }): Promise<Character[]> =>
+  loadCatalog(
+    'characters',
+    async () => {
+      const data = await request<{ characters: Character[] }>('/api/characters')
+      return data.characters ?? []
+    },
+    options
+  )
+
+export const createCharacter = async (body: Partial<Character>): Promise<Character> => {
+  const character = await request<Character>('/api/characters', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  invalidateCatalog('characters')
+  return character
 }
 
-export const createCharacter = async (body: Partial<Character>): Promise<Character> =>
-  request<Character>('/api/characters', { method: 'POST', body: JSON.stringify(body) })
-
-export const updateCharacter = async (cid: string, body: Partial<Character>): Promise<Character> =>
-  request<Character>(`/api/characters/${encodeURIComponent(cid)}`, {
+export const updateCharacter = async (cid: string, body: Partial<Character>): Promise<Character> => {
+  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+  invalidateCatalog('characters')
+  return character
+}
 
 export const deleteCharacter = async (cid: string): Promise<void> => {
   await request<{ ok: boolean }>(`/api/characters/${encodeURIComponent(cid)}`, {
     method: 'DELETE',
   })
+  invalidateCatalog('characters')
 }
 
 /** 把可见（含共享）卡复制为自己的独立根角色卡 */
-export const forkCharacter = async (cid: string): Promise<Character> =>
-  request<Character>(`/api/characters/${encodeURIComponent(cid)}/fork`, { method: 'POST' })
+export const forkCharacter = async (cid: string): Promise<Character> => {
+  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}/fork`, {
+    method: 'POST',
+  })
+  invalidateCatalog('characters')
+  return character
+}
 
 export const publishCharacter = async (cid: string): Promise<void> => {
   await request<{ ok: boolean }>(`/api/characters/${encodeURIComponent(cid)}/publish`, {
     method: 'POST',
   })
+  invalidateCatalog('characters')
 }
 
 export const unpublishCharacter = async (cid: string): Promise<void> => {
   await request<{ ok: boolean }>(`/api/characters/${encodeURIComponent(cid)}/unpublish`, {
     method: 'POST',
   })
+  invalidateCatalog('characters')
 }
 
-export const listWorlds = async (): Promise<World[]> => {
-  const data = await request<{ worlds: World[] }>('/api/worlds')
-  return data.worlds ?? []
+export const listWorlds = (options?: { force?: boolean }): Promise<World[]> =>
+  loadCatalog(
+    'worlds',
+    async () => {
+      const data = await request<{ worlds: World[] }>('/api/worlds')
+      return data.worlds ?? []
+    },
+    options
+  )
+
+export const createWorld = async (body: Partial<World>): Promise<World> => {
+  const world = await request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })
+  invalidateCatalog('worlds')
+  return world
 }
 
-export const createWorld = async (body: Partial<World>): Promise<World> =>
-  request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })
-
-export const updateWorld = async (wid: string, body: Partial<World>): Promise<World> =>
-  request<World>(`/api/worlds/${encodeURIComponent(wid)}`, {
+export const updateWorld = async (wid: string, body: Partial<World>): Promise<World> => {
+  const world = await request<World>(`/api/worlds/${encodeURIComponent(wid)}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+  invalidateCatalog('worlds')
+  return world
+}
 
 export const deleteWorld = async (wid: string): Promise<void> => {
   await request<{ ok: boolean }>(`/api/worlds/${encodeURIComponent(wid)}`, { method: 'DELETE' })
+  invalidateCatalog('worlds')
 }
 
 const fetchBlob = async (path: string): Promise<Blob> => {
@@ -94,8 +129,11 @@ const uploadFile = async <T>(path: string, file: File): Promise<T> => {
 }
 
 /** 酒馆 CCv2/v3 角色卡（PNG/JSON） */
-export const importCharacterCard = async (file: File): Promise<Character> =>
-  uploadFile<Character>('/api/characters/import-card', file)
+export const importCharacterCard = async (file: File): Promise<Character> => {
+  const character = await uploadFile<Character>('/api/characters/import-card', file)
+  invalidateCatalog('characters')
+  return character
+}
 
 /**
  * FlyAI / 酒馆 v2 角色卡 JSON（导出文件可直接再导入）。
@@ -118,16 +156,24 @@ export const importCharacterJson = async (file: File): Promise<Character> => {
       ? envelope.data
       : parsed
   const type = typeof envelope.type === 'string' && envelope.type ? envelope.type : 'character'
-  return request<Character>('/api/characters/import', {
+  const character = await request<Character>('/api/characters/import', {
     method: 'POST',
     body: JSON.stringify({ type, data }),
   })
+  invalidateCatalog('characters')
+  return character
 }
 
 export const importWorldbook = async (
   file: File
-): Promise<{ world: World; stats: Record<string, unknown> }> =>
-  uploadFile('/api/worlds/import-worldbook', file)
+): Promise<{ world: World; stats: Record<string, unknown> }> => {
+  const result = await uploadFile<{ world: World; stats: Record<string, unknown> }>(
+    '/api/worlds/import-worldbook',
+    file
+  )
+  invalidateCatalog('worlds')
+  return result
+}
 
 export const importWorldJson = async (file: File): Promise<World> => {
   const text = await file.text()

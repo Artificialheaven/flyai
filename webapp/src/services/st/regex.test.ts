@@ -55,6 +55,14 @@ describe('compileRegexScripts', () => {
     expect(compileRegexScripts(scripts, 'prompt')).toHaveLength(1)
   })
 
+  it('两个 only 同时为真时两侧都编译（ST 语义）', () => {
+    const scripts: RegexScript[] = [
+      { findRegex: 'a', replaceString: 'b', markdownOnly: true, promptOnly: true },
+    ]
+    expect(compileRegexScripts(scripts, 'display')).toHaveLength(1)
+    expect(compileRegexScripts(scripts, 'prompt')).toHaveLength(1)
+  })
+
   it('placement 默认 AI 消息，非 1/2 的值被过滤', () => {
     const [defaulted] = compile([{ findRegex: 'a', replaceString: 'b' }])
     expect(defaulted.placement).toEqual([2])
@@ -242,7 +250,7 @@ describe('regexScriptSide', () => {
     expect(regexScriptSide({ findRegex: 'a', promptOnly: true })).toBe('prompt')
     expect(
       regexScriptSide({ findRegex: 'a', markdownOnly: true, promptOnly: true })
-    ).toBe('inactive')
+    ).toBe('both')
   })
 
   it('空值返回 inactive', () => {

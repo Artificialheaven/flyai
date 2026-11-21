@@ -155,6 +155,42 @@ let historyEpoch = 0
 let initTask: Promise<void> | undefined
 const sessionLoads = new Map<string, { promise: Promise<void> }>()
 
+/** 写穿缓存：会话快照去抖写入 IndexedDB（约 400ms）；流式中的会话跳过。 */
+const PERSIST_DELAY = 400
+const persistTimers = new Map<string, number>()
+
+const cancelPersist = (id: string) => {
+  const timer = persistTimers.get(id)
+  if (timer !== undefined) {
+    window.clearTimeout(timer)
+    persistTimers.delete(id)
+  }
+}
+
+const flushPersist = (id: string) => {
+  cancelPersist(id)
+  const session = getSession(id)
+  // 流式中途或正在删除：半截快照不能当成缓存权威，等收尾后的回读再写
+  if (!session || getStreamController(id) || deletingSessions.has(id)) {
+    return
+  }
+  void db.saveSession(session).catch(db.reportStorageError('persist session'))
+}
+
+const persistSession = (id: string) => {
+  if (getStreamController(id) || deletingSessions.has(id)) {
+    return
+  }
+  cancelPersist(id)
+  persistTimers.set(
+    id,
+    window.setTimeout(() => {
+      persistTimers.delete(id)
+      flushPersist(id)
+    }, PERSIST_DELAY)
+  )
+}
+
 /** 第 n 次重连前的等待：500ms 起步，1.5 倍递增，封顶 8 秒 */
 const backoffDelay = (attempt: number) =>
   Math.min(MAX_RECONNECT_DELAY, Math.round(500 * Math.pow(1.5, attempt - 1)))
@@ -312,7 +348,7 @@ const trimSessionCache = () => {
   }
 }
 
-const updateSession = (id: string, update: (session: Session) => Session) =>
+const updateSession = (id: string, update: (session: Session) => Session) => {
   set((state) => {
     const previous = Object.hasOwn(state.sessionCache, id) ? state.sessionCache[id] : undefined
     if (!previous) {
@@ -331,6 +367,8 @@ const updateSession = (id: string, update: (session: Session) => Session) =>
       ),
     }
   })
+  persistSession(id)
+}
 
 /** 群聊换人发言时追加一条新的 AI 回复；与发送时的追加保持一致（线性消息列表）。 */
 const appendReply = (sessionId: string, reply: AssistantMessage) =>
@@ -652,7 +690,8 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
   }
   flushReply()
   if (stored.length > 0) {
-    await db.saveFiles(stored)
+    // 图片原件照旧落盘（暖启动渲染依赖它），但不挡首帧
+    void db.saveFiles(stored).catch(db.reportStorageError('save session files'))
   }
   // 当前窗口对应的 AI 座位：优先按线程成员找，群聊标签页切换时也随之变化
   const seat =
@@ -700,6 +739,7 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
     disabledTools: detail.disabled_tools,
     characterId: character?.id || seat?.character_id || undefined,
     characterName: character?.name || seat?.name || undefined,
+    userName: detail.user_name || undefined,
     characterAvatar: character?.avatar || undefined,
     worldId: detail.world?.id || detail.world_id || undefined,
     worldName: detail.world?.name || undefined,
@@ -733,6 +773,8 @@ const applySession = (session: Session) => {
     }
   })
   trimSessionCache()
+  // 写穿缓存：下一次冷启动直接读这份快照
+  persistSession(session.id)
 }
 
 /**
@@ -932,8 +974,8 @@ const createReply = (): AssistantMessage => {
   }
 }
 
-export const initChat = (): Promise<void> => {
-  if (get().ready) {
+export const initChat = (force = false): Promise<void> => {
+  if (get().ready && !force) {
     return Promise.resolve()
   }
   if (initTask) {
@@ -944,8 +986,15 @@ export const initChat = (): Promise<void> => {
   initTask = (async () => {
     try {
       const summaries = (await listSessions()).map(toSummary)
+      // 换账号/缓存版本变化时先清空本地快照，避免把上一个账号的会话渲染出来
+      await db.syncCacheOwner(localUserKey()).catch(db.reportStorageError('sync chat cache'))
       if (epoch === historyEpoch) {
         set({ ready: true, sessions: sortSessions(summaries), initError: false })
+        // 服务端已不存在的会话与无引用原件从本地缓存清掉（列表成功后调用）
+        const validIds = new Set(summaries.map((session) => session.id))
+        void db
+          .pruneCachedSessions(validIds)
+          .catch(db.reportStorageError('prune chat cache'))
         // 回到上次打开的会话；刷新页面后由 selectSession 触发运行续读
         const last = readActiveSession()
         if (last && summaries.some((session) => session.id === last)) {
@@ -974,6 +1023,9 @@ export const resetChat = () => {
   initTask = undefined
   sessionLoads.clear()
   sessionAccess.clear()
+  for (const id of [...persistTimers.keys()]) {
+    cancelPersist(id)
+  }
   for (const controller of Object.values(get().streaming)) {
     controller.abort()
   }
@@ -1007,6 +1059,24 @@ const ensureSessionLoaded = (id: string): Promise<void> => {
   sessionLoads.set(id, load)
   load.promise = (async () => {
     try {
+      // 暖启动：先画本地快照，再在后台用服务端复核（refreshSession 自带守卫）
+      const cached = await db.loadSession(id).catch(() => undefined)
+      if (epoch !== historyEpoch || sessionLoads.get(id) !== load) {
+        return
+      }
+      if (cached) {
+        touchSession(id)
+        applySession(cached)
+        // 回填窗口选择，避免后台刷新 pickThread 跳回私聊
+        if (cached.threadId && !activeThreadIds.has(id)) {
+          activeThreadIds.set(id, cached.threadId)
+        }
+        if (get().activeId === null) {
+          selectSession(id)
+        }
+        void refreshSession(id, epoch, false)
+        return
+      }
       const detail = await fetchSession(id)
       if (epoch !== historyEpoch || sessionLoads.get(id) !== load) {
         return
@@ -1018,7 +1088,8 @@ const ensureSessionLoaded = (id: string): Promise<void> => {
       touchSession(id)
       applySession(session)
     } catch (error) {
-      if (epoch === historyEpoch && sessionLoads.get(id) === load) {
+      // 已经画出缓存快照时网络失败保持现状，只有完全没有快照才报错
+      if (epoch === historyEpoch && sessionLoads.get(id) === load && !getSession(id)) {
         set((state) => ({ sessionLoadErrors: { ...state.sessionLoadErrors, [id]: true } }))
         if (!(error instanceof FlyApiError && error.status === 401)) {
           db.reportStorageError('read session')(error)
@@ -1121,9 +1192,14 @@ export const removeAllSessions = async (): Promise<boolean> => {
         message.role === 'user' ? message.files.map((file) => file.id) : []
       )
     )
-    await Promise.all([db.deleteFiles([...new Set(fileIds)]), db.clearStaging()]).catch(
-      db.reportStorageError('delete local files')
-    )
+    for (const id of [...persistTimers.keys()]) {
+      cancelPersist(id)
+    }
+    await Promise.all([
+      db.deleteFiles([...new Set(fileIds)]),
+      db.clearStaging(),
+      db.pruneCachedSessions(new Set()),
+    ]).catch(db.reportStorageError('delete local files'))
     clearAllDrafts()
     for (const id of ids) {
       clearRunMarker(id)
@@ -1485,6 +1561,9 @@ export const searchSessionList = async (query: string): Promise<SessionSearchRes
 /** 重新拉取服务端会话列表（导入/外部变更后） */
 export const refreshSessionList = async (): Promise<void> => {
   const summaries = (await listSessions()).map(toSummary)
+  void db
+    .pruneCachedSessions(new Set(summaries.map((session) => session.id)))
+    .catch(db.reportStorageError('prune chat cache'))
   set((state) => ({
     ready: true,
     initError: false,
@@ -1539,6 +1618,12 @@ export const removeSessions = async (ids: string[]): Promise<number> => {
     await db
       .deleteFiles([...new Set(fileIds)])
       .catch(db.reportStorageError('delete local files'))
+    await Promise.all(
+      targets.map((id) => {
+        cancelPersist(id)
+        return db.deleteSession(id).catch(db.reportStorageError('delete cached session'))
+      })
+    )
     for (const id of targets) {
       sessionLoads.delete(id)
       sessionAccess.delete(id)
@@ -1637,6 +1722,7 @@ const removeSessionData = async (id: string): Promise<boolean> => {
       return false
     }
     await deleteRemoteSession(id)
+    cancelPersist(id)
     if (epoch !== historyEpoch) {
       return true
     }
@@ -1646,6 +1732,9 @@ const removeSessionData = async (id: string): Promise<boolean> => {
         message.role === 'user' ? message.files.map((file) => file.id) : []
       ) ?? []
     await db.deleteFiles([...new Set(fileIds)]).catch(db.reportStorageError('delete local files'))
+    await db
+      .deleteSession(id)
+      .catch(db.reportStorageError('delete cached session'))
     sessionLoads.delete(id)
     sessionAccess.delete(id)
     runIds.delete(id)

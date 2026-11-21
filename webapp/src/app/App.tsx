@@ -106,6 +106,10 @@ export const App = () => {
   // 随后并行拉取启动公告、检查 APK 更新（均静默失败，不阻塞启动）
   useEffect(() => {
     void loadRuntimeConfig().then(() => {
+      // 会话列表只依赖本地 token，与 /me 校验并行，省一个启动 RTT
+      if (useAuth.getState().token) {
+        void initChat()
+      }
       useAuth.getState().restore()
       void loadAnnouncement()
       void checkForAppUpdate()
@@ -174,7 +178,8 @@ export const App = () => {
                       size="m"
                       onClick={() => {
                         if (!ready) {
-                          void initChat()
+                          // force：mounted 时可能已发起过一次失败的列表请求
+                          void initChat(true)
                         } else if (activeId !== null) {
                           selectSession(activeId)
                         }

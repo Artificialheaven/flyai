@@ -6,6 +6,7 @@
  * - findRegex 支持裸模式（按全局替换）与 `/pattern/flags` 字面量；
  * - placement 1=用户消息、2=AI 消息，缺省两侧都生效；
  * - markdownOnly 只在展示侧、promptOnly 只在出站 prompt 侧；
+ *   两个标记同时为真时两侧都执行（对齐 ST `getRegexedString`）；
  * - trimStrings 在替换前从捕获组里剔除；
  * - 无效正则直接跳过，不影响其它脚本；
  * - 单 pattern ≤ 64KB、单次输出 ≤ 2MB，超限跳过。
@@ -28,7 +29,10 @@ export type CompiledRegexScript = {
 
 export type RegexSide = 'display' | 'prompt'
 
-/** 正则实际生效的侧：两个 only 标记同时为真时两侧都被排除 */
+/**
+ * 正则实际生效的侧。与 ST `getRegexedString` 对齐：两个 only 标记同时为真时
+ * 两侧都命中各自的判断条件，因此两侧都生效。
+ */
 export type RegexScriptSideInfo = 'prompt' | 'display' | 'both' | 'inactive'
 
 export const regexScriptSide = (
@@ -38,7 +42,7 @@ export const regexScriptSide = (
     return 'inactive'
   }
   if (raw.markdownOnly && raw.promptOnly) {
-    return 'inactive'
+    return 'both'
   }
   if (raw.promptOnly) {
     return 'prompt'
@@ -93,10 +97,11 @@ const compileOne = (
   if (!raw || typeof raw !== 'object' || raw.disabled) {
     return null
   }
-  if (side === 'display' && raw.promptOnly) {
+  // ST 语义：两个 only 同时为真 → 展示侧与 prompt 侧都执行
+  if (side === 'display' && raw.promptOnly && !raw.markdownOnly) {
     return null
   }
-  if (side === 'prompt' && raw.markdownOnly) {
+  if (side === 'prompt' && raw.markdownOnly && !raw.promptOnly) {
     return null
   }
   const find = typeof raw.findRegex === 'string' ? raw.findRegex : ''
@@ -419,6 +424,38 @@ const resolveVariable = (
   return cur
 }
 
+export type MacroNames = {
+  char?: string
+  user?: string
+  group?: readonly string[]
+}
+
+const NAME_MACRO_RE = /\{\{\s*(char|user|group)\s*\}\}/gi
+
+/**
+ * 展开 ``{{char}}/{{user}}/{{group}}``。展示侧替换串里常带这些宏，
+ * 与后端 ``render_name_macros`` 保持同一回退值。
+ */
+export const renderNameMacros = (
+  text: string,
+  names?: MacroNames | null
+): string => {
+  if (!text || !names) {
+    return text
+  }
+  const group = (names.group ?? []).join('、')
+  return text.replace(NAME_MACRO_RE, (_match, kind: string) => {
+    const key = kind.toLowerCase()
+    if (key === 'char') {
+      return names.char || '角色'
+    }
+    if (key === 'user') {
+      return names.user || '用户'
+    }
+    return group
+  })
+}
+
 /**
  * 展开 MVU 变量宏 ``{{format_message_variable::stat_data.<path>}}``。
  * 只影响展示；缺失字段展开为空串，与后端 render_tavern_macros 一致。
@@ -450,7 +487,7 @@ export const applyDisplayScripts = (
   rawScripts: unknown,
   depth?: number,
   variables?: Record<string, unknown> | null,
-  options?: { cardApps?: boolean }
+  options?: { cardApps?: boolean; macroNames?: MacroNames }
 ): string => {
   const scripts = compileRegexScripts(rawScripts, 'display')
   const out =
@@ -462,7 +499,10 @@ export const applyDisplayScripts = (
           cardApps: options?.cardApps !== false,
         })
   // 卡内没有对应的展示脚本时，<UpdateVariable> 原文不应出现在消息里
-  return renderVariableMacros(stripUpdateBlocks(out), variables)
+  return renderVariableMacros(
+    renderNameMacros(stripUpdateBlocks(out), options?.macroNames),
+    variables
+  )
 }
 
 /** 展示侧便捷入口：用户消息（placement=1）。 */

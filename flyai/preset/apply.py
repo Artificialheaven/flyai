@@ -47,13 +47,15 @@ class RenderedPreset:
     max_tokens: int = 0
 
 
-def _macros(text: str, ctx: Dict[str, Any], rng: random.Random) -> str:
+def _macros(text: str, ctx: Dict[str, Any], rng: random.Random,
+            variables=None) -> str:
     return render_tavern_macros(
         text,
         char_name=ctx.get("char_name") or "",
         user_name=ctx.get("user_name") or "",
         group_names=ctx.get("group_names") or [],
         last_message=ctx.get("last_message") or "",
+        variables=variables,
         rng=rng,
     )
 
@@ -65,6 +67,7 @@ def render_preset(
     user_name: str = "",
     group_names: Optional[List[str]] = None,
     last_message: str = "",
+    variables=None,
     rng: Optional[random.Random] = None,
 ) -> RenderedPreset:
     """渲染预设；preset 为 None 时返回全空结果。"""
@@ -81,7 +84,7 @@ def render_preset(
     for i, b in enumerate(preset.blocks):
         if not b.enabled or not (b.content or "").strip():
             continue
-        text = _macros(b.content, ctx, rng).strip()
+        text = _macros(b.content, ctx, rng, variables).strip()
         if not text:
             continue
         if b.position == "main":
@@ -101,7 +104,8 @@ def render_preset(
     out.main_text = "\n\n".join(t for _o, _i, t in main_parts)
     out.tail_text = "\n\n".join(t for _o, _i, t in tail_parts)
     out.depth_blocks = depth
-    out.prefill = _macros(preset.assistant_prefill or "", ctx, rng).strip()
+    out.prefill = _macros(preset.assistant_prefill or "", ctx, rng,
+                          variables).strip()
     out.params = dict(preset.params or {})
     out.max_tokens = int(preset.max_tokens or 0)
     return out

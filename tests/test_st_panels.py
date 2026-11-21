@@ -43,11 +43,18 @@ def test_title_falls_back_to_token():
 
 def test_skip_prompt_only_disabled_and_empty_replacement():
     scripts = [
-        _panel_script(promptOnly=True),
+        # 只在 prompt 侧生效：展示侧不处理占位符
+        _panel_script(promptOnly=True, markdownOnly=False),
         _panel_script(disabled=True),
         _panel_script(replaceString="   "),
     ]
     assert detect_panels(_card(scripts)) == []
+
+
+def test_both_flags_still_display_side():
+    # 两个 only 同时为真按 ST 语义仍在展示侧执行，可以识别为面板
+    panels = detect_panels(_card([_panel_script(promptOnly=True)]))
+    assert panels == [{"token": TOKEN, "title": "状态栏界面"}]
 
 
 def test_skip_regex_patterns():

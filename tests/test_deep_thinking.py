@@ -36,12 +36,13 @@ def _drain(gen):
 
 # ---- OpenAI 兼容：思考参数按开关状态合并 ----
 
-def _openai_provider(thinking_params, thinking_off_params=None):
+def _openai_provider(thinking_params, thinking_off_params=None,
+                     base_url="http://t/v1", params=None):
     kw = {} if thinking_off_params is None else {"thinking_off_params": thinking_off_params}
     prov = OpenAICompatProvider(
         ProviderConfig(
-            id="x", type="openai", base_url="http://t/v1", api_key="k",
-            model="m", params={"temperature": 0.7},
+            id="x", type="openai", base_url=base_url, api_key="k",
+            model="m", params={"temperature": 0.7} if params is None else params,
             thinking_params=thinking_params,
             **kw,
         )
@@ -98,6 +99,68 @@ def test_openai_on_params_override_base_params_key():
     prov, captured = _openai_provider({"thinking": {"type": "enabled"}})
     _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=True))
     assert captured["body"]["thinking"] == {"type": "enabled"}
+
+
+# ---- opencode 网关：深度思考开关 → reasoning_effort ----
+
+OPENCODE_URL = "https://opencode.ai/zen/go/v1"
+
+
+def test_opencode_thinking_on_defaults_to_high():
+    prov, captured = _openai_provider({}, base_url=OPENCODE_URL)
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=True))
+    assert captured["body"]["reasoning_effort"] == "high"
+
+
+def test_opencode_thinking_off_defaults_to_none():
+    prov, captured = _openai_provider({}, base_url=OPENCODE_URL)
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=False))
+    assert captured["body"]["reasoning_effort"] == "none"
+
+
+def test_opencode_configured_effort_wins_when_on():
+    prov, captured = _openai_provider(
+        {}, base_url=OPENCODE_URL, params={"reasoning_effort": "low"})
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=True))
+    assert captured["body"]["reasoning_effort"] == "low"
+
+
+def test_opencode_explicit_thinking_params_override_defaults():
+    prov, captured = _openai_provider(
+        {"reasoning_effort": "max"},
+        thinking_off_params={"thinking": {"type": "disabled"}},
+        base_url=OPENCODE_URL,
+    )
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=True))
+    assert captured["body"]["reasoning_effort"] == "max"
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=False))
+    assert captured["body"]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured["body"]
+
+
+def test_opencode_rejected_effort_retries_without_param():
+    # 少数型号（kimi-k2.7-code）只接受开启思考：none 被拒时退回模型默认
+    bodies = []
+
+    def handler(request: httpx.Request):
+        body = json.loads(request.content.decode("utf-8"))
+        bodies.append(body)
+        if len(bodies) == 1:
+            return httpx.Response(400, json={
+                "error": {"message": "invalid thinking: only type=enabled is allowed"}
+            })
+        return httpx.Response(200, content="data: [DONE]\n\n")
+
+    prov = OpenAICompatProvider(
+        ProviderConfig(
+            id="x", type="openai", base_url=OPENCODE_URL, api_key="k",
+            model="m", params={},
+        )
+    )
+    prov._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    _drain(prov._stream_chat([Message(role="user", content="hi")], [], deep_thinking=False))
+    assert bodies[0]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in bodies[1]
 
 
 # ---- Anthropic：signature 块组装 ----

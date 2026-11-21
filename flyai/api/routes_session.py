@@ -31,6 +31,7 @@ from ..sessions.resolve import (
     room_base_signatures,
     set_character_override,
     set_world_override,
+    user_seat,
 )
 
 router = APIRouter(prefix="/api", tags=["session"])
@@ -1266,8 +1267,13 @@ def _session_dict(s, with_messages: bool = False, lore=None,
         if lore is not None:
             char = effective_character(s, lore)
             world = effective_world(s, lore)
+            user_char = member_character(user_seat(s), lore)
             d["character"] = char.to_dict() if char else None
             d["world"] = world.to_dict() if world else None
+            # 展示侧宏展开 {{user}} 用；与提示词侧回退值保持一致
+            d["user_name"] = (
+                getattr(user_char, "name", "") if user_char else "用户"
+            ) or "用户"
             d["st"] = _st_payload(
                 s, char, lore, user_settings, cfg=cfg,
                 level=level, is_admin=is_admin,

@@ -41,6 +41,60 @@ const Html = memo(function Html({
   return <SanitizedHtml value={value} inline={inline} />
 })
 
+const FULL_HTML_DOC_RE = /<!doctype\s+html|<html[\s>]|<body[\s>]/i
+const SCRIPT_TAG_RE = /<script[\s>]/i
+
+/**
+ * 展示脚本常把占位符替换成「围栏包着的整页 HTML」（如思考折叠卡）。
+ * 带脚本的整页文档已由 cardApp 哨兵交给沙箱；无脚本文档此前会落到代码块，
+ * 把几十行源码原样摊在消息里。这里在 HTML 渲染开启时按白名单内联渲染，
+ * 并保留源码开关；带脚本、超限或开关关闭时仍然显示代码块。
+ */
+const CodeOrHtmlDoc = memo(function CodeOrHtmlDoc({
+  value,
+  lang,
+  loading,
+}: {
+  value: string
+  lang: string
+  loading: boolean
+}) {
+  const { htmlEnabled } = useMarkdownRenderOptions()
+  const t = useTranslate()
+  const [showSource, setShowSource] = useState(false)
+  const isHtmlDoc =
+    htmlEnabled &&
+    value.length <= MAX_HTML_LENGTH &&
+    FULL_HTML_DOC_RE.test(value) &&
+    !SCRIPT_TAG_RE.test(value)
+  if (!isHtmlDoc) {
+    return <CodeBlock code={value} infostring={lang || 'text'} loading={loading} />
+  }
+  return (
+    <div className={styles.host}>
+      <div className={styles.toolbar}>
+        <span className={styles.label}>{t('htmlDocLabel')}</span>
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className={styles.sourceBtn}
+            onClick={() => setShowSource((current) => !current)}
+          >
+            {t(showSource ? 'cardAppHideSource' : 'cardAppShowSource')}
+          </button>
+        </div>
+      </div>
+      {showSource ? (
+        <CodeBlock code={value} infostring={lang || 'html'} loading={loading} />
+      ) : (
+        <div className={styles.preview}>
+          <SanitizedHtml value={value} />
+        </div>
+      )}
+    </div>
+  )
+})
+
 /**
  * 卡内整页 HTML 应用：沙箱可用时进 iframe。
  *
@@ -314,10 +368,10 @@ const MarkdownBlockContentOrDefinitionContent = memo(
         }
         case 'code':
           return (
-            <CodeBlock
+            <CodeOrHtmlDoc
               key={index}
-              code={node.value}
-              infostring={node.lang || 'text'}
+              value={node.value}
+              lang={node.lang || ''}
               loading={loading}
             />
           )

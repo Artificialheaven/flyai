@@ -264,6 +264,8 @@ export type Thread = {
 export type SessionDetail = SessionSummary & {
   character: Character | null
   world: World | null
+  /** 用户 persona 名（无 persona 时为“用户”） */
+  user_name?: string
   /** 房间级动态属性（AI 可写的数值表） */
   attributes?: Record<string, unknown>
   /** 当前绑定的是会话专属角色副本而非内容库卡 */

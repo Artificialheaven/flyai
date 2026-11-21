@@ -128,6 +128,9 @@ class Session:
     mode: str = "normal"
     # 本会话选定的开局世界书条目标题；空=按卡默认（保持卡内 pinned 状态）
     opening_entry: str = ""
+    # 创建时选用的开场白：0=first_mes；1..N=alternate_greetings 第 N 条。
+    # MVU 初始化据此读取被选中问候里的内联 <InitVar>（必须持久化）。
+    greeting_index: int = 0
     # Galgame 持久场景态：{"background":{"id","url"},"sprite":{"id","url"}}
     galgame: Dict[str, Any] = field(default_factory=dict)
     # Galgame 已合成 TTS 清单：对白文本 -> 音频 url（刷新后直接复用，不再重新合成）

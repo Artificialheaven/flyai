@@ -342,6 +342,8 @@ class UserSettings:
     galgame_enabled: Optional[bool] = None
     # 第一人称自我记忆（P3）：个人开关，默认关闭；管理员全局开启后才可启用
     self_memory_enabled: bool = False
+    # 向模型提供真实当前时间（LIVE_CTX 时钟行）：个人开关，默认关闭
+    real_time_enabled: bool = False
     # Galgame 单轮工具循环上限
     galgame_max_loops: Optional[int] = None
     # 酒馆卡扩展（None=跟随默认；默认值见 st 模块与 AppConfig）
@@ -379,6 +381,7 @@ class UserSettings:
         "image_enabled": "b",
         "galgame_enabled": "b",
         "self_memory_enabled": "b",
+        "real_time_enabled": "b",
         "galgame_max_loops": "i",
         "st_regex_prompt_enabled": "b",
         "st_regex_display_enabled": "b",

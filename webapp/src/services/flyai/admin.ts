@@ -233,6 +233,8 @@ export type MySettings = {
   galgame_max_loops: number | null
   /** 第一人称自我记忆个人开关；默认关闭（非三态，不跟随全局） */
   self_memory_enabled: boolean
+  /** 向模型提供真实当前时间；默认关闭（非三态，不跟随全局） */
+  real_time_enabled: boolean
   /** 酒馆卡扩展：null = 跟随默认（正则/HTML/MVU 默认开，外链图/代理默认关） */
   st_regex_prompt_enabled: boolean | null
   st_regex_display_enabled: boolean | null

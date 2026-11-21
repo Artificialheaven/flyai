@@ -387,6 +387,199 @@
   white-space: nowrap;
 }
 
+/* ---- 预设条目开关弹窗 ---- */
+
+.switchDialog {
+  width: 660px;
+  max-height: calc(100vh - 96px);
+}
+
+.switchScroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin-right: -8px;
+  padding-right: 8px;
+  overflow-y: auto;
+}
+
+.switchSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 0 0 10px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.switchHint {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.switchTabs {
+  display: flex;
+  gap: 6px;
+  padding-bottom: 10px;
+}
+
+.switchTab {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+
+.switchTabActive {
+  border-color: var(--dsw-alias-border-l2-darkmode-thin);
+  background-color: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+.switchGroup {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+
+  & + & {
+    margin-top: 8px;
+  }
+}
+
+.switchGroupHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.switchGroupIcon {
+  flex: none;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.switchGroupTitle {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switchCount {
+  flex: none;
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: 999px;
+  background-color: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.switchChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.switchChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 5px 11px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    border-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:hover:not(:disabled) {
+    border-color: var(--dsw-alias-button-primary-fill);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.switchChipOn {
+  border-color: transparent;
+  background-color: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+.switchChipOff {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.switchChipText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switchChipPos {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 6px;
+  background-color: rgb(127 127 127 / 18%);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.switchSingle {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l2-darkmode-thin);
+}
+
+.switchSingleHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.switchSingleTitle {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switchBadge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 16px;
+}
+
 .error {
   color: var(--dsw-alias-label-error, #e5484d);
   font-size: 12px;

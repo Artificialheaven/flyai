@@ -94,6 +94,20 @@ describe('sanitizeStHtml', () => {
     expect(sanitizeStHtml(`<p>${'x'.repeat(MAX_HTML_LENGTH)}</p>`, ON)).toBe('')
   })
 
+  it('整页 HTML 文档只保留 body 内的白名单内容', () => {
+    const fragment = parse(
+      sanitizeStHtml(
+        '<!DOCTYPE html><html lang="zh"><head><style>body{color:red}</style></head>' +
+          '<body><details open><summary>思考过程</summary><div>内容</div></details></body></html>',
+        ON
+      )
+    )
+    expect(fragment.querySelector('style')).toBeNull()
+    expect(fragment.querySelector('details')?.hasAttribute('open')).toBe(true)
+    expect(fragment.querySelector('summary')?.textContent).toBe('思考过程')
+    expect(fragment.querySelector('div')?.textContent).toBe('内容')
+  })
+
   it('清洗前剪掉 data-name 为空或占位值的面板块', () => {
     const fragment = parse(
       sanitizeStHtml(

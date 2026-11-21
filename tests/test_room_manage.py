@@ -421,11 +421,11 @@ def test_single_normal_room_seeds_first_mes(tmp_path):
     msgs = out["threads"][0]["messages"]
     assert len(msgs) == 1
     assert msgs[0]["role"] == "assistant"
-    # 宏已替换、首尾空白已剥
-    assert msgs[0]["content"] == "角色1看向你：「来了？」"
+    # 宏已替换、首尾空白已剥（用户名与提示词侧回退值一致）
+    assert msgs[0]["content"] == "角色1看向用户：「来了？」"
     # 已随会话落盘
     saved = sc.store.get(out["id"])
-    assert saved.threads[0].messages[0].content == "角色1看向你：「来了？」"
+    assert saved.threads[0].messages[0].content == "角色1看向用户：「来了？」"
 
 
 def test_first_mes_not_seeded_for_multi_character_room(tmp_path):
@@ -474,7 +474,10 @@ def test_greeting_index_picks_alternate(tmp_path):
         RoomCreate(character_ids=["c1"], greeting_index=2), request)
     msgs = out["threads"][0]["messages"]
     assert len(msgs) == 1 and msgs[0]["content"] == "备选二"
-    assert sc.store.get(out["id"]).threads[0].messages[0].content == "备选二"
+    saved = sc.store.get(out["id"])
+    assert saved.threads[0].messages[0].content == "备选二"
+    # 备用问候选择要持久化，MVU 才能读到其中的内联 <InitVar>
+    assert saved.greeting_index == 2
 
 
 def test_greeting_index_zero_or_missing_uses_first_mes(tmp_path):
@@ -519,7 +522,8 @@ def test_greeting_index_substitutes_macros(tmp_path):
     out = create_room(
         RoomCreate(character_ids=["c1"], greeting_index=1), request)
     msgs = out["threads"][0]["messages"]
-    assert len(msgs) == 1 and msgs[0]["content"] == "角色1对你说：早"
+    # 无用户 persona，宏回退成“用户”，与提示词侧一致
+    assert len(msgs) == 1 and msgs[0]["content"] == "角色1对用户说：早"
 
 
 def test_greeting_index_ignored_for_multi_character_room(tmp_path):

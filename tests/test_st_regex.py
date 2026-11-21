@@ -125,6 +125,20 @@ def test_markdown_only_and_prompt_only():
     assert apply_scripts("m p", "assistant", display_scripts, side="display") == "M p"
 
 
+def test_both_flags_apply_on_both_sides():
+    """ST getRegexedString：两个 only 同时为真时展示侧与 prompt 侧各命中一个条件。"""
+    raw = [{
+        "findRegex": "/b/g",
+        "replaceString": "B",
+        "markdownOnly": True,
+        "promptOnly": True,
+    }]
+    prompt_scripts, _ = compile_scripts(raw, side="prompt")
+    display_scripts, _ = compile_scripts(raw, side="display")
+    assert apply_scripts("b", "assistant", prompt_scripts, side="prompt") == "B"
+    assert apply_scripts("b", "assistant", display_scripts, side="display") == "B"
+
+
 def test_disabled_skipped():
     scripts, _ = compile_scripts([
         {"findRegex": "/a/g", "replaceString": "b", "disabled": True},

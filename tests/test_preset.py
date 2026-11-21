@@ -20,6 +20,8 @@ from flyai.agent.loop import run_agent_loop
 from flyai.api.routes_chat import _effective_max_tokens
 from flyai.api.routes_preset import (
     ActiveBody,
+    BlockStateChange,
+    BlockStatesPayload,
     PresetBlockPayload,
     PresetPayload,
     clone_preset,
@@ -29,6 +31,7 @@ from flyai.api.routes_preset import (
     import_preset,
     list_presets,
     set_active,
+    toggle_preset_blocks,
     update_preset,
 )
 from flyai.config import ProviderConfig, ToolSettings
@@ -237,6 +240,62 @@ def test_preset_store_crud_and_corrupt_skip(tmp_path):
     assert store.delete(p.id) is False
 
 
+def test_preset_list_cache_reparse_and_invalidate(tmp_path, monkeypatch):
+    """list() 按文件 stat 缓存解析结果；save/delete 后失效。"""
+    calls = {"n": 0}
+    real = Preset.from_dict.__func__
+
+    def counting(cls, d):
+        calls["n"] += 1
+        return real(cls, d)
+
+    monkeypatch.setattr(Preset, "from_dict", classmethod(counting))
+
+    store = PresetStore(tmp_path / "presets")
+    p1 = store.save(Preset(name="p1"))
+    store.save(Preset(name="p2"))
+    assert {x.name for x in store.list()} == {"p1", "p2"}
+    assert calls["n"] == 2
+
+    before = calls["n"]
+    # 第二次列表只 stat 不解析；排序仍按 (updated_at, name) 逆序
+    names = [x.name for x in store.list()]
+    assert names == sorted(names, reverse=True)
+    assert calls["n"] == before
+
+    # get() 不缓存：每次读盘（toggle_regex 依赖 get→mutate→save）
+    store.get(p1.id)
+    assert calls["n"] == before + 1
+
+    p1.name = "改名"
+    store.save(p1)
+    assert "改名" in {x.name for x in store.list()}
+    assert calls["n"] > before
+
+    store.delete(p1.id)
+    assert {x.name for x in store.list()} == {"p2"}
+
+
+def test_preset_list_cache_skips_bad_file_once(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    real = Preset.from_dict.__func__
+
+    def counting(cls, d):
+        calls["n"] += 1
+        return real(cls, d)
+
+    monkeypatch.setattr(Preset, "from_dict", classmethod(counting))
+
+    store = PresetStore(tmp_path / "presets")
+    store.save(Preset(name="ok"))
+    (tmp_path / "presets" / "broken.json").write_text("{不是 json", encoding="utf-8")
+    assert [x.name for x in store.list()] == ["ok"]
+    # 坏 JSON 在 json.loads 阶段就失败，不计入 from_dict；第二次不再尝试
+    before = calls["n"]
+    assert [x.name for x in store.list()] == ["ok"]
+    assert calls["n"] == before
+
+
 # ---- API ----
 
 def _env(tmp_path):
@@ -309,6 +368,32 @@ def test_api_create_requires_name(tmp_path):
     with pytest.raises(HTTPException) as e:
         create_preset(_payload(name="  "), env.request)
     assert e.value.status_code == 400
+
+
+def test_api_toggle_blocks_batch(tmp_path):
+    env = _env(tmp_path)
+    req = env.request
+    created = create_preset(_payload(blocks=[
+        {"name": "a", "content": "甲", "enabled": True},
+        {"name": "b", "content": "乙", "enabled": True},
+        {"name": "c", "content": "丙", "enabled": False},
+    ]), req)
+    pid = created["id"]
+    data = toggle_preset_blocks(pid, BlockStatesPayload(changes=[
+        BlockStateChange(index=0, enabled=False),
+        BlockStateChange(index=2, enabled=True),
+    ]), req)
+    assert [b["enabled"] for b in data["blocks"]] == [False, True, True]
+    saved = env.store.get(pid)
+    assert [b.enabled for b in saved.blocks] == [False, True, True]
+
+    with pytest.raises(HTTPException) as bad_index:
+        toggle_preset_blocks(pid, BlockStatesPayload(changes=[
+            BlockStateChange(index=9, enabled=True)]), req)
+    assert bad_index.value.status_code == 404
+    with pytest.raises(HTTPException) as empty:
+        toggle_preset_blocks(pid, BlockStatesPayload(changes=[]), req)
+    assert empty.value.status_code == 400
 
 
 class _Upload:
@@ -689,3 +774,15 @@ def test_anthropic_extra_params_whitelist():
     assert "min_p" not in body
     assert "frequency_penalty" not in body
     assert body["max_tokens"] == 777
+
+
+def test_render_preset_expands_mvu_variable_macros():
+    p = Preset(name="p", blocks=[PresetBlock(
+        name="b",
+        content="体力={{format_message_variable::stat_data.体力}}",
+    )])
+    r = render_preset(
+        p, char_name="零号", user_name="小明",
+        variables={"stat_data": {"体力": 12}},
+    )
+    assert r.main_text == "体力=12"

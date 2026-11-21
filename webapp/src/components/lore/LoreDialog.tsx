@@ -30,7 +30,9 @@ import {
   listPresets,
   setActivePreset,
   setPresetRegexDisabled,
+  type PresetCatalog,
 } from '../../services/flyai/presets.js'
+import { peekCatalog, subscribeCatalog } from '../../services/flyai/catalogCache.js'
 import type { Character, Preset, World } from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
 import { regexScriptSide } from '../../services/st/regex.js'
@@ -40,6 +42,7 @@ import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import {
   IconCopyOutline16,
+  IconDataOutline16,
   IconDownloadOutline16,
   IconEditOutline16,
   IconNewChatOutline20,
@@ -48,6 +51,7 @@ import {
   IconUploadOutline14,
 } from '../base/icons.js'
 import { CharacterEditor } from './CharacterEditor.js'
+import { PresetSwitchesDialog } from './PresetSwitchesDialog.js'
 import { WorldEditor } from './WorldEditor.js'
 import { closeLore, useLoreDialog, type LoreTab } from './loreState.js'
 import { openNewRoom } from '../room/newRoomState.js'
@@ -76,11 +80,21 @@ const LoreContent = () => {
   const isAdmin = useAuth((state) => state.user?.role === 'admin')
   const [tab, setTab] = useState<LoreTab>(() => useLoreDialog.getState().tab)
   const [view, setView] = useState<View>({ kind: 'list' })
-  const [characters, setCharacters] = useState<Character[]>([])
-  const [worlds, setWorlds] = useState<World[]>([])
-  const [presets, setPresets] = useState<Preset[]>([])
-  const [activePresetId, setActivePresetId] = useState('')
-  const [loading, setLoading] = useState(true)
+  // 首帧直接用上次成功加载的目录，后台再刷新；三项都有缓存时不显示骨架
+  const [initial] = useState(() => ({
+    characters: peekCatalog<Character[]>('characters'),
+    worlds: peekCatalog<World[]>('worlds'),
+    presets: peekCatalog<PresetCatalog>('presets'),
+  }))
+  const [characters, setCharacters] = useState<Character[]>(initial.characters ?? [])
+  const [worlds, setWorlds] = useState<World[]>(initial.worlds ?? [])
+  const [presets, setPresets] = useState<Preset[]>(initial.presets?.presets ?? [])
+  const [activePresetId, setActivePresetId] = useState(initial.presets?.activeId ?? '')
+  const [loading, setLoading] = useState(
+    initial.characters === undefined ||
+      initial.worlds === undefined ||
+      initial.presets === undefined
+  )
   const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
   const [busyId, setBusyId] = useState('')
@@ -88,12 +102,20 @@ const LoreContent = () => {
   const [deleting, setDeleting] = useState(false)
   const [regexTarget, setRegexTarget] = useState<Preset | null>(null)
   const [regexBusy, setRegexBusy] = useState(-1)
+  const [switchTarget, setSwitchTarget] = useState<Preset | null>(null)
   const charFile = useRef<HTMLInputElement>(null)
   const worldFile = useRef<HTMLInputElement>(null)
   const presetFile = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
-    setLoading(true)
+    // 已有缓存时先渲染旧列表，刷新完成再替换；只有完全没有数据才显示骨架
+    const seeded =
+      peekCatalog('characters') !== undefined &&
+      peekCatalog('worlds') !== undefined &&
+      peekCatalog('presets') !== undefined
+    if (!seeded) {
+      setLoading(true)
+    }
     setLoadError('')
     try {
       const [chars, ws, presetData] = await Promise.all([
@@ -117,6 +139,21 @@ const LoreContent = () => {
       void load()
     }
   }, [load, view.kind])
+
+  // 对话框开着时，别处（或后台刷新）更新目录也能同步到列表
+  useEffect(() => {
+    const offCharacters = subscribeCatalog<Character[]>('characters', setCharacters)
+    const offWorlds = subscribeCatalog<World[]>('worlds', setWorlds)
+    const offPresets = subscribeCatalog<PresetCatalog>('presets', (data) => {
+      setPresets(data.presets)
+      setActivePresetId(data.activeId)
+    })
+    return () => {
+      offCharacters()
+      offWorlds()
+      offPresets()
+    }
+  }, [])
 
   const switchTab = (next: LoreTab) => {
     setTab(next)
@@ -262,10 +299,11 @@ const LoreContent = () => {
       await exportPreset(preset)
     })
 
-  /** 正则开关接口返回整份预设：列表与打开的弹窗同步替换 */
+  /** 正则/条目开关接口返回整份预设：列表与打开的弹窗同步替换 */
   const applyPresetUpdate = (updated: Preset) => {
     setPresets((list) => list.map((p) => (p.id === updated.id ? updated : p)))
     setRegexTarget((cur) => (cur && cur.id === updated.id ? updated : cur))
+    setSwitchTarget((cur) => (cur && cur.id === updated.id ? updated : cur))
   }
 
   const toggleRegex = async (index: number, disabled: boolean) => {
@@ -551,6 +589,17 @@ const LoreContent = () => {
           >
             {active ? t('lorePresetDeactivate') : t('lorePresetActivate')}
           </Button>
+          {preset.blocks.length > 0 ? (
+            <button
+              type="button"
+              className={styles.iconAction}
+              title={t('lorePresetSwitchesManage')}
+              aria-label={t('lorePresetSwitchesManage')}
+              onClick={() => setSwitchTarget(preset)}
+            >
+              <IconDataOutline16 />
+            </button>
+          ) : null}
           {(preset.regex_scripts?.length ?? 0) > 0 ? (
             <button
               type="button"
@@ -856,6 +905,14 @@ const LoreContent = () => {
         >
           <p>{confirmDesc}</p>
         </Modal>
+      ) : null}
+
+      {switchTarget ? (
+        <PresetSwitchesDialog
+          preset={switchTarget}
+          onClose={() => setSwitchTarget(null)}
+          onUpdated={applyPresetUpdate}
+        />
       ) : null}
 
       {regexTarget ? (

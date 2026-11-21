@@ -99,6 +99,26 @@ async def fire(state, uid: str, session_id: str, *, kind: str, brief: str,
             char = opening_character(session, member_character(speaker, sc.lore))
             world = effective_world(session, sc.lore)
             user_char = member_character(user_seat(session), sc.lore)
+            # 常驻条目里的 MVU 变量宏需要当前快照；只读渲染，不在这里写状态
+            from ..st import mvu as st_mvu
+
+            carrier = st_mvu.carrier_character(session, sc.lore)
+            if carrier is not None and st_mvu.ensure_session_state(
+                session, carrier,
+                user_name=st_mvu.session_user_name(session, sc.lore),
+            ):
+                sc.store.save_merged(session)
+            mvu_on = bool(
+                carrier is not None
+                and st_mvu.mvu_active(
+                    carrier, getattr(sc, "user_settings", None),
+                    getattr(state, "config", None),
+                )
+            )
+            variables = (
+                dict((session.mvu or {}).get("stat_data") or {})
+                if mvu_on else None
+            )
             system_prompt = build_member_system_prompt(
                 name=speaker.name,
                 memory=speaker.memory,
@@ -109,6 +129,7 @@ async def fire(state, uid: str, session_id: str, *, kind: str, brief: str,
                 base=DEFAULT_SYSTEM_PROMPT,
                 roleplay=getattr(state.config, "roleplay", None),
                 user_character=user_char,
+                variables=variables,
             )
             notice = Message(
                 role="user", content=brief, hidden=True,

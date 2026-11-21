@@ -14,13 +14,25 @@ from ..errors import ProviderError
 from ..schemas import Message, ToolCall
 
 
+# opencode zen 网关：思考由 reasoning_effort 控制（low/high/max，部分型号
+# 还接受 none）；不显式关闭时会默认输出思考。这里把二元开关映射为
+# high / none。显式的 thinking_params / thinking_off_params 仍优先。
+OPENCODE_THINKING_ON_EFFORT = "high"
+OPENCODE_THINKING_OFF_EFFORT = "none"
+
+
+def is_opencode_gateway(base_url: str) -> bool:
+    """base_url 是否指向 opencode 网关（zen）。"""
+    return "opencode" in (base_url or "").lower()
+
+
 def gateway_headers(base_url: str, session_id: str = "") -> Dict[str, str]:
     """网关类中转（base_url 含 opencode）要求的会话头。
 
     ``x-opencode-session`` 标识同一段对话，上游据此做会话粘滞；
     没有 FlyAI 会话 ID 的旁路调用（摘要、生图参数生成等）退回一次性 ID。
     """
-    if "opencode" not in (base_url or "").lower():
+    if not is_opencode_gateway(base_url):
         return {}
     return {"x-opencode-session": session_id or uuid.uuid4().hex}
 

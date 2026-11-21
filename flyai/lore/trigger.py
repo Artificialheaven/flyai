@@ -19,6 +19,7 @@ import re
 from difflib import SequenceMatcher
 from typing import List, Optional, Tuple
 
+from ..tavern import render_card_text
 from .budget import fit_blocks
 from .models import LoreEntry
 
@@ -34,12 +35,20 @@ _SEMANTIC_FILL_LIMIT = 30
 _SEG_RE = re.compile(r"[\s，。！？；：、,.!?;:…—~～\-_（）()【】\[\]\"'‘’“”]+")
 
 
-def entry_triggers(entry: LoreEntry) -> List[str]:
-    """条目生效的触发词：配置了 keys 用 keys，否则回退标题。"""
-    keys = [str(k).strip() for k in (entry.keys or []) if str(k or "").strip()]
+def entry_triggers(entry: LoreEntry, render=None) -> List[str]:
+    """条目生效的触发词：配置了 keys 用 keys，否则回退标题。
+
+    ``render`` 用于展开触发词里的 ``{{user}}``/``{{char}}``：提示词侧
+    已经换成实际名字，键仍是字面量宏时会永远命不中。
+    """
+    render = render or (lambda text: text or "")
+    keys = [
+        render(str(k).strip()) for k in (entry.keys or [])
+        if str(k or "").strip()
+    ]
     if keys:
         return keys
-    title = (entry.title or "").strip()
+    title = render((entry.title or "").strip())
     return [title] if title else []
 
 
@@ -76,29 +85,47 @@ def fuzzy_hit(term: str, text: str) -> bool:
 
 
 def keyword_hits(tables: List[Tuple[str, List[LoreEntry]]],
-                 text: str) -> List[Tuple[str, LoreEntry]]:
+                 text: str, render_key=None) -> List[Tuple[str, LoreEntry]]:
     """扫描各表非常驻条目的触发词，返回命中的 (kind, entry)，保持表内原序。"""
     out: List[Tuple[str, LoreEntry]] = []
     for kind, table in tables:
         for e in table or []:
             if getattr(e, "pinned", False):
                 continue  # 常驻条目已由 _pinned_block 注入，不重复
-            if any(fuzzy_hit(k, text) for k in entry_triggers(e)):
+            if any(fuzzy_hit(k, text) for k in entry_triggers(e, render_key)):
                 out.append((kind, e))
     return out
 
 
-def _entry_block(kind: str, e: LoreEntry) -> str:
-    title = e.title or "(无标题)"
+def _entry_block(kind: str, e: LoreEntry, *, char_name: str = "",
+                 user_name: str = "", group_names: Optional[List[str]] = None,
+                 variables=None) -> str:
     label = "角色资料" if kind == "character" else "世界设定"
-    return "『{0}』（{1}）\n{2}".format(title, label, e.content or "(空内容)")
+    title = render_card_text(
+        e.title or "(无标题)", char_name=char_name, user_name=user_name,
+        group_names=group_names,
+    )
+    content = render_card_text(
+        e.content or "(空内容)", char_name=char_name, user_name=user_name,
+        group_names=group_names, variables=variables,
+    )
+    return "『{0}』（{1}）\n{2}".format(title, label, content)
 
 
-def render_trigger_block(picked: List[Tuple[str, LoreEntry]]) -> str:
+def render_trigger_block(picked: List[Tuple[str, LoreEntry]], *,
+                         char_name: str = "", user_name: str = "",
+                         group_names: Optional[List[str]] = None,
+                         variables=None) -> str:
     """把命中条目渲染为注入块；预算内放不下的条目丢弃。无条目返回空串。"""
     if not picked:
         return ""
-    blocks = [_entry_block(kind, e) for kind, e in picked[:MAX_TRIGGER_ENTRIES]]
+    blocks = [
+        _entry_block(
+            kind, e, char_name=char_name, user_name=user_name,
+            group_names=group_names, variables=variables,
+        )
+        for kind, e in picked[:MAX_TRIGGER_ENTRIES]
+    ]
     kept, _dropped = fit_blocks(blocks, TRIGGER_BUDGET)
     if not kept:
         return ""

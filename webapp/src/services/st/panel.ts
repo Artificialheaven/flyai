@@ -7,16 +7,20 @@
  */
 
 import type { RegexScript } from '../flyai/types.js'
-import { applyDisplayScripts } from './regex.js'
+import { applyDisplayScripts, type MacroNames } from './regex.js'
 
 /** 渲染面板：占位符 + 展示侧正则 + 变量宏 → HTML 文本 */
 export const renderPanel = (
   token: string,
   scripts: readonly RegexScript[] | undefined,
-  variables: Record<string, unknown> | undefined
+  variables: Record<string, unknown> | undefined,
+  macroNames?: MacroNames
 ): string =>
   // 面板走白名单清洗，不抽沙箱应用（否则会残留哨兵）
-  applyDisplayScripts(token, scripts, undefined, variables, { cardApps: false })
+  applyDisplayScripts(token, scripts, undefined, variables, {
+    cardApps: false,
+    macroNames,
+  })
 
 export type StatRow = { key: string; value: string }
 

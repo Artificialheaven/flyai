@@ -13,7 +13,14 @@ import httpx
 
 from ..errors import ProviderError
 from ..schemas import Message, ToolCall
-from .base import BaseProvider, StreamEvent, StreamEventType
+from .base import (
+    OPENCODE_THINKING_OFF_EFFORT,
+    OPENCODE_THINKING_ON_EFFORT,
+    BaseProvider,
+    StreamEvent,
+    StreamEventType,
+    is_opencode_gateway,
+)
 
 
 def _cached_tokens(usage: Dict) -> int:
@@ -132,12 +139,22 @@ class OpenAICompatProvider(BaseProvider):
         # - thinking_params：开关开启时合并（默认不思考的模型靠它开启）
         # - thinking_off_params：开关关闭时合并（火山/DeepSeek 新版等默认思考
         #   的模型靠它显式关闭，如 {"thinking":{"type":"disabled"}}）
-        # 两者皆空则请求体不变，保留模型默认行为
+        # 两者皆空时：普通厂商保留模型默认行为；opencode 网关改用
+        # reasoning_effort=high/none 映射二元开关（网关默认就会思考，不显式
+        # 关闭则关不掉）。
+        auto_reasoning = False
         if deep_thinking:
             if getattr(self.cfg, "thinking_params", None):
                 body.update(self.cfg.thinking_params)
+            elif is_opencode_gateway(self.cfg.base_url):
+                if "reasoning_effort" not in body:
+                    body["reasoning_effort"] = OPENCODE_THINKING_ON_EFFORT
+                    auto_reasoning = True
         elif getattr(self.cfg, "thinking_off_params", None):
             body.update(self.cfg.thinking_off_params)
+        elif is_opencode_gateway(self.cfg.base_url):
+            body["reasoning_effort"] = OPENCODE_THINKING_OFF_EFFORT
+            auto_reasoning = True
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
         headers.update(self._gateway_headers(session_id))
 
@@ -146,8 +163,18 @@ class OpenAICompatProvider(BaseProvider):
             async for ev in self._run_stream(url, body, headers, True):
                 yield ev
         except ProviderError as exc:
-            if exc.status_code == 400 and "stream_options" in (exc.detail or ""):
+            detail = (exc.detail or "").lower()
+            if exc.status_code == 400 and "stream_options" in detail:
                 async for ev in self._run_stream(url, body, headers, False):
+                    yield ev
+            elif exc.status_code == 400 and auto_reasoning and (
+                    "thinking" in detail or "reasoning" in detail
+                    or "effort" in detail):
+                # 极少数网关型号（如 kimi-k2.7-code）只接受开启思考，
+                # reasoning_effort=none 会被拒。去掉自动注入的参数重试一次，
+                # 退回模型默认行为，避免整轮对话失败。
+                body.pop("reasoning_effort", None)
+                async for ev in self._run_stream(url, body, headers, True):
                     yield ev
             else:
                 raise

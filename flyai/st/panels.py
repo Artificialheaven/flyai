@@ -10,7 +10,7 @@
 
 识别规则（保守，宁可漏掉也不误判）：
 
-- 脚本未禁用、不是 ``promptOnly``（面板只在展示侧生效）；
+- 脚本未禁用、在展示侧生效（``promptOnly`` 单独为真时跳过）；
 - ``findRegex`` 是**字面量**：非空、≤200 字符、不以 ``/`` 开头（否则是正则
   字面量）、不含任何正则元字符；
 - 该字面量确实出现在开场白或替换问候中；
@@ -66,7 +66,9 @@ def detect_panels(character: Any) -> List[Dict[str, str]]:
             continue
         if raw.get("disabled"):
             continue
-        if raw.get("promptOnly"):
+        # 只看是否在展示侧生效：promptOnly 单独为真才排除；
+        # 两个标记同时为真按 ST 语义仍在展示侧执行。
+        if raw.get("promptOnly") and not raw.get("markdownOnly"):
             continue
         token = _literal_token(raw.get("findRegex"))
         if not token or token in seen:

@@ -67,9 +67,16 @@ def build_live_block(*, now: float, tzname: str,
                      mood_view: Optional[Dict[str, Any]] = None,
                      self_memory_block: str = "",
                      commitments: Optional[List[Dict[str, Any]]] = None,
-                     announce_text: str = "") -> str:
-    """把各实时片段拼成一条尾部 system 消息；全空时返回空串（不追加消息）。"""
-    sections: List[str] = [_clock_line(now, tzname)]
+                     announce_text: str = "",
+                     include_clock: bool = True) -> str:
+    """把各实时片段拼成一条尾部 system 消息；全空时返回空串（不追加消息）。
+
+    ``include_clock`` 对应个人「真实时间」开关（默认关）：关闭时不下发
+    当前时刻，其余实时片段照常。
+    """
+    sections: List[str] = []
+    if include_clock:
+        sections.append(_clock_line(now, tzname))
     if announce_text:
         # 待宣布的内心独白：本轮注入，ChatRun 成功后才置 injected
         sections.append(announce_text)
@@ -77,9 +84,6 @@ def build_live_block(*, now: float, tzname: str,
     if self_memory_block:
         sections.append(self_memory_block.strip())
     sections.extend(_commitment_lines(commitments or [], now, tzname))
-    if len(sections) == 1:
-        # 只有时钟行：信息量不足以扰动前缀，仍然保留（作业/提醒类场景依赖时间感）
-        pass
     return "\n".join(sections)
 
 
@@ -140,6 +144,8 @@ async def render_for_turn(state, sc, *, session_id: str,
         now=now, tzname=tzname, mood_view=mood_view,
         self_memory_block=self_block, commitments=commitments,
         announce_text=announce_text,
+        include_clock=bool(getattr(getattr(sc, "user_settings", None),
+                                   "real_time_enabled", False)),
     )
 
 

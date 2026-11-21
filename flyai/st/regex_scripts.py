@@ -6,6 +6,7 @@
 - ``replaceString``：JS 替换语法（``$1`` / ``$&`` / ``$`` / ``$'`` / ``$<name>``）；
 - ``placement``：1=用户消息，2=AI 消息（可同时包含）；其他位置忽略；
 - ``markdownOnly`` / ``promptOnly``：只在展示侧 / 只在 prompt 侧执行；
+  两个标记同时为真时两侧都执行（与 ST ``getRegexedString`` 一致）；
 - ``disabled``、``runOnEdit``、``minDepth`` / ``maxDepth``（0/缺省=无限制）、
   ``trimStrings``（按近似语义修剪替换结果首尾）。
 
@@ -19,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..schemas import Message
 
@@ -238,9 +239,11 @@ def compile_scripts(
             continue
         if script.disabled:
             continue
-        if side == "prompt" and script.markdown_only:
+        # 与 ST `getRegexedString` 对齐：markdownOnly 只在展示侧、promptOnly
+        # 只在 prompt 侧；两个标记同时为真时两侧都执行（各自命中一个条件）。
+        if side == "prompt" and script.markdown_only and not script.prompt_only:
             continue
-        if side == "display" and script.prompt_only:
+        if side == "display" and script.prompt_only and not script.markdown_only:
             continue
         scripts.append(script)
     return scripts, warnings
@@ -351,9 +354,10 @@ def apply_scripts(
     for script in scripts:
         if script.disabled or needed not in script.placement:
             continue
-        if side == "prompt" and script.markdown_only:
+        # 同 compile_scripts：两个 only 同时为真 = 两侧都生效
+        if side == "prompt" and script.markdown_only and not script.prompt_only:
             continue
-        if side == "display" and script.prompt_only:
+        if side == "display" and script.prompt_only and not script.markdown_only:
             continue
         if depth is not None:
             if script.min_depth and depth < script.min_depth:
@@ -388,6 +392,7 @@ def apply_to_messages(
     fallback: Optional[Sequence[Script]] = None,
     side: str = "prompt",
     extra: Optional[Sequence[Script]] = None,
+    render: Optional[Callable[[str], str]] = None,
 ) -> List[Message]:
     """对消息列表应用 prompt 侧脚本。返回新列表（未命中的消息复用原对象）。
 
@@ -419,6 +424,10 @@ def apply_to_messages(
         if new_content is getattr(m, "content", None):
             out.append(m)
         else:
+            # 正则替换串里的酒馆宏/变量宏与提示词侧同源展开；只处理
+            # 被脚本改过的消息，避免改动用户原文里的字面量。
+            if render is not None and new_content is not None:
+                new_content = render(new_content)
             from dataclasses import replace
 
             out.append(replace(m, content=new_content))

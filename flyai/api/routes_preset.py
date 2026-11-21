@@ -113,6 +113,35 @@ class RegexFlagPayload(BaseModel):
     disabled: bool
 
 
+class BlockStateChange(BaseModel):
+    index: int
+    enabled: bool
+
+
+class BlockStatesPayload(BaseModel):
+    changes: List[BlockStateChange]
+
+
+@router.put("/{pid}/blocks")
+def toggle_preset_blocks(pid: str, payload: BlockStatesPayload, request: Request):
+    """批量开关预设内 prompt 块（按列表下标），单选分组可一次提交多条。"""
+    sc = _sc(request)
+    _safe_pid(pid)
+    cur = sc.presets.get(pid)
+    if cur is None:
+        raise HTTPException(404, "预设不存在")
+    if not payload.changes:
+        raise HTTPException(400, "没有要修改的条目")
+    total = len(cur.blocks)
+    for change in payload.changes:
+        if change.index < 0 or change.index >= total:
+            raise HTTPException(404, "条目不存在")
+    for change in payload.changes:
+        cur.blocks[change.index].enabled = bool(change.enabled)
+    sc.presets.save(cur)
+    return cur.to_dict()
+
+
 @router.put("/{pid}/regex/{index}")
 def toggle_preset_regex(pid: str, index: int, payload: RegexFlagPayload,
                         request: Request):

@@ -244,3 +244,14 @@ def test_wrappers_equal_explicit_build():
         char, world,
         PromptOptions(base="BASE", audience=["甲"], memory="记忆", cross_memory_hint=True),
     )
+
+
+def test_non_mvu_pinned_expands_names_but_keeps_other_macros():
+    char = Character(
+        name="零号",
+        table=[LoreEntry("常驻", "{{char}}/{{user}}/{{random:a,b}}", pinned=True)],
+    )
+    prompt = build_system_prompt(char, None, "BASE")
+    assert "零号/用户" in prompt
+    assert "{{char}}" not in prompt and "{{user}}" not in prompt
+    assert "{{random:a,b}}" in prompt

@@ -13,10 +13,13 @@ import {
   extractCardApps,
   isCardAppReplacement,
   needsJQuery,
+  needsLodash,
   sanitizeCardAppVariables,
   stripAppFence,
   stripJQueryTags,
+  stripLodashTags,
 } from './cardApp.js'
+import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
 import { applyDisplayScripts } from './regex.js'
 
 const APP =
@@ -161,6 +164,68 @@ describe('内置 jQuery', () => {
   it('不引用 jQuery 的卡片不额外注入', () => {
     const doc = buildCardAppDoc(APP, { message: '' })
     expect(doc).not.toContain('jQuery v3.6.0')
+  })
+})
+
+describe('内置 lodash', () => {
+  const LODASH_TAG =
+    '<script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>'
+  const LODASH_APP =
+    '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' +
+    '<script>var t = _.get({ a: { b: 1 } }, "a.b")</script>' +
+    '<div id="app"></div></body></html>'
+
+  it('检测 lodash 标签或 _. / lodash. 用法', () => {
+    expect(needsLodash(`<html><head>${LODASH_TAG}</head></html>`)).toBe(true)
+    expect(
+      needsLodash(`<script>const t = _.get(stat, '世界.当前时间')</script>`)
+    ).toBe(true)
+    expect(needsLodash('<script>_(items).map(fn).value()</script>')).toBe(true)
+    expect(needsLodash('<script>lodash.get(stat, "a")</script>')).toBe(true)
+    // 普通标识符不算 lodash
+    expect(needsLodash('<script>const snake_case = 1; foo_bar()</script>')).toBe(
+      false
+    )
+    expect(needsLodash(APP)).toBe(false)
+  })
+
+  it('移除卡片自带 lodash 标签，保留其它脚本', () => {
+    const html = `<head>${LODASH_TAG}<script src="https://cdn.jsdelivr.net/x.js"></script></head>`
+    const out = stripLodashTags(html)
+    expect(out).not.toContain('lodash.min.js')
+    expect(out).toContain('cdn.jsdelivr.net/x.js')
+  })
+
+  it('需要时内联内置 lodash，且先于 shim 与卡内脚本', () => {
+    const html = LODASH_APP.replace(
+      '<meta charset="utf-8">',
+      `<meta charset="utf-8">${LODASH_TAG}`
+    )
+    const doc = buildCardAppDoc(html, { message: '' })
+    expect(doc).not.toContain('lodash@4.17.21/lodash.min.js')
+    expect(doc).toContain('__lodashVendor')
+    expect(doc).toContain('window._ = __lodashVendor')
+    expect(doc.indexOf('__lodashVendor')).toBeLessThan(
+      doc.indexOf('flyai-card-resize')
+    )
+    expect(doc.indexOf('__lodashVendor')).toBeLessThan(
+      doc.indexOf('var t = _.get')
+    )
+  })
+
+  it('不引用 lodash 的卡片不额外注入', () => {
+    const doc = buildCardAppDoc(APP, { message: '' })
+    expect(doc).not.toContain('__lodashVendor')
+  })
+
+  it('内置 bundle 可执行，`_.get` 能读 stat_data', () => {
+    const factory = new Function(`${LODASH_SOURCE}; return __lodashVendor;`)
+    const lodash = factory() as {
+      get: (value: unknown, path: string, fallback?: unknown) => unknown
+    }
+    const stat = { 世界: { 当前时间: '放学后' } }
+    expect(lodash.get(stat, '世界.当前时间', '未知')).toBe('放学后')
+    expect(lodash.get(stat, '世界.当前地点', '未知')).toBe('未知')
   })
 })
 

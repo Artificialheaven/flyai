@@ -106,6 +106,106 @@ def _format_variable(value) -> str:
     return str(value)
 
 
+# ST-Prompt-Template / EJS 标记：FlyAI 不执行卡内 JS，只做安全降级。
+_EJS_TAG_RE = re.compile(r"<%[\s\S]*?%>")
+_EJS_GETVAR_OUT_RE = re.compile(
+    r"<%=\s*getvar\(\s*(['\"])([^'\"]+)\1(?:\s*,[\s\S]*?)?\)\s*%>"
+)
+
+
+def strip_prompt_template(text: str, variables=None) -> str:
+    """降级处理酒馆提示词模板（ST-Prompt-Template / EJS）。
+
+    卡内世界书条目常用 ``<%_ … _%>`` 模板按变量生成提示词。FlyAI 没有
+    EJS / JS 引擎，也不在服务端执行卡内脚本，这里只做保守降级：
+
+    - ``<%= getvar('path', …) %>`` 能从 variables 解析时替换为实际值；
+    - 其余 ``<% … %>`` 标记整体移除，保留模板外的静态文本；
+    - 压缩因移除产生的多余空行，避免把模板代码原样发给模型。
+
+    不含 ``<%`` 的普通文本原样返回。variables 为 None 时只做标记移除。
+    """
+    if not isinstance(text, str) or "<%" not in text:
+        return text or ""
+    out = text
+    if variables is not None:
+        def _getvar(match: "re.Match[str]") -> str:
+            return _format_variable(
+                resolve_message_variable(variables, match.group(2))
+            )
+
+        out = _EJS_GETVAR_OUT_RE.sub(_getvar, out)
+    out = _EJS_TAG_RE.sub("", out)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
+def render_name_macros(
+    text: str,
+    *,
+    char_name: str = "",
+    user_name: str = "",
+    group_names: Optional[List[str]] = None,
+    last_message: str = "",
+) -> str:
+    """只展开角色/用户/群名/上一条消息，保留其余宏。
+
+    用于非 MVU 会话：既要把 ``{{user}}``/``{{char}}`` 换成人名，又不能像
+    完整渲染那样对 ``{{random}}`` 等宏逐次求值或把未知宏直接剥空。
+    """
+    if not text:
+        return text or ""
+    out = _COMMENT_RE.sub("", text)
+    out = _SETVAR_RE.sub("", out)
+    out = _GETVAR_RE.sub("", out)
+    group_text = "、".join(group_names or [])
+    repl = [
+        (r"\{\{\s*char\s*\}\}", char_name or "角色"),
+        (r"\{\{\s*user\s*\}\}", user_name or "用户"),
+        (r"\{\{\s*group\s*\}\}", group_text),
+        (r"\{\{\s*lastUserMessage\s*\}\}", last_message or ""),
+    ]
+    for pat, val in repl:
+        out = re.sub(pat, lambda _m, v=val: v, out, flags=re.IGNORECASE)
+    return out
+
+
+def render_card_text(
+    text: str,
+    *,
+    char_name: str = "",
+    user_name: str = "",
+    group_names: Optional[List[str]] = None,
+    last_message: str = "",
+    variables=None,
+    rng: Optional[random.Random] = None,
+) -> str:
+    """卡内文本统一渲染入口。
+
+    - 有 MVU 变量时：完整宏渲染（含 ``{{format_message_variable}}``）并剥 EJS；
+    - 无变量时：剥 EJS + 只展开名字宏，``{{random}}`` 等保持原样，避免每次
+      构建都被重新求值。
+    """
+    if variables is not None:
+        return render_tavern_macros(
+            text or "",
+            char_name=char_name,
+            user_name=user_name,
+            group_names=group_names,
+            last_message=last_message,
+            variables=variables,
+            rng=rng,
+        )
+    return render_name_macros(
+        strip_prompt_template(text or "", variables=None),
+        char_name=char_name,
+        user_name=user_name,
+        group_names=group_names,
+        last_message=last_message,
+    )
+
+
 def render_tavern_macros(
     text: str,
     *,
@@ -154,4 +254,5 @@ def render_tavern_macros(
         out = re.sub(pat, lambda _m, v=val: v, out, flags=re.IGNORECASE)
     # 其余未识别宏（{{personality}}/{{model}} 等）一律剥除
     out = _ANY_MACRO_RE.sub("", out)
-    return out
+    # EJS 模板标记：不执行，只移除/尽量展开 getvar
+    return strip_prompt_template(out, variables)

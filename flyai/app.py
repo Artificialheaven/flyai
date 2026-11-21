@@ -12,8 +12,11 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import GZipResponder
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.datastructures import Headers
 
 import time
 
@@ -52,6 +55,41 @@ from .user import ADMIN_UID, UserScope, UserStore, migrate_legacy
 logger = logging.getLogger("flyai")
 
 WEB_DIR = Path(__file__).resolve().parent / "web" / "static"
+
+
+class _SSESafeGZipResponder(GZipResponder):
+    """流式事件（text/event-stream）原样直通。
+
+    starlette 0.41 的 GZip 会把 SSE 也压进 gzip 缓冲（GZipFile 内部要攒满一块才
+    吐数据），逐帧输出会被延迟甚至憋到流结束。聊天/后台任务都靠 SSE，必须跳过。
+    """
+
+    _passthrough = False
+
+    async def send_with_gzip(self, message):  # type: ignore[override]
+        if message["type"] == "http.response.start":
+            headers = Headers(raw=message["headers"])
+            if headers.get("content-type", "").startswith("text/event-stream"):
+                self._passthrough = True
+                await self.send(message)
+                return
+        elif self._passthrough:
+            await self.send(message)
+            return
+        await super().send_with_gzip(message)
+
+
+class SSEAwareGZipMiddleware(GZipMiddleware):
+    async def __call__(self, scope, receive, send):  # type: ignore[override]
+        if scope["type"] == "http":
+            headers = Headers(scope=scope)
+            if "gzip" in headers.get("accept-encoding", ""):
+                responder = _SSESafeGZipResponder(
+                    self.app, self.minimum_size, compresslevel=self.compresslevel
+                )
+                await responder(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 @dataclass
@@ -565,6 +603,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+    # 大 JSON（会话详情、内容库列表）走 gzip；SSE 由上面的响应器跳过
+    app.add_middleware(SSEAwareGZipMiddleware, minimum_size=1024)
 
     @app.middleware("http")
     async def no_cache_app_shell(request, call_next):

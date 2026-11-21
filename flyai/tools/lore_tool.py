@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ..lore.query import _KEYWORD_LIMIT_DEFAULT
+from ..tavern import render_card_text
 from .base import Tool, ToolContext, ToolResult
 
 
@@ -45,6 +46,16 @@ class QueryLoreTool(Tool):
         querier = services.get("lore")
         if querier is None:
             return ToolResult(ok=False, output="[工具错误] 当前会话未绑定角色或世界观，无法查询")
+        macro = services.get("macro_ctx") or {}
+
+        def _render(text: str) -> str:
+            return render_card_text(
+                text or "",
+                char_name=macro.get("char_name", "") or "",
+                user_name=macro.get("user_name", "") or "",
+                group_names=macro.get("group_names") or [],
+                variables=macro.get("variables"),
+            )
 
         if kind not in querier.available_kinds():
             return ToolResult(
@@ -83,8 +94,8 @@ class QueryLoreTool(Tool):
 
         blocks = []
         for e in matches:
-            title = e.title or "(无标题)"
-            content = e.content or "(空内容)"
+            title = _render(e.title or "(无标题)")
+            content = _render(e.content or "(空内容)")
             blocks.append(f"『{title}』\n{content}")
         return ToolResult(
             ok=True,

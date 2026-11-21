@@ -114,6 +114,39 @@ def _normalize_yaml_block(raw: str) -> str:
     return textwrap.dedent(text.strip("\n"))
 
 
+_INIT_MACRO_RE = re.compile(r"\{\{\s*(user|char|group)\s*\}\}", re.IGNORECASE)
+_INIT_MACRO_KEY_RE = re.compile(r"^\{\{\s*(user|char|group)\s*\}\}$", re.IGNORECASE)
+
+
+def _macro_value(kind: str, char_name: str, user_name: str,
+                 group_names: Optional[Sequence[str]]) -> str:
+    """与提示词侧 ``render_tavern_macros`` 同名的回退值，保证两边一致。"""
+    if kind == "char":
+        return char_name or "角色"
+    if kind == "user":
+        return user_name or "用户"
+    return "、".join(group_names or [])
+
+
+def _expand_init_macros(text: str, char_name: str = "", user_name: str = "",
+                        group_names: Optional[Sequence[str]] = None) -> str:
+    """展开 InitVar YAML 里的 ``{{user}}/{{char}}/{{group}}``。
+
+    MVU 状态键必须与提示词里模型看到的键一致。提示词侧世界书渲染会把
+    ``{{user}}`` 展开成用户名，而 InitVar 若不展开，本地 stat_data 会停在
+    字面量 ``{{user}}`` 上；模型按提示词里的名字生成 patch 路径后，整块
+    更新会因“路径不存在”被原子丢弃（面板数值因此不再变化）。
+    """
+    if not isinstance(text, str) or "{{" not in text:
+        return text or ""
+
+    def _repl(match: "re.Match[str]") -> str:
+        return _macro_value(match.group(1).lower(), char_name, user_name,
+                            group_names)
+
+    return _INIT_MACRO_RE.sub(_repl, text)
+
+
 def _merge_inline_init(text: str, merged: Dict[str, Any],
                        warnings: List[str]) -> None:
     """把开场白内联 ``<InitVar>`` 块合并进 ``merged``（后者覆盖前者）。"""
@@ -141,10 +174,16 @@ def _merge_inline_init(text: str, merged: Dict[str, Any],
             deep_merge(merged, _stat_root(parsed))
 
 
-def load_init_var(table: Sequence[Any], first_mes: str = "") -> Tuple[Dict[str, Any], List[str]]:
+def load_init_var(table: Sequence[Any], first_mes: str = "", *,
+                  char_name: str = "", user_name: str = "",
+                  group_names: Optional[Sequence[str]] = None,
+                  ) -> Tuple[Dict[str, Any], List[str]]:
     """合并 ``[InitVar]`` 世界书条目与开场白内联 ``<InitVar>``。返回 (stat_data, warnings)。
 
     合并顺序：先 table 条目，后开场白内联块——内联更贴近本局实际开场，覆盖前者。
+    ``char_name``/``user_name`` 与提示词侧宏替换使用同一组名字；InitVar 里的
+    ``{{user}}`` 等标记必须先展开再解析 YAML，否则状态键与模型写的 patch 路径
+    不一致（见 ``_expand_init_macros``）。
     """
     warnings: List[str] = []
     merged: Dict[str, Any] = {}
@@ -155,7 +194,10 @@ def load_init_var(table: Sequence[Any], first_mes: str = "") -> Tuple[Dict[str, 
             warnings.append("缺少 PyYAML，[InitVar] 无法解析")
             return {}, warnings
         for raw in _fence_blocks(_entry_content(entry)):
-            raw = raw.strip()
+            raw = _expand_init_macros(
+                raw, char_name=char_name, user_name=user_name,
+                group_names=group_names,
+            ).strip()
             if not raw:
                 continue
             if len(raw) > MAX_INIT_YAML:
@@ -170,7 +212,13 @@ def load_init_var(table: Sequence[Any], first_mes: str = "") -> Tuple[Dict[str, 
                 warnings.append("[InitVar] 顶层不是对象，已忽略")
                 continue
             deep_merge(merged, _stat_root(parsed))
-    _merge_inline_init(first_mes or "", merged, warnings)
+    _merge_inline_init(
+        _expand_init_macros(
+            first_mes or "", char_name=char_name, user_name=user_name,
+            group_names=group_names,
+        ),
+        merged, warnings,
+    )
     return merged, warnings
 
 
@@ -204,18 +252,44 @@ def card_uses_mvu(character: Any) -> bool:
     return False
 
 
-def build_initial_state(character: Any) -> Tuple[Dict[str, Any], List[str]]:
+def selected_greeting(character: Any, index: Any) -> str:
+    """按会话记录的 greeting_index 取开场白原文；越界/空回落到 first_mes。"""
+    try:
+        idx = int(index or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if idx > 0:
+        alts = list(getattr(character, "alternate_greetings", None) or [])
+        if 0 <= idx - 1 < len(alts):
+            text = str(alts[idx - 1] or "").strip()
+            if text:
+                return text
+    return getattr(character, "first_mes", "") or ""
+
+
+def build_initial_state(character: Any, *, user_name: str = "",
+                        group_names: Optional[Sequence[str]] = None,
+                        first_mes: Optional[str] = None,
+                        ) -> Tuple[Dict[str, Any], List[str]]:
     """为角色卡构造会话级 MVU 初值。
 
     返回 (state, warnings)，state 形如
     ``{"enabled", "initialized", "char_id", "initial", "stat_data"}``。
+    ``user_name`` 需与提示词侧一致：没有用户角色卡时传空串，由宏回退成
+    ``"用户"``，与 ``render_tavern_macros`` 相同。``first_mes`` 用于覆盖
+    角色卡默认开场白（会话选择了备用问候时，其内联 ``<InitVar>`` 也要生效）。
     """
     warnings: List[str] = []
     if not card_uses_mvu(character):
         return {"enabled": False}, warnings
+    if first_mes is None:
+        first_mes = getattr(character, "first_mes", "") or ""
     init_data, init_warnings = load_init_var(
         getattr(character, "table", None) or [],
-        getattr(character, "first_mes", "") or "",
+        first_mes,
+        char_name=getattr(character, "name", "") or "",
+        user_name=user_name,
+        group_names=group_names,
     )
     warnings.extend(init_warnings)
     return {
@@ -502,29 +576,173 @@ def mvu_active(character: Any, user_settings: Any, cfg: Any) -> bool:
     return True if value is None else bool(value)
 
 
-def ensure_session_state(session: Any, character: Any) -> bool:
+def _macro_key_target(key: Any, char_name: str, user_name: str,
+                      group_names: Optional[Sequence[str]]) -> Optional[str]:
+    """把字面量 ``{{user}}`` 一类的键换成提示词侧同名值；非宏键返回 None。"""
+    if not isinstance(key, str):
+        return None
+    match = _INIT_MACRO_KEY_RE.match(key.strip())
+    if match is None:
+        return None
+    target = _macro_value(match.group(1).lower(), char_name, user_name,
+                          group_names)
+    return target or None
+
+
+def _merge_missing(base: Dict[str, Any], extra: Dict[str, Any]) -> None:
+    """只补 base 缺失的键，已有值（通常更新过）优先保留。"""
+    for key, value in (extra or {}).items():
+        if key not in base:
+            base[key] = copy.deepcopy(value)
+        elif isinstance(base[key], dict) and isinstance(value, dict):
+            _merge_missing(base[key], value)
+
+
+def _rename_macro_keys(value: Any, char_name: str, user_name: str,
+                       group_names: Optional[Sequence[str]]) -> bool:
+    """递归展开状态里的宏键与宏文本（InitVar 旧数据迁移用）。返回是否改动。"""
+    changed = False
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            target = _macro_key_target(key, char_name, user_name, group_names)
+            if target and target != key:
+                item = value.pop(key)
+                if target in value:
+                    if isinstance(value[target], dict) and isinstance(item, dict):
+                        _merge_missing(value[target], item)
+                else:
+                    value[target] = item
+                key = target
+                changed = True
+            child = value.get(key)
+            if isinstance(child, str):
+                expanded = _expand_init_macros(
+                    child, char_name=char_name, user_name=user_name,
+                    group_names=group_names,
+                )
+                if expanded != child:
+                    value[key] = expanded
+                    changed = True
+            elif isinstance(child, (dict, list)):
+                if _rename_macro_keys(child, char_name, user_name,
+                                      group_names):
+                    changed = True
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            if isinstance(item, str):
+                expanded = _expand_init_macros(
+                    item, char_name=char_name, user_name=user_name,
+                    group_names=group_names,
+                )
+                if expanded != item:
+                    value[idx] = expanded
+                    changed = True
+            elif _rename_macro_keys(item, char_name, user_name, group_names):
+                changed = True
+    return changed
+
+
+def _replay_updates_from_initial(session: Any, state: Dict[str, Any],
+                                 char_name: str, user_name: str,
+                                 group_names: Optional[Sequence[str]]) -> None:
+    """从 InitVar 初值顺序重放可见消息的更新块，修复旧版本漏掉的更新。
+
+    只在宏键迁移时调用（一次性）；正常加载仍以消息快照为准。重放比“信任
+    最后一个快照”更能恢复此前因路径不匹配被整块丢弃的合法改动。
+    """
+    base = copy.deepcopy(state.get("initial") or {})
+    carrier_id = str(state.get("char_id") or "")
+    for msg in snapshot_messages(session):
+        if getattr(msg, "role", "") != "assistant":
+            continue
+        if getattr(msg, "hidden", False) or getattr(msg, "tombstone", None):
+            continue
+        content = getattr(msg, "content", "") or ""
+        if not content:
+            continue
+        mid = str(getattr(msg, "character_id", "") or "")
+        if mid and carrier_id and mid != carrier_id:
+            continue
+        patches, _warnings = extract_patches(content)
+        if not patches:
+            continue
+        base, _applied, _warns = apply_updates(base, content)
+        msg.stat_data = copy.deepcopy(base)
+    state["stat_data"] = base
+
+
+def migrate_macro_keys(session: Any, char_name: str = "", user_name: str = "",
+                       group_names: Optional[Sequence[str]] = None,
+                       replay: bool = True) -> bool:
+    """迁移旧会话里未展开的 InitVar 宏键，并重放更新块。返回是否改动。
+
+    旧实现直接解析原始 YAML，``{{user}}`` 会作为字面量键留在 ``stat_data``；
+    而提示词侧已展开成 ``"用户"``/用户角色名，模型据此生成的 patch 全部
+    落空。迁移改名后按消息顺序重放，恢复此前被丢弃的更新。
+    """
+    state = getattr(session, "mvu", None)
+    if not isinstance(state, dict) or not state.get("enabled"):
+        return False
+    # 只有“状态仍等于初值”时才敢从 messages 重放：若 stat_data 已有
+    # 成功更新或用户手工写回，重放会把这些非消息来源的改动覆盖掉。
+    pristine = (copy.deepcopy(state.get("stat_data") or {})
+                == copy.deepcopy(state.get("initial") or {}))
+    changed = False
+    for field in ("initial", "stat_data"):
+        value = state.get(field)
+        if isinstance(value, dict):
+            if _rename_macro_keys(value, char_name, user_name, group_names):
+                changed = True
+    for msg in snapshot_messages(session):
+        snapshot = getattr(msg, "stat_data", None)
+        if isinstance(snapshot, dict):
+            if _rename_macro_keys(snapshot, char_name, user_name, group_names):
+                changed = True
+    if not changed:
+        return False
+    if replay and pristine:
+        _replay_updates_from_initial(session, state, char_name, user_name,
+                                     group_names)
+    session.mvu = state
+    return True
+
+
+def ensure_session_state(session: Any, character: Any = None, *,
+                         user_name: str = "",
+                         group_names: Optional[Sequence[str]] = None,
+                         ) -> bool:
     """惰性初始化/换卡重建会话 MVU 状态。返回是否改动（调用方据此落盘）。
 
-    - 载体卡不可解析（被删除或重新导入换了 id）：**保留**已有状态。打开会话
-      时若在这里清空，会把历史 ``stat_data`` 永久抹掉；
+    - 载体卡不可解析（被删除或重新导入换了 id）：**保留**已有状态，但会
+      迁移未展开的 InitVar 宏键。打开会话时若在这里清空，会把历史
+      ``stat_data`` 永久抹掉；
     - 载体卡明确不使用 MVU：清空 ``session.mvu``（非空时才返回 True）；
-    - 已初始化且角色一致：无操作；
+    - 已初始化且角色一致：只做宏键迁移，通常无操作；
     - 否则按 InitVar 重建，``stat_data`` 回到初值（换卡后旧状态不沿用）。
     """
     state = getattr(session, "mvu", None)
     if not isinstance(state, dict):
         state = {}
     if character is None:
-        return False
+        return migrate_macro_keys(session, user_name=user_name,
+                                  group_names=group_names)
     if not card_uses_mvu(character):
         if state:
             session.mvu = {}
             return True
         return False
+    char_name = str(getattr(character, "name", "") or "")
     char_id = str(getattr(character, "id", "") or "")
     if state.get("initialized") and state.get("char_id") == char_id:
-        return False
-    new_state, _warnings = build_initial_state(character)
+        return migrate_macro_keys(session, char_name=char_name,
+                                  user_name=user_name,
+                                  group_names=group_names)
+    new_state, _warnings = build_initial_state(
+        character, user_name=user_name, group_names=group_names,
+        first_mes=selected_greeting(
+            character, getattr(session, "greeting_index", 0)
+        ),
+    )
     session.mvu = new_state
     return True
 
@@ -582,11 +800,25 @@ def recover_orphan_state(session: Any) -> bool:
     return True
 
 
+def session_user_name(session: Any, lore: Any) -> str:
+    """用户角色名；与提示词侧一致（无用户卡时返回空串，宏回退成 "用户"）。"""
+    try:
+        from ..sessions.resolve import member_character, user_seat
+
+        user_char = member_character(user_seat(session), lore)
+        return str(getattr(user_char, "name", "") or "")
+    except Exception:
+        return ""
+
+
 def sync_session_state(session: Any, lore: Any) -> bool:
     """会话加载时的惰性初始化 + 快照重算。返回是否改动（调用方据此落盘）。"""
     character = carrier_character(session, lore)
-    changed = ensure_session_state(session, character)
+    user_name = session_user_name(session, lore)
+    changed = ensure_session_state(session, character, user_name=user_name)
     if character is None and recover_orphan_state(session):
+        # 孤儿状态来自消息快照，initial 为空：只改名、不从空初值重放
+        migrate_macro_keys(session, user_name=user_name, replay=False)
         changed = True
     if recompute_state(session, snapshot_messages(session)):
         changed = True
