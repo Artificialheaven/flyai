@@ -180,6 +180,20 @@ def test_custom_tools_roundtrip_visible_to_all_users(tmp_path):
     assert {m["id"] for m in view["image_models"]} == {"img-open", "img-gated"}
 
 
+def test_lore_settings_roundtrip_and_clamp(tmp_path):
+    state = _mkstate(tmp_path)
+    # 默认段随配置下发（不含密钥）
+    assert get_config(_req(state))["lore"]["max_card_mb"] == 50
+    put_config(ConfigPayload(lore={"max_card_mb": 120}), _req(state))
+    assert state.config.lore.max_card_mb == 120
+    assert get_config(_req(state))["lore"]["max_card_mb"] == 120
+    # 已写入磁盘
+    assert load_config(tmp_path / "config.json").lore.max_card_mb == 120
+    # 越界值按 1–200 收口
+    put_config(ConfigPayload(lore={"max_card_mb": 9999}), _req(state))
+    assert state.config.lore.max_card_mb == 200
+
+
 def test_put_config_credits_masked_embeddings_key(tmp_path):
     state = _mkstate(tmp_path)
     payload = ConfigPayload(embeddings={

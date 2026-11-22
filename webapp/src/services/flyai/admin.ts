@@ -171,6 +171,8 @@ export type AdminConfig = {
   web_search: { enabled: boolean; results_num?: number; max_page_chars?: number; engine?: string }
   browser: { enabled: boolean; headless?: boolean; proxy?: string }
   galgame: { enabled: boolean; max_loops: number }
+  /** 内容库导入限制（所有登录用户可见） */
+  lore?: { max_card_mb: number }
   tts: TtsGlobalView
   loop: { enabled: boolean }
   /** 权限门槛：所有登录用户可见 */

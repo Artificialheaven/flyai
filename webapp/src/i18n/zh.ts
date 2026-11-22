@@ -1094,6 +1094,11 @@ export const zh = {
   systemImage: '生图',
   systemImageSize: '默认尺寸',
   systemImageSizeDesc: '未指定尺寸时使用的默认分辨率',
+  systemLore: '内容库导入',
+  systemLoreHint: '控制角色卡文件的上传大小；超限会在导入时直接拒绝。',
+  systemLoreMaxCardMb: '角色卡上限（MB）',
+  systemLoreMaxCardMbHint:
+    'PNG 卡含内嵌头像像素，默认 50MB，可设 1–200；保存后立即生效（还需 nginx 放行同等大小）',
   systemStCard: '卡片沙箱',
   systemStCardHint:
     '整页卡片（HTML+JS）的扩展能力策略；管理员在此开启后，用户才能在个人设置里使用对应开关',

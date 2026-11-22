@@ -28,7 +28,8 @@ from .models import Character
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _CARD_KEYS = ("ccv3", "chara")
-_MAX_BYTES = 10 * 1024 * 1024  # 卡片（含内嵌 JSON 与头像像素）上限
+_MAX_BYTES = 50 * 1024 * 1024  # 卡片（含内嵌 JSON 与头像像素）上限
+_MAX_MB = _MAX_BYTES // (1024 * 1024)
 
 
 class CardImportError(ValueError):
@@ -84,10 +85,17 @@ def _decode_text_chunk(ctype: bytes, data: bytes) -> Optional[tuple]:
     return None
 
 
-def extract_card_json(raw: bytes) -> Dict[str, Any]:
-    """从 PNG 或纯 JSON 字节中取出卡片信封 dict。"""
-    if len(raw) > _MAX_BYTES:
-        raise CardImportError("卡片文件过大（>10MB）")
+def extract_card_json(
+    raw: bytes, max_bytes: Optional[int] = None
+) -> Dict[str, Any]:
+    """从 PNG 或纯 JSON 字节中取出卡片信封 dict。
+
+    max_bytes 由调用方按配置传入；缺省使用模块默认上限。
+    """
+    limit = _MAX_BYTES if max_bytes is None else max(1, int(max_bytes))
+    if len(raw) > limit:
+        limit_mb = max(1, limit // (1024 * 1024))
+        raise CardImportError("卡片文件过大（>%dMB）" % limit_mb)
     if raw.lstrip()[:1] == b"{":
         try:
             return json.loads(raw.decode("utf-8"))

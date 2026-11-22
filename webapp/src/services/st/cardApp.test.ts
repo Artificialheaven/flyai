@@ -38,6 +38,12 @@ describe('isCardAppReplacement', () => {
     const big = APP + ' '.repeat(MAX_CARD_APP_LENGTH)
     expect(isCardAppReplacement(big)).toBe(false)
   })
+
+  it('900KB 的整页应用仍可进入沙箱', () => {
+    // 实际卡（约会大作战）的开场建档页约 903KB，旧 512KB 上限会退化成代码块
+    const big = APP + ' '.repeat(900 * 1024)
+    expect(isCardAppReplacement(big)).toBe(true)
+  })
 })
 
 describe('stripAppFence', () => {

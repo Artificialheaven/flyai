@@ -79,6 +79,7 @@ type FormState = {
   promptTemplateMinLevel: string
   galgameEnabled: boolean
   galgameLoops: string
+  loreMaxCardMb: string
   ttsEnabled: boolean
   ttsMinLevel: string
   ttsEngine: 'deepseek' | 'doubao'
@@ -149,6 +150,7 @@ const toForm = (config: AdminConfig): FormState => {
   const stNet = asRecord(raw.st_net)
   const promptTemplate = asRecord(raw.prompt_template)
   const galgame = asRecord(raw.galgame)
+  const lore = asRecord(raw.lore)
   const tts = asRecord(raw.tts)
   const loop = asRecord(raw.loop)
   const sd = asRecord(raw.stable_diffusion)
@@ -216,6 +218,7 @@ const toForm = (config: AdminConfig): FormState => {
     promptTemplateMinLevel: num(promptTemplate, 'min_level', 0),
     galgameEnabled: bool(galgame, 'enabled', true),
     galgameLoops: num(galgame, 'max_loops', 40),
+    loreMaxCardMb: num(lore, 'max_card_mb', 50),
     ttsEnabled: bool(tts, 'enabled', true),
     ttsMinLevel: num(tts, 'min_level', 0),
     ttsEngine: str(tts, 'engine', 'deepseek') === 'doubao' ? 'doubao' : 'deepseek',
@@ -330,6 +333,7 @@ export const SystemPanel = () => {
       stNetPerMinute: form.stNetPerMinute.trim() ? Number(form.stNetPerMinute) : NaN,
       stNetPerMinuteGet: form.stNetPerMinuteGet.trim() ? Number(form.stNetPerMinuteGet) : NaN,
       galgameLoops: Number(form.galgameLoops),
+      loreMaxCardMb: form.loreMaxCardMb.trim() ? Number(form.loreMaxCardMb) : NaN,
       ttsMinLevel: Number(form.ttsMinLevel),
       ttsSampleRate: Number(form.ttsSampleRate),
       ttsSpeechRate: Number(form.ttsSpeechRate),
@@ -414,6 +418,10 @@ export const SystemPanel = () => {
         ...asRecord(raw.galgame),
         enabled: form.galgameEnabled,
         max_loops: ints.galgameLoops,
+      },
+      lore: {
+        ...asRecord(raw.lore),
+        max_card_mb: ints.loreMaxCardMb,
       },
       // 两项策略都是整段回传（后端 parse_obj 全量替换），先展开原值再覆盖表单字段
       st_image: {
@@ -741,6 +749,17 @@ export const SystemPanel = () => {
                 onChange={(value) => patch({ imageSize: value })}
               />
             </div>
+          </div>
+
+          <div className={styles.sectionTitle}>{t('systemLore')}</div>
+          <div className={styles.hint}>{t('systemLoreHint')}</div>
+          <div className={styles.rows}>
+            <NumberField
+              label={t('systemLoreMaxCardMb')}
+              hint={t('systemLoreMaxCardMbHint')}
+              value={form.loreMaxCardMb}
+              onChange={(value) => patch({ loreMaxCardMb: value })}
+            />
           </div>
 
           <div className={styles.sectionTitle}>{t('systemStCard')}</div>

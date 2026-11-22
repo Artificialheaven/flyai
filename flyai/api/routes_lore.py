@@ -157,6 +157,14 @@ def _state(request: Request):
     return request.app.state.flyai.user(request)
 
 
+def _max_card_bytes(request: Request) -> int:
+    """角色卡导入大小上限（管理面板可调，缺省 50MB）。"""
+    cfg = getattr(request.app.state.flyai, "config", None)
+    lore = getattr(cfg, "lore", None)
+    mb = int(getattr(lore, "max_card_mb", 50) or 50)
+    return max(1, mb) * 1024 * 1024
+
+
 # ---- 角色 ----
 
 @router.get("/characters")
@@ -318,6 +326,10 @@ def export_character(cid: str, request: Request):
 def import_character(payload: LoreImportPayload, request: Request):
     sc = _state(request)
     data = dict(payload.data or {})
+    limit = _max_card_bytes(request)
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > limit:
+        raise HTTPException(
+            400, "角色卡内容过大（>%dMB）" % (limit // (1024 * 1024)))
     if not (data.get("name") or "").strip():
         raise HTTPException(400, "导入的角色缺少名称")
     blob = data.pop("avatar_image", None)
@@ -389,7 +401,8 @@ async def import_character_card(request: Request, file: UploadFile = File(...)):
     from ..lore import card_import
 
     try:
-        card = card_import.extract_card_json(raw)
+        card = card_import.extract_card_json(
+            raw, max_bytes=_max_card_bytes(request))
         c = card_import.character_from_cc(card)
     except card_import.CardImportError as e:
         raise HTTPException(400, str(e))

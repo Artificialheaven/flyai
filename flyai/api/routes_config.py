@@ -38,6 +38,7 @@ from ..config import (
     SchedulerSettings,
     CustomToolSettings,
     LoopSettings,
+    LoreSettings,
     McpSettings,
     MoodSettings,
     MvuSettings,
@@ -114,6 +115,8 @@ class ConfigPayload(BaseModel):
     browser: Optional[dict] = None
     tts: Optional[dict] = None
     galgame: Optional[dict] = None
+    # 内容库导入限制（角色卡大小等，无密钥）
+    lore: Optional[dict] = None
     sandbox: Optional[dict] = None
     scheduler: Optional[dict] = None
     custom_tools: Optional[dict] = None
@@ -246,6 +249,8 @@ def _masked_config(state, uid: Optional[str] = None):
         "web_search": cfg.web_search.dict(),
         "browser": cfg.browser.dict(),
         "galgame": cfg.galgame.dict(),
+        # 导入大小限制不含密钥，对所有登录用户可见
+        "lore": cfg.lore.dict(),
         "tts": _masked_tts(cfg),
         # 沙箱/调度器/自定义工具/长跑段不含密钥，对所有登录用户可见（同 SD 段）
         "sandbox": cfg.sandbox.dict(),
@@ -439,6 +444,9 @@ def put_config(payload: ConfigPayload, request: Request):
 
     if payload.galgame is not None:
         cfg.galgame = type(cfg.galgame).parse_obj(dict(payload.galgame))
+
+    if payload.lore is not None:
+        cfg.lore = LoreSettings.parse_obj(dict(payload.lore))
 
     if payload.sandbox is not None:
         cfg.sandbox = SandboxSettings.parse_obj(dict(payload.sandbox))

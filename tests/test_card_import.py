@@ -92,6 +92,17 @@ def test_extract_from_plain_json_bytes():
     assert out["data"]["name"] == "鲁迪"
 
 
+def test_extract_accepts_card_over_old_10mb_limit():
+    # 内含大图的 PNG 卡可能超过旧上限 10MB；当前上限为 50MB
+    raw = b'{"name": "big", "description": "' + b"x" * (11 * 1024 * 1024) + b'"}'
+    assert extract_card_json(raw)["name"] == "big"
+
+
+def test_extract_respects_custom_max_bytes():
+    with pytest.raises(CardImportError, match=">1MB"):
+        extract_card_json(b'{"name": "x"}', max_bytes=1)
+
+
 def test_extract_bad_png_raises():
     with pytest.raises(CardImportError):
         extract_card_json(b"not a png or json")
@@ -244,6 +255,25 @@ def test_import_card_endpoint_json_no_avatar(tmp_path):
         import_character_card(request, file=_png_upload(raw, "card.json")))
     saved = sc.lore.get_character(out["id"])
     assert saved is not None and saved.avatar == ""
+
+
+def test_import_card_endpoint_uses_configured_limit(tmp_path):
+    from fastapi import HTTPException
+
+    from flyai.api.routes_lore import import_character_card
+    from flyai.config import AppConfig
+
+    request, _sc = _import_request(tmp_path)
+    request.app.state.flyai.config = AppConfig()
+    request.app.state.flyai.config.lore.max_card_mb = 1
+    raw = json.dumps(
+        {"name": "big", "description": "x" * (1024 * 1024 + 100)}
+    ).encode("utf-8")
+    with pytest.raises(HTTPException) as ei:
+        _run_async(
+            import_character_card(request, file=_png_upload(raw, "big.json")))
+    assert ei.value.status_code == 400
+    assert "1MB" in str(ei.value.detail)
 
 
 def test_import_card_endpoint_bad_file_400(tmp_path):

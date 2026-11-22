@@ -1113,6 +1113,12 @@ export const en = {
   systemImage: 'Image generation',
   systemImageSize: 'Default size',
   systemImageSizeDesc: 'Resolution used when no size is specified',
+  systemLore: 'Content imports',
+  systemLoreHint:
+    'Controls the upload size of character cards; oversized files are rejected on import.',
+  systemLoreMaxCardMb: 'Character card limit (MB)',
+  systemLoreMaxCardMbHint:
+    'PNG cards embed avatar pixels. Default 50MB, range 1–200; takes effect immediately (nginx must allow the same size)',
   systemStCard: 'Card sandbox',
   systemStCardHint:
     'Extension policy for full-page (HTML+JS) cards; the matching personal toggles only appear after an admin enables them here',

@@ -752,6 +752,24 @@ class GalgameSettings(BaseModel):
         return max(1, min(v, 200))
 
 
+class LoreSettings(BaseModel):
+    """内容库导入限制。
+
+    角色卡 PNG 卡会把头像像素与卡片 JSON 一起上传，文件通常比纯 JSON 大；
+    默认 50MB，可在管理面板调整（1–200MB）。
+    """
+
+    max_card_mb: int = 50
+
+    @validator("max_card_mb", pre=True)
+    def _clamp_max_card_mb(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 50
+        return max(1, min(v, 200))
+
+
 class PromptTemplateSettings(BaseModel):
     """酒馆 EJS 提示词模板（方案 B：客户端执行 + 服务端校验生效）。
 
@@ -1265,6 +1283,7 @@ class AppConfig(BaseModel):
     browser: BrowserSettings = BrowserSettings()
     tts: TtsSettings = TtsSettings()
     galgame: GalgameSettings = GalgameSettings()
+    lore: LoreSettings = LoreSettings()
     sandbox: SandboxSettings = SandboxSettings()
     prompt_template: PromptTemplateSettings = PromptTemplateSettings()
     scheduler: SchedulerSettings = SchedulerSettings()

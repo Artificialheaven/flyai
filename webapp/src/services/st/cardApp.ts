@@ -25,8 +25,10 @@ export const APP_END = '\u0000FLYAI_APP_END\u0000'
 export const APP_PLACEHOLDER_PREFIX = '@@FLYAI_CARD_APP_'
 export const APP_PLACEHOLDER_RE = /@@FLYAI_CARD_APP_(\d+)@@/g
 
-/** 单份卡内应用上限；超限仍按普通代码块/清洗 HTML 处理 */
-export const MAX_CARD_APP_LENGTH = 512 * 1024
+/** 单份卡内应用上限；超限仍按普通代码块/清洗 HTML 处理。
+ *  实测卡（约会大作战开场建档页）约 903KB，512KB 会把整页应用降级成代码块，
+ *  因此放宽到 2MB，与正则输出上限保持一致。 */
+export const MAX_CARD_APP_LENGTH = 2 * 1024 * 1024
 
 /** 父子 iframe 的消息协议版本；不匹配的消息两边都忽略 */
 export const CARD_APP_PROTOCOL_VERSION = 1
