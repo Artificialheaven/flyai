@@ -203,7 +203,19 @@ def get_session(sid: str, request: Request):
     # P4 原生 MVU：会话加载时惰性初始化 InitVar，并按可见消息重算状态
     from ..st import mvu as st_mvu
 
-    if st_mvu.sync_session_state(s, sc.lore):
+    changed = st_mvu.sync_session_state(s, sc.lore)
+    # EJS 输出侧：打开会话时补标记历史里尚未渲染的模板消息
+    from ..template import output as template_output
+    from ..template import policy as template_policy
+
+    if template_policy.output_enabled(
+        getattr(request.app.state.flyai, "config", None),
+        getattr(sc, "user_settings", None),
+        int(getattr(sc, "level", 0) or 0),
+        sc.uid == ADMIN_UID,
+    ):
+        changed = bool(template_output.mark_pending_output(s, True)) or changed
+    if changed:
         sc.store.save(s)
     return _session_dict(
         s, with_messages=True, lore=sc.lore,
@@ -1190,6 +1202,8 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
         "card_write": _flag("st_card_write_enabled", False),
         "net_proxy": net_available and _flag("st_net_proxy_enabled", False),
         "net_proxy_available": net_available,
+        # 酒馆助手（TavernHelper）作者脚本：管理员默认开，普通用户默认关
+        "author_scripts": _flag("st_author_scripts_enabled", bool(is_admin)),
         "mvu": _flag("mvu_enabled", True),
     }
     mvu_cfg = getattr(cfg, "mvu", None) if cfg is not None else None
@@ -1211,18 +1225,60 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
             scripts = getattr(c, "regex_scripts", None) if c is not None else None
             if scripts:
                 by_character[cid] = scripts
+    from ..st.author_scripts import collect_author_scripts
     from ..st.panels import detect_panels
+    from ..template import policy as template_policy
+
+    # EJS 模板（方案 B）：客户端据此决定是否需要补渲染与能否回传 ops。
+    # global 作用域按用户单独存储，客户端按需 GET /api/template/vars。
+    tvars = getattr(s, "template_vars", None) or {}
+    template_local = tvars.get("local") if isinstance(tvars, dict) else {}
+    template_message = tvars.get("message") if isinstance(tvars, dict) else {}
+    template_flags = {
+        "prompt_enabled": template_policy.prompt_enabled(
+            cfg, user_settings, level, is_admin),
+        "output_enabled": template_policy.output_enabled(
+            cfg, user_settings, level, is_admin),
+        "vars": {
+            "local": template_local if isinstance(template_local, dict) else {},
+            "message": template_message if isinstance(template_message, dict) else {},
+        },
+    }
 
     fallback = list(getattr(char, "regex_scripts", None) or []) if char else []
     # 启用预设附带的全局正则：与卡正则同受展示开关控制
     global_scripts = (
         list(preset_scripts or []) if flags["regex_display"] else []
     )
+    # 酒馆助手作者脚本：只在开关开启且卡内确实有脚本时下发正文
+    author_scripts = []
+    author_truncated = False
+    if flags["author_scripts"] and char is not None:
+        collected = collect_author_scripts(char)
+        author_scripts = collected["scripts"]
+        author_truncated = collected["truncated"]
+    panels = detect_panels(char)
+    # 有作者脚本时，面板由前端作者运行时生成；消息正文里的正则替换结果
+    # 只是“脚本未启动”的兜底文案，前端会改用下方状态面板。
+    if author_scripts:
+        for panel in panels:
+            panel["author"] = True
+    author = {
+        "enabled": bool(flags["author_scripts"]),
+        "scripts": author_scripts,
+        "truncated": author_truncated,
+        "character": {
+            "name": getattr(char, "name", "") if char is not None else "",
+            "description": getattr(char, "intro", "") if char is not None else "",
+            "avatar": getattr(char, "avatar", "") if char is not None else "",
+        },
+    }
     return {
         "regex_scripts": fallback,
         "regex_scripts_global": global_scripts,
         "by_character": by_character,
-        "panels": detect_panels(char),
+        "panels": panels,
+        "author": author,
         "html": {
             "enabled": flags["html"],
             "external_images": flags["external_images"],
@@ -1235,6 +1291,7 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
                 (getattr(s, "mvu", None) or {}).get("stat_data") or {}
             ),
         },
+        "template": template_flags,
     }
 
 
@@ -1268,7 +1325,15 @@ def _session_dict(s, with_messages: bool = False, lore=None,
             char = effective_character(s, lore)
             world = effective_world(s, lore)
             user_char = member_character(user_seat(s), lore)
-            d["character"] = char.to_dict() if char else None
+            char_dict = char.to_dict() if char else None
+            # tavern_helper 脚本体积大且只应由 st.author 下发一次；
+            # 角色对象里去掉正文，避免同一份脚本在响应里重复出现。
+            if char_dict is not None and isinstance(char_dict.get("extensions"), dict):
+                extensions = dict(char_dict["extensions"])
+                extensions.pop("tavern_helper", None)
+                extensions.pop("TavernHelper", None)
+                char_dict["extensions"] = extensions
+            d["character"] = char_dict
             d["world"] = world.to_dict() if world else None
             # 展示侧宏展开 {{user}} 用；与提示词侧回退值保持一致
             d["user_name"] = (

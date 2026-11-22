@@ -355,6 +355,8 @@ class UserSettings:
     st_image_proxy_enabled: Optional[bool] = None
     # 卡内整页 HTML+JS 应用放进沙箱 iframe（默认仅管理员开启）
     st_js_sandbox_enabled: Optional[bool] = None
+    # 酒馆助手（TavernHelper）作者脚本运行时（默认仅管理员开启）
+    st_author_scripts_enabled: Optional[bool] = None
     # 卡内授权动作（发送/重生成/继续）：逐次弹窗确认，仅单角色 DM
     st_card_actions_enabled: Optional[bool] = None
     # 卡内写回会话副本（变量/世界书/角色）：仅写会话副本，永不写根卡
@@ -362,6 +364,9 @@ class UserSettings:
     # 卡内网络请求经服务端受控代理（需管理员开启 st_net 且等级达标）
     st_net_proxy_enabled: Optional[bool] = None
     mvu_enabled: Optional[bool] = None
+    # EJS 模板（方案 B）：提示词侧 / 输出侧个人开关，默认关闭
+    template_enabled: Optional[bool] = None
+    template_output_enabled: Optional[bool] = None
 
     # 可空覆盖字段名 → 类型（b=布尔/i=整数）；to/from_dict 与 API 共用
     OVERRIDE_FIELDS = {
@@ -389,10 +394,13 @@ class UserSettings:
         "st_external_images_enabled": "b",
         "st_image_proxy_enabled": "b",
         "st_js_sandbox_enabled": "b",
+        "st_author_scripts_enabled": "b",
         "st_card_actions_enabled": "b",
         "st_card_write_enabled": "b",
         "st_net_proxy_enabled": "b",
         "mvu_enabled": "b",
+        "template_enabled": "b",
+        "template_output_enabled": "b",
     }
 
     def to_dict(self) -> Dict[str, Any]:

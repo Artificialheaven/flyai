@@ -41,6 +41,7 @@ from ..config import (
     McpSettings,
     MoodSettings,
     MvuSettings,
+    PromptTemplateSettings,
     StImageSettings,
     StNetSettings,
     ExtTriggerSettings,
@@ -131,6 +132,7 @@ class ConfigPayload(BaseModel):
     st_image: Optional[dict] = None
     st_net: Optional[dict] = None
     mvu: Optional[dict] = None
+    prompt_template: Optional[dict] = None
     # DeepSeek 官方服务（含独立 Key，仅 admin 可见/可改）
     deepseek: Optional[dict] = None
     # 邀请码注册设置（仅 admin 可见/可改）
@@ -263,6 +265,7 @@ def _masked_config(state, uid: Optional[str] = None):
         "st_image": cfg.st_image.dict(),
         "st_net": cfg.st_net.dict(),
         "mvu": cfg.mvu.dict(),
+        "prompt_template": cfg.prompt_template.dict(),
         "st_image_available": (
             bool(cfg.st_image.enabled)
             and (uid == ADMIN_UID or level >= int(cfg.st_image.min_level or 0))
@@ -500,6 +503,10 @@ def put_config(payload: ConfigPayload, request: Request):
     if payload.mvu is not None:
         cfg.mvu = MvuSettings.parse_obj(dict(payload.mvu))
 
+    if payload.prompt_template is not None:
+        cfg.prompt_template = PromptTemplateSettings.parse_obj(
+            dict(payload.prompt_template))
+
     if payload.deepseek is not None:
         dd = dict(payload.deepseek)
         dd["api_key"] = _credit_key(
@@ -659,11 +666,15 @@ class MySettingsPayload(BaseModel):
     st_external_images_enabled: Optional[bool] = None
     st_image_proxy_enabled: Optional[bool] = None
     st_js_sandbox_enabled: Optional[bool] = None
+    st_author_scripts_enabled: Optional[bool] = None
     # L4：卡内授权动作 / 会话副本写入 / 受控网络代理（默认关）
     st_card_actions_enabled: Optional[bool] = None
     st_card_write_enabled: Optional[bool] = None
     st_net_proxy_enabled: Optional[bool] = None
     mvu_enabled: Optional[bool] = None
+    # EJS 模板（方案 B）个人开关
+    template_enabled: Optional[bool] = None
+    template_output_enabled: Optional[bool] = None
 
 
 @router.get("/my/settings")
@@ -732,8 +743,10 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
                 "st_regex_prompt_enabled", "st_regex_display_enabled",
                 "st_html_enabled", "st_external_images_enabled",
                 "st_image_proxy_enabled", "st_js_sandbox_enabled",
+                "st_author_scripts_enabled",
                 "st_card_actions_enabled", "st_card_write_enabled",
-                "st_net_proxy_enabled", "mvu_enabled"):
+                "st_net_proxy_enabled", "mvu_enabled",
+                "template_enabled", "template_output_enabled"):
         v = getattr(payload, key)
         setattr(us, key, None if v is None else bool(v))
     us.galgame_max_loops = _opt_int(

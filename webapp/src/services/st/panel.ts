@@ -9,6 +9,12 @@
 import type { RegexScript } from '../flyai/types.js'
 import { applyDisplayScripts, type MacroNames } from './regex.js'
 
+/** 消息正文的合成“移除占位符”脚本不能进入面板渲染。 */
+export const withoutAuthorRemovals = (
+  scripts: readonly RegexScript[] | undefined
+): RegexScript[] | undefined =>
+  scripts?.filter((script) => script.flyaiAuthorRemoval !== true)
+
 /** 渲染面板：占位符 + 展示侧正则 + 变量宏 → HTML 文本 */
 export const renderPanel = (
   token: string,

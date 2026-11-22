@@ -39,7 +39,14 @@ export type ToolEndPayload = {
 
 /** 归约器消费的事件联合；data 在入口处做窄化校验，缺字段按空值兜底 */
 export type ChatStreamEvent =
-  | { type: 'message_start'; sessionId?: string; threadId?: string; attributes?: Record<string, unknown> }
+  | {
+      type: 'message_start'
+      sessionId?: string
+      threadId?: string
+      /** 本轮已落盘的用户消息 id；续写/续接等不新增用户消息时为空 */
+      userMessageId?: string
+      attributes?: Record<string, unknown>
+    }
   | { type: 'speaker'; name?: string; memberId?: string }
   | { type: 'speaker_skip' }
   | { type: 'recall_notice'; items: RecallItem[] }
@@ -60,6 +67,20 @@ export type ChatStreamEvent =
       revealed?: Record<string, unknown>
     }
   | { type: 'attributes'; attributes: Record<string, unknown> }
+  /**
+   * EJS 提示词侧：服务端在调用模型前下发待渲染单元格，客户端沙箱执行后
+   * POST /api/template/prompt-commit。服务端会等待最多 timeoutMs。
+   */
+  | {
+      type: 'template_prepare'
+      prepareId: string
+      runId?: string
+      cells: Array<{ id: string; text: string; role?: string }>
+      context: Record<string, unknown>
+      limits?: Record<string, unknown>
+      contextVersion: string
+      timeoutMs?: number
+    }
   /** 首轮后台自动标题生成完毕（可能在 done 之前到达；之后到达的不会再送） */
   | { type: 'session_title'; sessionId?: string; title: string }
   | { type: 'error'; message: string; fatal: boolean }
@@ -87,6 +108,7 @@ export const decodeChatEvent = (event: string, rawData: unknown): ChatStreamEven
         type: 'message_start',
         sessionId: asString(d.session_id) || undefined,
         threadId: asString(d.thread_id) || undefined,
+        userMessageId: asId(d.user_message_id) || undefined,
         attributes:
           d.attributes && typeof d.attributes === 'object'
             ? (d.attributes as Record<string, unknown>)
@@ -161,6 +183,40 @@ export const decodeChatEvent = (event: string, rawData: unknown): ChatStreamEven
             ? (d.attributes as Record<string, unknown>)
             : {},
       }
+    case 'template_prepare': {
+      const prepareId = asString(d.prepare_id)
+      const cells = Array.isArray(d.cells)
+        ? d.cells
+            .map((item) => {
+              const cell = asRecord(item)
+              return {
+                id: asString(cell.id),
+                text: asString(cell.text),
+                role: asString(cell.role) || undefined,
+              }
+            })
+            .filter((cell) => cell.id && cell.text)
+        : []
+      if (!prepareId || cells.length === 0) {
+        return null
+      }
+      return {
+        type: 'template_prepare',
+        prepareId,
+        runId: asString(d.run_id) || undefined,
+        cells,
+        context:
+          d.context && typeof d.context === 'object'
+            ? (d.context as Record<string, unknown>)
+            : {},
+        limits:
+          d.limits && typeof d.limits === 'object'
+            ? (d.limits as Record<string, unknown>)
+            : undefined,
+        contextVersion: asString(d.context_version),
+        timeoutMs: typeof d.timeout_ms === 'number' ? d.timeout_ms : undefined,
+      }
+    }
     case 'session_title':
       return {
         type: 'session_title',

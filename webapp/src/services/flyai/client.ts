@@ -4,12 +4,27 @@ import { getApiBase } from './runtimeConfig.js'
 /** 后端非 2xx 的统一错误类型，message 取 FastAPI 的 detail 中文文案 */
 export class FlyApiError extends Error {
   status: number
+  /** 服务端 429 的 Retry-After（秒）；没有该头时为 undefined */
+  retryAfter?: number
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, retryAfter?: number) {
     super(message)
     this.name = 'FlyApiError'
     this.status = status
+    if (retryAfter !== undefined) {
+      this.retryAfter = retryAfter
+    }
   }
+}
+
+/** 解析 Retry-After：仅支持秒数形式，非法值返回 undefined */
+const parseRetryAfter = (res: Response): number | undefined => {
+  const raw = res.headers.get('Retry-After')
+  if (!raw) {
+    return undefined
+  }
+  const seconds = Number(raw.trim())
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined
 }
 
 export const apiUrl = (path: string): string => `${getApiBase()}${path}`
@@ -91,7 +106,11 @@ export const request = async <T>(path: string, options: RequestOptions = {}): Pr
     if (res.status === 401 && !silent401) {
       useAuth.getState().handleSessionExpired()
     }
-    throw new FlyApiError(res.status, await readDetail(res))
+    throw new FlyApiError(
+      res.status,
+      await readDetail(res),
+      parseRetryAfter(res)
+    )
   }
   if (res.status === 204) {
     return undefined as T

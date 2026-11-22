@@ -142,6 +142,9 @@ class Session:
     # MVU 变量状态（酒馆卡）：{enabled, initialized, char_id, initial, stat_data}；
     # 空字典=非 MVU 会话。不进 MERGED_FIELDS：长流式保存会覆盖实时状态
     mvu: Dict[str, Any] = field(default_factory=dict)
+    # EJS 模板变量（方案 B）：{"local": {...}, "message": {message_id: {...}}}
+    # global 作用域按用户单独存 data/{uid}/template_vars.json
+    template_vars: Dict[str, Any] = field(default_factory=dict)
     # 仅列表摘要使用（不落盘）：所有窗口消息数之和
     message_count: int = 0
 

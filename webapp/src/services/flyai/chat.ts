@@ -30,6 +30,11 @@ export type ChatSendPayload = {
   continue_message_id?: string
   /** 消息来源标记；目前只接受 'card' */
   origin?: 'card'
+  /**
+   * 客户端预生成的用户消息 id：后端落盘时沿用，回答失败后仍可用同一 id
+   * 撤回/重新生成，避免留下服务端不认识的本地乐观消息。
+   */
+  client_message_id?: string
 }
 
 /** 建立 /api/chat 流：返回响应体与后端分配的运行号（停止时用于 cancel） */

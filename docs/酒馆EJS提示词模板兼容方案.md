@@ -1,6 +1,6 @@
 # 酒馆 EJS 提示词模板兼容方案（ST-Prompt-Template）
 
-> **状态：方案 B（客户端执行器）已确认，待实施（2026-11-21）；方案 A（服务端 quickjs）保留为参考与备选**
+> **状态：方案 B（客户端执行器）已确认；P0 协议/沙箱、P1 输出侧、P2 提示词侧均已实施（2026-11-21），P3 待做；方案 A（服务端 quickjs）保留为参考与备选**
 > **参考对象：[zonde306/ST-Prompt-Template](https://github.com/zonde306/ST-Prompt-Template)（AGPL-3.0）**
 > **结论：语义可兼容。执行层改为客户端沙箱执行 + ops 回传，服务端只负责校验与生效；主动轮与记忆快照明确不执行模板**
 > **前置条件：管理员功能开关 + 用户个人开关双开，默认关闭；不改变现有卡片 JS 沙箱策略**
@@ -1217,7 +1217,10 @@ LIVE_CTX 与最终顺序；客户端只对“含模板的文本单元格”求�
 两阶段握手：
 
 1. **prepare**
-   - 扫描最终消息数组，收集所有含 `<%` 且不属于 prefill 的单元格；
+   - 扫描最终消息数组里的 **system 角色文本**（系统提示词、预设块、世界书注入、
+     角色 PHI、LIVE_CTX、@depth 常驻块），收集含 `<%` 且不属于 prefill 的单元格；
+   - 用户消息、助手消息与工具结果不执行模板，只剥离 `<% %>` 标记：避免把用户
+     输入当代码执行、避免输出侧模板（含 `injectPrompt` 等）在提示词侧二次执行；
    - 无模板：直接走现有生成路径，零额外开销；
    - 有模板：创建 `prepare_id`（有效期建议 10 秒），返回单元格、只读上下文、
      变量快照、`context_version` 与限额。
@@ -1231,7 +1234,7 @@ LIVE_CTX 与最终顺序；客户端只对“含模板的文本单元格”求�
    - commit 超时/失败：中止本次生成并提示重试；绝不回退成“把 `<% %>` 原文发给模型”。
 4. **工具循环**
    - 同一用户回合的多次模型调用只执行一次模板；后续轮复用已渲染单元格；
-   - 工具结果消息默认不含模板；若含，按新单元格单独执行一次。
+   - 工具结果消息不执行模板（只剥离标记）。
 
 并发与版本：
 
@@ -1353,6 +1356,23 @@ ops 类型：
 
 P3 之前不评估 lodash/faker；如确有需要，单独评估体积与许可，不随 P0–P2 引入。
 
+**实施进度（2026-11-21）**
+
+- ✅ P0：EJS 子集编译器、null-origin sandbox runner、ops 协议、消息/会话新字段、
+  服务端提交校验、admin 总开关与用户开关（默认关）。
+- ✅ P1：助手消息含 `<% %>` 时标记 `raw_content/template_rendered`；会话加载与回复收尾时
+  由客户端补渲染并提交；消息与变量原子落盘；幂等键防重复；浏览器实机验证通过。
+- ✅ P2：最终请求骨架组装后（prefill 之前）扫描标记为 `template_source` 的文本
+  （系统提示词、预设/世界书、角色字段、PHI、LIVE_CTX、@depth 块，含 user/assistant
+  角色的深度块）；经 SSE `template_prepare` 下发，客户端沙箱执行后
+  `POST /api/template/prompt-commit`；服务端校验版本/单元格/ops 后拼回。
+  提示词组装期间通过 `preserve_ejs` 保留 `<% %>`，宏只作用于标签之外的文本，
+  执行后再做一次后置宏展开；聊天历史、用户输入与工具结果仍只剥离不执行。
+  默认 10 秒超时，超时或渲染错误直接中止生成；工具轮复用已渲染结果；同一 run
+  的变量写入在生成成功收尾时随会话落盘，失败/取消丢弃。单聊与群聊（按座位
+  上下文）均接入；对话编辑/重生成共用同一条 `run_agent_loop` 链路。
+- ⬜ P3：`[GENERATE]` / `@@` / `@INJECT` 结构能力尚未实现。
+
 ### 19.10 兼容性矩阵
 
 **路径覆盖**
@@ -1410,11 +1430,12 @@ P3 之前不评估 lodash/faker；如确有需要，单独评估体积与许可�
 |---|---|
 | `webapp/src/services/st/templateRunner.ts`（新增） | 沙箱 iframe 生命周期、消息协议、超时与限额 |
 | `webapp/src/services/st/ejs.ts`（新增） | EJS 子集编译（文本/语句/输出/注释/转义） |
-| `webapp/src/services/st/templateOps.ts`（新增） | 宿主 API 桩、变量镜像、ops 记录与序列化 |
+| `webapp/src/services/st/templatePending.ts`（新增） | pending 消息筛选、上下文组装与 SHA-256 |
+| `webapp/src/services/flyai/templates.ts`（新增） | global 变量读取与输出侧提交接口 |
 | `webapp/src/services/chat/*` | 发送前 prepare/commit；生成结束的输出侧提交；补渲染 |
 | `webapp/src/components/settings/*` | 用户开关、错误档位、首次确认、模板标记 |
-| `flyai/api/routes_template.py`（新增） | prepare/commit/render 接口、ops 校验、限额、审计 |
-| `flyai/template/validate.py`（新增） | 作用域/路径/长度/权限校验、幂等与版本检查 |
+| `flyai/api/routes_template.py`（新增） | 输出侧提交与 global 变量接口、ops 校验、限额、审计 |
+| `flyai/template/{policy,store,vars,output}.py`（新增） | 权限判定、global 变量存储、ops 校验、消息标记与提交 |
 | `flyai/api/routes_chat.py` | 提示词侧挂接点；输出侧落盘钩子 |
 | `flyai/sessions/models.py` / `json_store.py` | `raw_content`、`template_vars`、`template_rendered` 与会话变量字段 |
 | `flyai/user.py` / `routes_config.py` | 分层开关、最低等级、错误档位、频率 |

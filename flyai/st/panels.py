@@ -5,8 +5,9 @@
 ``{{format_message_variable::stat_data.*}}`` 宏的整块 HTML。
 
 本模块只做**声明式识别**：找出这类字面量占位符，供前端把它们渲染成可单独
-打开的状态面板。仍然绝不执行卡内 JavaScript；替换结果由前端用同一套展示
-侧正则引擎生成，再经 DOMPurify 白名单清洗。
+打开的状态面板。服务端不执行卡内 JavaScript；替换结果由前端用同一套展示
+侧正则引擎生成，再经 DOMPurify 白名单清洗。卡内有作者脚本时，面板改由
+前端沙箱运行时渲染（见 webapp/src/services/st/authorRuntime.ts）。
 
 识别规则（保守，宁可漏掉也不误判）：
 

@@ -43,8 +43,14 @@ if (fs.existsSync(faviconSrc)) fs.copyFileSync(faviconSrc, path.join(DEST, "favi
 
 // APK 内页面源是 https://localhost，相对路径请求不会到达后端，
 // 因此 config.json 必须写死绝对后端地址（Web 站点的同名文件仍是同源空串）。
-// 本地联调：FLYAI_APP_SERVER=http://10.0.2.2:8000 覆盖，默认线上 https://flyai.eastcloud.top
-const DEFAULT_SERVER = "https://flyai.eastcloud.top";
+// 构建模式：node scripts/copy-web.js debug|release（缺省 release）。
+// debug 构建开放 localStorage 服务器覆盖，release 构建会忽略并清理该覆盖。
+// 本地联调仍可用 FLYAI_APP_SERVER=http://10.0.2.2:8000 临时覆盖地址。
+const mode = String(process.argv[2] || process.env.FLYAI_BUILD_MODE || "release").toLowerCase();
+const isDebug = mode === "debug";
+const DEFAULT_SERVER = isDebug
+  ? "https://fly.eastcloud.top/"
+  : "https://flyai.eastcloud.top/";
 const override = (process.env.FLYAI_APP_SERVER || "").trim();
 const apiBase = override || DEFAULT_SERVER;
 let baseConfig = {};
@@ -55,8 +61,15 @@ try {
 }
 fs.writeFileSync(
   path.join(DEST, "config.json"),
-  JSON.stringify(Object.assign({}, baseConfig, { apiBase }), null, 2) + "\n",
+  JSON.stringify(
+    Object.assign({}, baseConfig, { apiBase, debug: isDebug }),
+    null,
+    2
+  ) + "\n",
   "utf-8"
 );
-console.log("APK apiBase = " + apiBase + (override ? "（FLYAI_APP_SERVER 覆盖）" : ""));
+console.log(
+  "APK 模式 = " + mode + (override ? "（FLYAI_APP_SERVER 覆盖地址）" : "") +
+  "；apiBase = " + apiBase
+);
 console.log("web assets copied to", DEST);

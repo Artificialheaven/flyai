@@ -1,0 +1,1 @@
+"use strict";(self.rspackChunkflyai_webapp=self.rspackChunkflyai_webapp||[]).push([[7315],{6366(e,a,r){r.d(a,{createArchitectureServices:()=>s.S});var s=r(8980);r(1730)}}]);

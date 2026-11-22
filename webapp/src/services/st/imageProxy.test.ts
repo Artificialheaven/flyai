@@ -58,6 +58,10 @@ describe('fetchProxyImage', () => {
     )
     const first = fetchProxyImage('https://cdn.example.com/c.png')
     const second = fetchProxyImage('https://cdn.example.com/c.png')
+    // 先等本地缓存查询结束、真正发起 fetch，再回包
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
     resolveFetch(okResponse())
     await expect(first).resolves.toBe('blob:1')
     await expect(second).resolves.toBe('blob:1')

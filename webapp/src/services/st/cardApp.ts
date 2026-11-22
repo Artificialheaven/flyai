@@ -48,6 +48,10 @@ export const CARD_MSG_FETCH_RESULT = 'flyai-card-fetch-result'
 export const CARD_MSG_FETCH_ABORT = 'flyai-card-fetch-abort'
 /** 宿主 → 卡：世界书副本与角色白名单字段快照（写入 API 的读侧） */
 export const CARD_MSG_WRITE_CTX = 'flyai-card-write-context'
+/** 宿主 → 卡：当前会话的输入框草稿（酒馆 #send_textarea 兼容层） */
+export const CARD_MSG_DRAFT = 'flyai-card-draft'
+/** 卡 → 宿主：卡内脚本往酒馆输入框写入的文本（不直接发送） */
+export const CARD_MSG_COMPOSE = 'flyai-card-compose'
 export const CARD_CODE_READ_ONLY = 'read-only'
 export const CARD_CODE_VARS_TOO_LARGE = 'vars-too-large'
 /** 用户取消了确认弹窗 */
@@ -490,6 +494,8 @@ export const buildCardAppShim = (
   var FETCH_RESULT_EVENT = ${escapeForScript(CARD_MSG_FETCH_RESULT)};
   var FETCH_ABORT_EVENT = ${escapeForScript(CARD_MSG_FETCH_ABORT)};
   var WRITE_CTX_EVENT = ${escapeForScript(CARD_MSG_WRITE_CTX)};
+  var DRAFT_EVENT = ${escapeForScript(CARD_MSG_DRAFT)};
+  var COMPOSE_EVENT = ${escapeForScript(CARD_MSG_COMPOSE)};
   var CODE_READ_ONLY = ${escapeForScript(CARD_CODE_READ_ONLY)};
   var CODE_NET_DENIED = ${escapeForScript(CARD_CODE_NET_DENIED)};
   var VERSION = ${CARD_APP_PROTOCOL_VERSION};
@@ -510,6 +516,23 @@ export const buildCardAppShim = (
   var HOST = window.parent || window;
   try { Object.defineProperty(window, 'parent', { value: window, configurable: true }); } catch (e) {}
   try { Object.defineProperty(window, 'top', { value: window, configurable: true }); } catch (e) {}
+  // 展示侧正则里的内联脚本会在源码层把 window.top/parent 改写成
+  // __FLYAI_HOST__；代理转发 DOM/事件，postMessage 回到真实宿主。
+  var hostProxy = window;
+  try {
+    hostProxy = new Proxy(window, {
+      get: function(target, prop){
+        if (prop === 'postMessage') {
+          return function(data){ try { HOST.postMessage(data, '*'); } catch (e) {} };
+        }
+        if (prop === 'parent' || prop === 'top') return hostProxy;
+        var value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set: function(target, prop, value){ target[prop] = value; return true; }
+    });
+  } catch (e) { hostProxy = window; }
+  window.__FLYAI_HOST__ = hostProxy;
   // 宿主下发的写入读侧快照；未收到前世界书与角色字段为空
   var WORLD_NAME = '';
   var WORLD_ENTRIES = [];
@@ -1049,6 +1072,24 @@ export const buildCardAppShim = (
   try { window.confirm = function(){ return false; }; } catch (e) {}
   try { window.prompt = function(){ return null; }; } catch (e) {}
   window.isEditMode = false;
+  // 脚本在 body 末尾执行，DOM 已就绪；$(fn) 直接同步执行，
+  // 避免 jQuery 的异步 ready 把“注册变量结构”推迟到 MVU ready 事件之后。
+  try {
+    var jq = window.jQuery;
+    if (typeof jq === 'function' && typeof Proxy !== 'undefined') {
+      var jqProxy = new Proxy(jq, {
+        apply: function(target, thisArg, args){
+          if (args.length === 1 && typeof args[0] === 'function') {
+            try { args[0](target); } catch (e) { setTimeout(function(){ throw e; }, 0); }
+            return target;
+          }
+          return target.apply(thisArg, args);
+        }
+      });
+      window.$ = jqProxy;
+      window.jQuery = jqProxy;
+    }
+  } catch (e) {}
 
   window.waitGlobalInitialized = function(name){
     var key = String(name);
@@ -1129,9 +1170,126 @@ export const buildCardAppShim = (
     return { message: CURRENT_MESSAGE, variables: clone(VARIABLES) };
   };
 
+  // ── 酒馆输入框兼容层 ────────────────────────────────────────────────
+  // 展示侧脚本（如小猫之神的回应选项卡）会直接读父窗口里的 #send_textarea
+  // 与 #send_but：前者填入/追加文本，后者或 context.generate() 触发发送。
+  // 沙箱里没有这些元素，脚本就会停在上「未找到酒馆输入框」。这里提供离屏
+  // 虚拟输入框：值变化同步会话草稿；发送仍走宿主逐次确认的发送意图。
+  var extensionSettings = {};
+  var composer = null;
+  var sendButton = null;
+  var sendForm = null;
+  var composeTimer = 0;
+  var lastComposed = '';
+  function postCompose(text){
+    try {
+      HOST.postMessage({
+        v: VERSION,
+        type: COMPOSE_EVENT,
+        text: String(text == null ? '' : text).slice(0, 32768)
+      }, '*');
+    } catch (e) {}
+  }
+  function syncCompose(){
+    if (!composer) return;
+    var value = String(composer.value == null ? '' : composer.value);
+    if (value === lastComposed) return;
+    lastComposed = value;
+    postCompose(value);
+  }
+  function ensureComposer(){
+    if (composer) return composer;
+    try {
+      composer = document.createElement('textarea');
+      composer.id = 'send_textarea';
+      composer.setAttribute('aria-hidden', 'true');
+      composer.tabIndex = -1;
+      composer.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+      composer.addEventListener('input', syncCompose);
+      composeTimer = setInterval(syncCompose, 250);
+    } catch (e) { composer = null; }
+    return composer;
+  }
+  function requestSend(text){
+    var value = String(text == null ? '' : text);
+    if (!value.trim()) return false;
+    if (!CAP_ACTIONS) { readOnly(); return false; }
+    requestAction({ kind: 'action', action: 'send', text: value });
+    return true;
+  }
+  function ensureSendButton(){
+    if (sendButton) return sendButton;
+    try {
+      sendButton = document.createElement('button');
+      sendButton.id = 'send_but';
+      sendButton.type = 'button';
+      sendButton.textContent = 'send';
+      sendButton.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+      sendButton.addEventListener('click', function(){
+        requestSend(composer ? composer.value : '');
+      });
+    } catch (e) { sendButton = null; }
+    return sendButton;
+  }
+  function ensureSendForm(){
+    if (sendForm) return sendForm;
+    try {
+      sendForm = document.createElement('form');
+      sendForm.id = 'send_form';
+      sendForm.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+      sendForm.addEventListener('submit', function(e){
+        if (e && e.preventDefault) e.preventDefault();
+        requestSend(composer ? composer.value : '');
+      });
+      var area = ensureComposer();
+      var button = ensureSendButton();
+      if (area) sendForm.appendChild(area);
+      if (button) sendForm.appendChild(button);
+    } catch (e) { sendForm = null; }
+    return sendForm;
+  }
+  function mountComposer(){
+    try {
+      if (!document.body) return;
+      var form = ensureSendForm();
+      var target = form || ensureComposer();
+      if (target && !target.isConnected) document.body.appendChild(target);
+      if (!form) {
+        var button = ensureSendButton();
+        if (button && !button.isConnected) document.body.appendChild(button);
+      }
+    } catch (e) {}
+  }
+  try {
+    var nativeGetById = document.getElementById.bind(document);
+    document.getElementById = function(id){
+      if (id === 'send_textarea') return ensureComposer();
+      if (id === 'send_but') return ensureSendButton();
+      if (id === 'send_form') return ensureSendForm();
+      return nativeGetById(id);
+    };
+    var nativeQuerySelector = document.querySelector.bind(document);
+    document.querySelector = function(selector){
+      if (selector === '#send_textarea' || selector === 'textarea#send_textarea') return ensureComposer();
+      if (selector === '#send_but' || selector === 'button#send_but') return ensureSendButton();
+      if (selector === '#send_form' || selector === 'form#send_form') return ensureSendForm();
+      return nativeQuerySelector(selector);
+    };
+  } catch (e) {}
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mountComposer);
+  } else {
+    mountComposer();
+  }
+
   window.SillyTavern = window.SillyTavern || {};
   window.SillyTavern.getContext = function(){
     return {
+      extensionSettings: extensionSettings,
+      saveSettingsDebounced: function(){},
+      generate: function(){
+        return requestSend(composer ? composer.value : '');
+      },
       variables: clone(VARIABLES),
       chat: [],
       chatMetadata: {},
@@ -1501,6 +1659,15 @@ export const buildCardAppShim = (
     }
     if (data.type === ACTION_RESULT_EVENT) { settleAction(data); return; }
     if (data.type === WRITE_CTX_EVENT) { applyWriteContext(data.context); return; }
+    if (data.type === DRAFT_EVENT) {
+      var area = ensureComposer();
+      if (area) {
+        var next = typeof data.text === 'string' ? data.text : '';
+        area.value = next;
+        lastComposed = next;
+      }
+      return;
+    }
     if (settleFetch && data.type === FETCH_RESULT_EVENT) { settleFetch(data); return; }
   });
 

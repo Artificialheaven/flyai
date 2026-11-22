@@ -49,7 +49,13 @@ import type {
   Thread,
 } from '../flyai/types.js'
 import { importFlyaiConversation, importSessionFile } from '../flyai/transfer.js'
+import { commitTemplateOutput, loadTemplateGlobalVars } from '../flyai/templates.js'
 import { pickCardCharacterFields } from '../st/cardActions.js'
+import {
+  pendingAssistantMessages,
+  renderPendingMessage,
+} from '../st/templatePending.js'
+import { handleTemplatePrepare } from '../st/templatePrompt.js'
 import * as db from './db.js'
 import {
   addDraftFiles,
@@ -58,9 +64,16 @@ import {
   clearSentDraft,
   getDraft,
   prepareDraftMessage,
+  restoreDraftAttachments,
   setDraftText,
 } from './drafts.js'
-import { appendBranch, getVisibleMessages } from './branches.js'
+import {
+  appendBranch,
+  getVisibleMessages,
+  reconcileFailedReplies,
+  rekeyMessage,
+} from './branches.js'
+import { describeReply } from './describe.js'
 import { canContinueReply, settleReply } from './reply.js'
 import {
   toSessionSummary,
@@ -549,6 +562,14 @@ const mapMessage = (
       speakerId: source.actor_id ?? undefined,
       characterId: source.character_id ?? undefined,
       statData: source.stat_data ?? undefined,
+      ...(source.raw_content ? { rawContent: source.raw_content } : {}),
+      ...(source.template_rendered === null || source.template_rendered === undefined
+        ? {}
+        : { templateRendered: Boolean(source.template_rendered) }),
+      ...(source.template_vars ? { templateVars: source.template_vars } : {}),
+      ...(source.template_render_id
+        ? { templateRenderId: source.template_render_id }
+        : {}),
       ...(source.origin === 'card' ? { origin: 'card' as const } : {}),
       // 自动回忆挂在本次发言的回复上，重画/刷新后保持同样的折叠组
       recall: source.recall?.length ? toRecallItems(source.recall) : undefined,
@@ -799,18 +820,76 @@ const refreshSession = async (id: string, epoch: number, force = false) => {
       local !== undefined &&
       local.threadId === remote.threadId &&
       local.messages.length > remote.messages.length
-    const merged: Session = keepLocal
-      ? {
-          ...remote,
-          messages: local.messages,
-          threadId: remote.threadId ?? local.threadId,
-          threadKind: remote.threadKind ?? local.threadKind,
-        }
-      : remote
+    // 本地多出来的若是失败轮气泡，采用服务端 id 重建并保留提示；
+    // 其余「本地更长」的情况（还没落盘的流式内容）仍以本地为准。
+    const reconciled =
+      keepLocal && local ? reconcileFailedReplies(local, remote) : null
+    const merged: Session =
+      reconciled ??
+      (keepLocal && local
+        ? {
+            ...remote,
+            messages: local.messages,
+            threadId: remote.threadId ?? local.threadId,
+            threadKind: remote.threadKind ?? local.threadKind,
+          }
+        : remote)
     touchSession(id)
     applySession(merged)
+    if (!templateSessionInFlight.has(id)) {
+      void processPendingTemplates(id)
+    }
   } catch (error) {
     db.reportStorageError('refresh session')(error)
+  }
+}
+
+/** 输出侧 EJS 模板：把当前会话里 pending 的助手消息补渲染并回传。
+ *  失败不阻塞聊天；下次刷新会话会重试。 */
+const templateSessionInFlight = new Set<string>()
+
+async function processPendingTemplates(id: string): Promise<void> {
+  if (templateSessionInFlight.has(id)) {
+    return
+  }
+  const session = getSession(id)
+  if (!session?.st?.template?.output_enabled || getStreamController(id)) {
+    return
+  }
+  const pending = pendingAssistantMessages(session)
+  if (pending.length === 0) {
+    return
+  }
+  templateSessionInFlight.add(id)
+  try {
+    const global = await loadTemplateGlobalVars()
+    if (!global.enabled || global.output_enabled === false) {
+      return
+    }
+    const globalVars = global.vars || {}
+    let committed = 0
+    for (const message of pending) {
+      try {
+        const rendered = await renderPendingMessage(session, message, globalVars)
+        await commitTemplateOutput(id, message.id, {
+          content: rendered.content,
+          ops: rendered.ops,
+          errors: rendered.errors,
+          raw_hash: rendered.rawHash,
+          render_id: `${message.id}:${rendered.rawHash.slice(0, 16)}`,
+        })
+        committed += 1
+      } catch (error) {
+        db.reportStorageError('render output template')(error)
+      }
+    }
+    if (committed > 0) {
+      await refreshSession(id, historyEpoch, true)
+    }
+  } catch (error) {
+    db.reportStorageError('render output template')(error)
+  } finally {
+    templateSessionInFlight.delete(id)
   }
 }
 
@@ -1941,6 +2020,13 @@ type StreamRequest = {
   shuffleSpeakers?: boolean
   /** 断线续读：不发新请求，直接回放该运行号之后的事件 */
   resume?: { runId: string; after: number }
+  /** 本次新用户消息的本地 id：随请求提交为 client_message_id，失败后仍可撤回/重发 */
+  questionId?: string
+  /**
+   * 首发请求在服务端落用户消息之前就失败（余额不足/参数错误/连不上）时的回滚：
+   * 调用方撤掉本地乐观气泡，把内容放回输入框。仅在没收到 message_start 时触发。
+   */
+  onUnsent?: () => void
 }
 
 const errorKind = (error: unknown): 'http' | 'network' | 'stream' => {
@@ -1979,6 +2065,8 @@ const streamReply = async (
   let reconnectFailed = false
   let fatal: string | null = null
   let failure: AssistantMessage['error'] | null = null
+  /** 是否已收到 message_start：drive 在此之后才跑，可据此确认用户消息已落盘 */
+  let persisted = false
 
   set((state) => ({ streaming: { ...state.streaming, [sessionId]: controller } }))
   const flush = () => {
@@ -2031,6 +2119,32 @@ const streamReply = async (
     status: error instanceof FlyApiError ? error.status : undefined,
   })
 
+  /**
+   * 服务端已落盘本轮用户消息：把本地乐观 id 换成服务端 id。
+   * 供应商报错时后端只保存用户消息、不保存失败的回复，若不同步 id，
+   * 撤回/编辑/重新生成会带着本地随机 id 请求，404 后变成脏数据。
+   */
+  const adoptUserMessageId = (userMessageId: string) => {
+    const session = getSession(sessionId)
+    if (!session) {
+      return
+    }
+    const replyIndex = session.messages.findIndex((message) => message.id === reply.id)
+    if (replyIndex < 0) {
+      return
+    }
+    for (let index = replyIndex - 1; index >= 0; index -= 1) {
+      const candidate = session.messages[index]
+      if (candidate.role !== 'user') {
+        continue
+      }
+      if (candidate.id !== userMessageId) {
+        updateSession(sessionId, (current) => rekeyMessage(current, candidate.id, userMessageId))
+      }
+      return
+    }
+  }
+
   const applyEvent = (event: ChatStreamEvent) => {
     if (reply.status === 'pending') {
       reply = { ...reply, status: 'streaming' }
@@ -2047,8 +2161,19 @@ const streamReply = async (
     }
     switch (event.type) {
       case 'message_start':
+        persisted = true
+        if (event.userMessageId) {
+          adoptUserMessageId(event.userMessageId)
+        }
         if (event.threadId && event.threadId !== getSession(sessionId)?.threadId) {
           updateSession(sessionId, (current) => ({ ...current, threadId: event.threadId }))
+        }
+        break
+      case 'template_prepare':
+        // 提示词侧模板：沙箱执行后回传，服务端在模型调用前等待。
+        // 不阻塞 SSE 消费；本地也校验一次功能开关，避免误执行。
+        if (getSession(sessionId)?.st?.template?.prompt_enabled === true) {
+          void handleTemplatePrepare(event, runId)
         }
         break
       case 'session_title':
@@ -2270,6 +2395,7 @@ const streamReply = async (
       regenerate_message_id: request.regenerateMessageId,
       continue_message_id: request.continueMessageId,
       origin: request.origin,
+      client_message_id: request.questionId,
     }
     try {
       const opened = await openChatStream(payload, controller.signal)
@@ -2374,6 +2500,21 @@ const streamReply = async (
       finish('error', failure)
     } else {
       finish('done')
+    }
+    // 请求在服务端落用户消息之前就失败（没收到 message_start，也没有运行号）：
+    // 本轮什么都没保存，撤掉本地乐观气泡并把内容放回输入框，避免留下服务端
+    // 不认识的脏消息（撤回/重新生成都会 404）。
+    if (
+      reply.status === 'error' &&
+      !persisted &&
+      !runId &&
+      !controller.signal.aborted &&
+      epoch === historyEpoch &&
+      request.onUnsent !== undefined
+    ) {
+      request.onUnsent?.()
+      const notice = describeReply(reply)
+      showToast(notice?.text ?? translate('unknownError'))
     }
     // 仍有未收尾的运行（重连失败/网络中断）时保留标记，下次进入可再续
     const keepMarker = !terminal && !authoritative && !controller.signal.aborted && !!runId
@@ -2554,6 +2695,7 @@ export const sendMessage = async (
     } catch (error) {
       db.reportStorageError('save images')(error)
     }
+    const previousRoot = getSession(sessionId)?.rootMessageId
     updateSession(sessionId, (current) => ({
       ...current,
       messages: [...current.messages, question, reply],
@@ -2561,12 +2703,27 @@ export const sendMessage = async (
       rootMessageId: undefined,
     }))
     clearSentDraft(targetSessionId)
+    // 请求被服务端拒绝（未落盘）时撤回本地乐观气泡，文字与附件回填输入框
+    const rollback = () => {
+      updateSession(sessionId, (current) => ({
+        ...current,
+        messages: current.messages.filter(
+          (message) => message.id !== question.id && message.id !== reply.id
+        ),
+        updatedAt: Date.now(),
+        rootMessageId: previousRoot,
+      }))
+      setDraftText(sessionId, text)
+      restoreDraftAttachments(sessionId, files)
+    }
     // streamReply 首段是同步的：这里返回时 controller 已登记，后续发送会被拦住
     void streamReply(sessionId, reply, {
       text,
       images: files.map((file) => ({ mediaType: file.mimeType, blob: file.blob })),
       targetMemberIds: options.targetMemberIds,
       shuffleSpeakers: options.shuffleSpeakers,
+      questionId: question.id,
+      onUnsent: rollback,
     })
     return true
   } finally {
@@ -2607,7 +2764,22 @@ export const sendCardMessage = (sessionId: string, text: string): boolean => {
     updatedAt: Date.now(),
     rootMessageId: undefined,
   }))
-  void streamReply(sessionId, reply, { text: content, images: [], origin: 'card' })
+  // 卡片消息没有输入框草稿可回填；请求被拒时只撤掉本地乐观气泡
+  void streamReply(sessionId, reply, {
+    text: content,
+    images: [],
+    origin: 'card',
+    questionId: question.id,
+    onUnsent: () => {
+      updateSession(sessionId, (current) => ({
+        ...current,
+        messages: current.messages.filter(
+          (message) => message.id !== question.id && message.id !== reply.id
+        ),
+        updatedAt: Date.now(),
+      }))
+    },
+  })
   return true
 }
 

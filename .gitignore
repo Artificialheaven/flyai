@@ -16,3 +16,17 @@ tools/frp/
 webroot/*.apk
 # 本地发布产物（APK / 源码 zip，由 scripts/release.py 生成）
 release/
+
+# 本地临时脚本 / 调试产物（勿入库）
+tmp_*
+ui_dump.xml
+workspace/
+# 本地配置备份（含真实密钥）
+config/config.json.bak-*
+# 移动端本地产物（APK 与 Android 工程备份，不入库）
+mobile/*.apk
+mobile/android-backup-*/
+# 冒烟测试隔离目录
+.smoke-quarantine/
+# CSS Modules 类型声明由构建工具生成
+webapp/**/*.module.css.d.ts

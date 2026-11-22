@@ -18,9 +18,26 @@ import {
 } from '../../i18n/index.js'
 import { getVisibleMessages } from '../../services/chat/branches.js'
 import type { Session } from '../../services/chat/types.js'
-import type { RegexScript, StPanel } from '../../services/flyai/types.js'
-import type { CardAppCharacter } from '../../services/st/cardApp.js'
-import { renderPanel, statDataRows } from '../../services/st/panel.js'
+import type {
+  CardWriteContext,
+  RegexScript,
+  StAuthorPayload,
+  StPanel,
+} from '../../services/flyai/types.js'
+import {
+  adaptHtmlScripts,
+  authorRuntimeMessages,
+  type AuthorRuntimeMessage,
+} from '../../services/st/authorRuntime.js'
+import {
+  stripAppFence,
+  type CardAppCharacter,
+} from '../../services/st/cardApp.js'
+import {
+  renderPanel,
+  statDataRows,
+  withoutAuthorRemovals,
+} from '../../services/st/panel.js'
 import { setPanelAutoAppend, usePanelPrefs } from '../../services/st/panelPrefs.js'
 import { IconButton } from '../base/IconButton.js'
 import { Select } from '../base/Select.js'
@@ -35,6 +52,7 @@ import {
   CardAppHostContext,
   type CardAppHost,
 } from '../markdown/CardAppFrame.js'
+import { AuthorPanelFrame } from './AuthorPanelFrame.js'
 import { MarkdownMacroNamesContext } from '../markdown/Markdown.js'
 import {
   MarkdownRenderOptionsContext,
@@ -96,7 +114,15 @@ const PanelBody = ({
   options,
   scripts,
   cardCharacter,
+  author,
+  authorMessages,
   sessionId,
+  threadId,
+  canWrite = false,
+  canAct = false,
+  actionMessageId,
+  writeContext,
+  streaming = false,
   netEnabled = false,
   runScripts = false,
 }: {
@@ -106,8 +132,24 @@ const PanelBody = ({
   scripts: readonly RegexScript[] | undefined
   /** 沙箱面板可读取的角色名/头像（抽屉在消息列表之外，需显式传入） */
   cardCharacter?: CardAppCharacter
+  /** 酒馆助手作者脚本（TavernHelper）；有脚本时面板改走作者运行时 */
+  author?: StAuthorPayload
+  /** 作者运行时的消息镜像（不含分支外的消息） */
+  authorMessages?: AuthorRuntimeMessage[]
   /** 面板沙箱的网络代理需要会话 id 计账 */
   sessionId?: string
+  /** 私聊窗口 id；作者脚本写入变量时回传 */
+  threadId?: string
+  /** 作者脚本是否可写回会话副本（st_card_write） */
+  canWrite?: boolean
+  /** 作者脚本是否可发送/继续/重生成（st_card_actions） */
+  canAct?: boolean
+  /** 继续/重生成的目标消息 id */
+  actionMessageId?: string
+  /** 世界书/角色副本读取快照 */
+  writeContext?: CardWriteContext
+  /** 当前会话是否正在生成 */
+  streaming?: boolean
   /** 卡片网络代理开关；面板只借网络能力渲染图片，不授予动作/写入 */
   netEnabled?: boolean
   /** 为真时面板放进沙箱 iframe 执行卡内脚本；内联面板同样需要渲染卡片 */
@@ -116,6 +158,9 @@ const PanelBody = ({
   const t = useTranslate()
   const macroNames = useContext(MarkdownMacroNamesContext)
   const htmlEnabled = options.htmlEnabled
+  // 消息正文会加入“移除作者面板占位符”的合成脚本；状态面板渲染必须用
+  // 原始正则，否则占位符会先被删空，面板永远拿不到 HTML。
+  const panelScripts = useMemo(() => withoutAuthorRemovals(scripts), [scripts])
   const cardVariables = useMemo(
     () => (statData ? { stat_data: statData } : undefined),
     [statData]
@@ -135,24 +180,39 @@ const PanelBody = ({
       features: { actions: false, write: false, net: netEnabled },
     }
   }, [sessionId, netEnabled])
+  const authorScripts = author?.enabled !== false ? author?.scripts ?? [] : []
+  const hasAuthorScripts = authorScripts.length > 0
   const rendered = useMemo(() => {
-    if (!htmlEnabled || !statData || panels.length === 0) {
+    if (!htmlEnabled || panels.length === 0 || (!statData && !hasAuthorScripts)) {
       return []
     }
-    const variables = { stat_data: statData }
+    const variables = { stat_data: statData ?? {} }
     return panels
       .map((panel) => {
         const html = renderPanel(
-          panel.token, scripts, variables, macroNames
+          panel.token, panelScripts, variables, macroNames
         )
+        const unmatched = !html.trim() || html.trim() === panel.token.trim()
+        // 整页 HTML+JS 应用（带 ```html 围栏/完整文档）走 CardAppFrame；
+        // 其余作者面板交给 TavernHelper 运行时（脚本自己找挂载点）。
+        const stripped = stripAppFence(html)
+        // 不用 isCardAppReplacement 的 512KB 上限：面板替换串会展开变量宏，
+        // 实际体积可能远超卡片的静态模板，但仍然是同一种整页应用。
+        const app =
+          !unmatched &&
+          /<script[\s>]/i.test(stripped) &&
+          /<!doctype\s+html|<html[\s>]|<body[\s>]/i.test(stripped)
+        const authorPanel = hasAuthorScripts && panel.author !== false && !app
         return {
           key: panel.token,
           title: (panel.title || '').trim() || t('statusPanelTitle'),
-          html: html.trim() === panel.token.trim() ? '' : html,
+          html: unmatched ? '' : html,
+          author: authorPanel,
+          app,
         }
       })
-      .filter((item) => item.html.trim())
-  }, [htmlEnabled, statData, panels, scripts, macroNames, t])
+      .filter((item) => item.html.trim() || item.author)
+  }, [htmlEnabled, statData, hasAuthorScripts, panels, panelScripts, macroNames, t])
   const rows = useMemo(() => (statData ? statDataRows(statData) : []), [statData])
 
   if (rendered.length > 0) {
@@ -164,10 +224,26 @@ const PanelBody = ({
           {rendered.map((item) => (
             <section key={item.key} className={styles.panel}>
               <div className={styles.panelTitle}>{item.title}</div>
-              {runScripts && options.jsSandbox && /<script[\s>]/i.test(item.html) ? (
+              {runScripts && item.author ? (
+                <AuthorPanelFrame
+                  html={item.html || ''}
+                  author={{ ...author, scripts: authorScripts }}
+                  messages={authorMessages ?? []}
+                  variables={statData}
+                  character={author?.character ?? cardCharacter}
+                  externalMedia={options.externalImages}
+                  sessionId={sessionId}
+                  threadId={threadId}
+                  canWrite={canWrite}
+                  canAct={canAct}
+                  actionMessageId={actionMessageId}
+                  writeContext={writeContext}
+                  streaming={streaming}
+                />
+              ) : runScripts && options.jsSandbox && (item.app || /<script[\s>]/i.test(item.html)) ? (
                 <CardAppHostContext.Provider value={panelHost}>
                   <CardAppFrame
-                    html={item.html}
+                    html={item.app ? adaptHtmlScripts(item.html) : item.html}
                     message=""
                     variables={cardVariables}
                     externalMedia={options.externalImages}
@@ -233,6 +309,26 @@ export const StatusPanelContent = ({
     const message = getVisibleMessages(session).find((item) => item.id === snapshotId)
     return message && message.role === 'assistant' ? message.statData : undefined
   }, [session, snapshotId, st])
+  const visibleMessages = useMemo(() => getVisibleMessages(session), [session])
+  const authorMessages = useMemo(
+    () => authorRuntimeMessages(visibleMessages),
+    [visibleMessages]
+  )
+  const authorStreaming = useMemo(
+    () =>
+      visibleMessages.some(
+        (message) => message.role === 'assistant' && message.status === 'streaming'
+      ),
+    [visibleMessages]
+  )
+  const lastAssistantId = useMemo(() => {
+    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+      if (visibleMessages[index].role === 'assistant') {
+        return visibleMessages[index].id
+      }
+    }
+    return undefined
+  }, [visibleMessages])
   return (
     <PanelBody
       panels={st?.panels ?? []}
@@ -240,7 +336,15 @@ export const StatusPanelContent = ({
       options={options}
       scripts={st?.regex_scripts}
       cardCharacter={cardCharacter}
+      author={st?.author}
+      authorMessages={authorMessages}
       sessionId={session.id}
+      threadId={session.threadId}
+      canWrite={st?.flags?.card_write === true}
+      canAct={st?.flags?.card_actions === true}
+      actionMessageId={lastAssistantId}
+      writeContext={st?.write_context}
+      streaming={authorStreaming}
       netEnabled={st?.flags?.net_proxy === true}
       runScripts={runScripts}
     />
@@ -344,7 +448,15 @@ export const StatusPanelInline = ({
   scripts,
   options,
   statData,
+  author,
+  authorMessages,
   sessionId,
+  threadId,
+  canWrite = false,
+  canAct = false,
+  actionMessageId,
+  writeContext,
+  streaming = false,
   netEnabled = false,
   always = false,
 }: {
@@ -354,18 +466,35 @@ export const StatusPanelInline = ({
   options?: MarkdownRenderOptions
   /** 该条消息自己的 stat_data 快照 */
   statData?: Record<string, unknown>
+  /** 酒馆助手作者脚本（TavernHelper）；有脚本时面板改走作者运行时 */
+  author?: StAuthorPayload
+  /** 作者运行时的消息镜像 */
+  authorMessages?: AuthorRuntimeMessage[]
   /** 面板沙箱的网络代理需要会话 id 计账 */
   sessionId?: string
+  /** 私聊窗口 id；作者脚本写入变量时回传 */
+  threadId?: string
+  /** 作者脚本是否可写回会话副本（st_card_write） */
+  canWrite?: boolean
+  /** 作者脚本是否可发送/继续/重生成（st_card_actions） */
+  canAct?: boolean
+  /** 继续/重生成的目标消息 id */
+  actionMessageId?: string
+  /** 世界书/角色副本读取快照 */
+  writeContext?: CardWriteContext
+  /** 当前会话是否正在生成 */
+  streaming?: boolean
   /** 卡片网络代理开关；与聊天正文卡片保持一致 */
   netEnabled?: boolean
   /** 即使未开启「自动追加」也为该消息渲染面板（最后一条消息使用） */
   always?: boolean
 }) => {
   const autoAppend = usePanelPrefs((state) => state.autoAppend)
+  const hasAuthor = (author?.scripts?.length ?? 0) > 0
   if (
     !(autoAppend || always) ||
     !options?.htmlEnabled ||
-    !hasData(statData) ||
+    (!hasData(statData) && !hasAuthor) ||
     !panels?.length
   ) {
     return null
@@ -377,7 +506,15 @@ export const StatusPanelInline = ({
         statData={statData}
         options={options}
         scripts={scripts}
+        author={author}
+        authorMessages={authorMessages}
         sessionId={sessionId}
+        threadId={threadId}
+        canWrite={canWrite}
+        canAct={canAct}
+        actionMessageId={actionMessageId}
+        writeContext={writeContext}
+        streaming={streaming}
         netEnabled={netEnabled}
         runScripts
       />

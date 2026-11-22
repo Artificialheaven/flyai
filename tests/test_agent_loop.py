@@ -104,6 +104,46 @@ def _errors(events):
     return [d for ev, d in events if ev == "error"]
 
 
+class _FakeTemplateBridge:
+    """把 TPL 换成 RENDERED，记录每次 build_request 的调用。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def apply(self, messages, macro_render=None):
+        self.calls += 1
+        return [
+            Message(role=m.role, content=(m.content or "").replace("TPL", "RENDERED"))
+            for m in messages
+        ]
+
+
+def test_template_prompt_applies_each_request():
+    provider = _ScriptedProvider([
+        ("calls", [("read_file", {"path": "/f"})]),
+        ("final", "好"),
+    ])
+    registry = _FakeRegistry()
+    settings = ToolSettings(enabled=True, max_iterations=3)
+    history = [Message(role="user", content="TPL 历史")]
+    bridge = _FakeTemplateBridge()
+    out = []
+
+    async def run():
+        async for ev, data in run_agent_loop(
+            history, provider, registry, settings,
+            system_prompt="TPL 系统", template_prompt=bridge,
+        ):
+            out.append((ev, data))
+
+    _run(run())
+    assert bridge.calls == 2
+    first = provider.received[0]
+    assert first[0].content == "RENDERED 系统"
+    assert first[1].content == "RENDERED 历史"
+    assert _done(out)["reason"] == "stop"
+
+
 def test_web_tools_exceed_general_limit():
     # 通用只有 3 轮，联网有独立 15 轮：15 次 web_fetch 后正常收尾
     turns = _web_turns(15) + [("final", "答完了")]

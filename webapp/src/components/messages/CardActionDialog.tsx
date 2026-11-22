@@ -3,9 +3,10 @@
  *
  * 卡片只能发“意图”，真正执行前由宿主把完整参数摊开给用户看一次：
  * 发送全文、变量路径与体积、世界书条目数、角色字段名、网络方法与完整 URL。
- * 弹窗只返回一次确认结果，取消即拒绝；不会记住“以后都同意”。
+ * 取消即拒绝；网络确认可勾选“允许后续所有请求”，由宿主在本会话内记住。
  */
 
+import { useEffect, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
@@ -176,16 +177,23 @@ const NetBody = ({
   )
 }
 
+export type CardConfirmOptions = { allowAll?: boolean }
+
 export const CardActionDialog = ({
   request,
   onConfirm,
   onCancel,
 }: {
   request: CardConfirmRequest
-  onConfirm: () => void
+  onConfirm: (options?: CardConfirmOptions) => void
   onCancel: () => void
 }) => {
   const t = useTranslate()
+  const [allowAll, setAllowAll] = useState(false)
+  // 连续确认不同请求时组件可能复用，进入新请求重置勾选
+  useEffect(() => {
+    setAllowAll(false)
+  }, [request])
   return (
     <Modal
       title={titleOf(request, t)}
@@ -197,13 +205,29 @@ export const CardActionDialog = ({
           <Button variant="outlined" onClick={onCancel}>
             {t('cancel')}
           </Button>
-          <Button onClick={onConfirm}>{t('cardActionConfirm')}</Button>
+          <Button
+            onClick={() =>
+              onConfirm(request.kind === 'net' ? { allowAll } : undefined)
+            }
+          >
+            {t('cardActionConfirm')}
+          </Button>
         </>
       }
     >
       <div className={styles.body}>
         {request.kind === 'net' ? (
-          <NetBody request={request} />
+          <>
+            <NetBody request={request} />
+            <label className={styles.allowAll}>
+              <input
+                type="checkbox"
+                checked={allowAll}
+                onChange={(event) => setAllowAll(event.target.checked)}
+              />
+              <span>{t('cardNetAllowAll')}</span>
+            </label>
+          </>
         ) : (
           <IntentBody intent={request.intent} />
         )}

@@ -5,9 +5,11 @@
   "description": "FlyAI Android APK（Capacitor 外壳，页面内置；服务器写死 https://fly.eastcloud.top）",
   "scripts": {
     "copy-web": "node scripts/copy-web.js",
-    "sync": "npm run copy-web && cap sync android",
-    "build:debug": "npm run sync && node scripts/build-debug.js",
-    "build:release": "npm run sync && node scripts/build-debug.js assembleRelease"
+    "sync": "node scripts/copy-web.js release && cap sync android",
+    "sync:debug": "node scripts/copy-web.js debug && cap sync android",
+    "sync:release": "node scripts/copy-web.js release && cap sync android",
+    "build:debug": "npm run sync:debug && node scripts/build-debug.js",
+    "build:release": "npm run sync:release && node scripts/build-debug.js assembleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^7.0.0",

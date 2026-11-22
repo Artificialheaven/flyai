@@ -99,6 +99,8 @@ export const en = {
   mermaidSwitchLabel: 'Toggle between Mermaid diagram and code',
   cardAppLabel: 'Interactive card',
   cardAppRefresh: 'Reload card',
+  cardAppClearCache: 'Clear card resource cache',
+  cardAppCacheCleared: 'Card resource cache cleared',
   cardAppExpand: 'Fullscreen',
   cardAppCollapse: 'Exit fullscreen',
   cardAppStaticHint: 'The script sandbox is off, so card scripts do not run; only static content is shown.',
@@ -140,6 +142,7 @@ export const en = {
   cardActionCount: '{count} items',
   cardActionMoreItems: '{count} more not shown',
   cardActionNetTargetLabel: 'Target',
+  cardNetAllowAll: 'Allow all later network requests in this session (stop asking)',
   cardActionConfirm: 'Allow once',
   cardActionUnavailable: 'The card cannot do this in the current session or message state.',
   cardActionRateLimited: 'The card is acting too often; please wait a moment.',
@@ -1022,6 +1025,9 @@ export const en = {
   featuresStJsSandbox: 'Script sandbox (experimental)',
   featuresStJsSandboxDesc:
     'Run full-page HTML+JS card apps in a sandboxed iframe without same-origin access (on for admins, off for regular users by default)',
+  featuresStAuthorScripts: 'TavernHelper scripts',
+  featuresStAuthorScriptsDesc:
+    'Run card extensions.tavern_helper scripts through the TavernHelper compatibility runtime (on for admins, off for regular users by default)',
   featuresStExternalImages: 'External images',
   featuresStExternalImagesDesc: 'Load images declared by cards directly (off by default)',
   featuresStImageProxy: 'Server image proxy',
@@ -1029,6 +1035,12 @@ export const en = {
     'Fetch external images through the server (hides your IP, uses server bandwidth)',
   featuresStMvu: 'Variable system (MVU)',
   featuresStMvuDesc: 'Parse InitVar and variable-update patches from cards (on by default)',
+  featuresTemplatePrompt: 'EJS prompt templates',
+  featuresTemplatePromptDesc:
+    'Run <% %> templates from cards in a local sandbox (prompt side); requires the admin master switch',
+  featuresTemplateOutput: 'EJS output templates',
+  featuresTemplateOutputDesc:
+    'Render once in a local sandbox before the reply is saved, then commit variables to this session',
   featuresStCardActions: 'Card actions',
   featuresStCardActionsDesc: 'Let cards send, continue or regenerate after you confirm each request (single-character DM only)',
   featuresStCardWrite: 'Card writes to session copy',
@@ -1118,7 +1130,20 @@ export const en = {
   systemStNetDomainsHint: 'One domain per line or comma separated; union with "any public HTTPS"',
   systemStNetMaxMb: 'Response limit (MB)',
   systemStNetTimeout: 'Timeout (seconds)',
-  systemStNetPerMinute: 'Requests per minute',
+  systemStNetPerMinute: 'Requests per minute (POST)',
+  systemStNetPerMinuteGet: 'Requests per minute (GET/static)',
+  systemTemplate: 'EJS prompt templates',
+  systemTemplateHint:
+    'Plan B: templates run only in the user\'s local null-origin sandbox; the server validates rendered text and variable ops without running any JavaScript. Output-side execution covers model-generated content and requires separate authorization.',
+  systemTemplateEnabled: 'Enable templates',
+  systemTemplateEnabledDesc:
+    'When off, the backend does not mark messages or expose template endpoints',
+  systemTemplateOutput: 'Allow output-side templates',
+  systemTemplateOutputDesc:
+    'Render before saving an assistant reply and write variables back; higher risk than the prompt side',
+  systemTemplateMinLevel: 'Minimum level',
+  systemTemplateMinLevelHint:
+    'Users below this level do not see the toggles (admins are exempt)',
   systemGalgame: 'Galgame mode',
   systemTts: 'Text-to-speech',
   systemTtsEnabled: 'Enable TTS',

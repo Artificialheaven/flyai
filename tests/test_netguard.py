@@ -11,12 +11,20 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import flyai.netguard as netguard
 from flyai.netguard import (
     BlockedHost,
     is_blocked_host,
     pin_request,
+    proxy_in_use as _real_proxy_in_use,
     resolve_and_check,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_system_proxy(monkeypatch):
+    """测试机器可能配置了系统代理；默认按“无代理”验证钉住逻辑。"""
+    monkeypatch.setattr(netguard, "proxy_in_use", lambda *a, **k: False)
 
 
 def _run(coro):
@@ -115,6 +123,34 @@ def test_pin_request_http_no_sni_extension():
     req = httpx.Request("GET", "http://good.example/path")
     pin_request(req, ipaddress.ip_address("93.184.216.34"))
     assert req.url.host == "93.184.216.34"
+    assert req.headers["host"] == "good.example"
+    assert "sni_hostname" not in req.extensions
+
+
+def test_proxy_in_use_respects_scheme_and_bypass(monkeypatch):
+    monkeypatch.setattr(
+        netguard, "getproxies",
+        lambda: {"https": "http://127.0.0.1:7890"},
+    )
+    monkeypatch.setattr(netguard, "proxy_bypass", lambda host: False)
+    assert _real_proxy_in_use("example.com", "https") is True
+    # 只配了 https 代理：http 请求仍直连，可以继续钉 IP
+    assert _real_proxy_in_use("example.com", "http") is False
+    monkeypatch.setattr(netguard, "proxy_bypass", lambda host: True)
+    assert _real_proxy_in_use("example.com", "https") is False
+    monkeypatch.setattr(
+        netguard, "getproxies",
+        lambda: {"https": "http://127.0.0.1:7890", "no": "*"},
+    )
+    assert _real_proxy_in_use("example.com", "https") is False
+
+
+def test_pin_request_skips_behind_http_proxy(monkeypatch):
+    # 代理通道不处理 sni_hostname：改成 IP 会按 IP 校验证书而失败
+    monkeypatch.setattr(netguard, "proxy_in_use", lambda *a, **k: True)
+    req = httpx.Request("GET", "https://good.example/path")
+    pin_request(req, ipaddress.ip_address("93.184.216.34"))
+    assert req.url.host == "good.example"
     assert req.headers["host"] == "good.example"
     assert "sni_hostname" not in req.extensions
 

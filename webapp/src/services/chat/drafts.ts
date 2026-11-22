@@ -141,6 +141,38 @@ const releaseAttachment = (attachment: DraftAttachment, cancel: boolean) => {
   }
 }
 
+/**
+ * 发送失败且服务端未落盘时，把已交给会话的附件按原 id 放回草稿。
+ * 上传任务仍在（clearSentDraft 只释放预览），无需重新上传。
+ */
+export const restoreDraftAttachments = (
+  sessionId: string | null,
+  files: Array<{
+    id: string
+    name: string
+    mimeType: string
+    isImage: boolean
+    blob: Blob
+  }>
+) => {
+  if (files.length === 0) {
+    return
+  }
+  const attachments = files.map((file): DraftAttachment => {
+    const typed = new File([file.blob], file.name, { type: file.mimeType })
+    return {
+      id: file.id,
+      file: typed,
+      isImage: file.isImage,
+      previewUrl: file.isImage ? URL.createObjectURL(typed) : null,
+    }
+  })
+  updateDraft(sessionId, (draft) => ({
+    ...draft,
+    attachments: [...draft.attachments, ...attachments],
+  }))
+}
+
 export const removeDraftAttachment = (sessionId: string | null, attachmentId: string) => {
   const attachment = getDraft(sessionId).attachments.find((item) => item.id === attachmentId)
   if (!attachment) {

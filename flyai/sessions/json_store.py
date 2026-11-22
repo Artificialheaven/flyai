@@ -107,6 +107,7 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         max_tokens=int(data.get("max_tokens", 0) or 0),
         disabled_tools=list(data.get("disabled_tools", []) or []),
         mvu=data.get("mvu", {}) or {},
+        template_vars=data.get("template_vars", {}) or {},
     )
 
 
@@ -137,6 +138,7 @@ def session_to_dict(session: Session) -> Dict:
         "max_tokens": int(session.max_tokens or 0),
         "disabled_tools": list(session.disabled_tools or []),
         "mvu": session.mvu or {},
+        "template_vars": session.template_vars or {},
     }
 
 

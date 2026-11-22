@@ -62,6 +62,10 @@ def _no_dns(monkeypatch):
         return [ipaddress.IPv4Address("93.184.216.34")]
 
     monkeypatch.setattr(routes_st, "resolve_and_check", fake_resolve)
+    # 测试机可能带系统代理；钉住断言按“无代理”环境验证
+    import flyai.netguard as netguard
+
+    monkeypatch.setattr(netguard, "proxy_in_use", lambda *a, **k: False)
 
 
 def _run(coro):

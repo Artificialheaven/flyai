@@ -97,6 +97,15 @@ class Message:
     stat_data: Optional[Dict[str, Any]] = None
     # 消息来源：空串=用户/AI 正常产生；"card"=酒馆卡沙箱在用户确认下发起
     origin: str = ""
+    # EJS 模板（方案 B）：原文、是否已由客户端渲染、该消息的 message 作用域变量
+    raw_content: Optional[str] = None
+    template_rendered: Optional[bool] = None
+    template_vars: Optional[Dict[str, Any]] = None
+    # 客户端提交的幂等 id：重复提交同一份结果不再执行
+    template_render_id: Optional[str] = None
+    # 提示词骨架来源标记（不落盘）：系统提示词/PHI/LIVE_CTX/@depth 等
+    # 卡与预设文本。EJS 提示词侧只执行这些消息，聊天历史与工具结果只剥离。
+    template_source: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -122,6 +131,10 @@ class Message:
             "tombstone": self.tombstone,
             "stat_data": self.stat_data,
             "origin": self.origin,
+            "raw_content": self.raw_content,
+            "template_rendered": self.template_rendered,
+            "template_vars": self.template_vars,
+            "template_render_id": self.template_render_id,
         }
 
     @classmethod
@@ -151,4 +164,8 @@ class Message:
             tombstone=data.get("tombstone"),
             stat_data=data.get("stat_data"),
             origin=data.get("origin") or "",
+            raw_content=data.get("raw_content"),
+            template_rendered=data.get("template_rendered"),
+            template_vars=data.get("template_vars"),
+            template_render_id=data.get("template_render_id"),
         )

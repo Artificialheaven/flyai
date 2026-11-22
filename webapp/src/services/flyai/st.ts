@@ -6,6 +6,11 @@
  */
 
 import { request } from './client.js'
+import {
+  readCachedNetProxy,
+  writeCachedNetProxy,
+} from './cardResourceCache.js'
+import { runNetProxy } from './netProxyQueue.js'
 import type { Character } from './types.js'
 
 export type MvuWriteBody = {
@@ -59,12 +64,28 @@ export type NetProxyResult = {
   truncated: boolean
 }
 
-export const proxyNet = (
+export const proxyNet = async (
   payload: NetProxyPayload,
   signal?: AbortSignal
-): Promise<NetProxyResult> =>
-  request('/api/st/net-proxy', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    signal,
-  })
+): Promise<NetProxyResult> => {
+  // 静态资源命中本地 IndexedDB 缓存时完全不走服务器
+  const cached = await readCachedNetProxy(payload)
+  if (cached) {
+    return cached
+  }
+  // 页面级排队（并发 3）+ 429 退避重试，避免卡片批量抓文件时撞服务端限流
+  return runNetProxy(async () => {
+    // 排队期间可能已有其它请求写入同一资源，再查一次
+    const again = await readCachedNetProxy(payload)
+    if (again) {
+      return again
+    }
+    const result = await request<NetProxyResult>('/api/st/net-proxy', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    })
+    await writeCachedNetProxy(payload, result)
+    return result
+  }, signal)
+}

@@ -8,6 +8,7 @@ import binascii
 import copy
 import logging
 import random
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -852,6 +853,38 @@ class ChatRequest(BaseModel):
     # P2 长跑：非空时本次请求作为长跑任务启动（loop 路由/审批内部使用）
     loop_task: Optional[str] = None
     loop_request_id: int = 0
+    # 客户端预生成的用户消息 id：回答失败（供应商报错/断网）后，前端仍能用
+    # 同一个 id 撤回或重发该轮，不会留下服务端不认识的本地脏消息。
+    client_message_id: Optional[str] = None
+
+
+_SAFE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _claim_user_message_id(req, messages) -> str:
+    """取客户端预生成的消息 id；非法或已存在时退回服务端随机 id。
+
+    已存在说明同一请求被重复提交：直接 409，避免同 id 出现两条消息让
+    「撤回/重新生成」按锚点定位到错误的一轮。
+    """
+    raw = (getattr(req, "client_message_id", "") or "").strip()
+    if not raw or not _SAFE_MESSAGE_ID.match(raw):
+        return ""
+    if any(getattr(m, "id", "") == raw for m in messages):
+        raise HTTPException(409, "该消息已提交，请刷新后重试")
+    return raw
+
+
+def _turn_user_message_id(history, turn_start: int) -> str:
+    """message_start 告知客户端本轮落盘的用户消息 id。
+
+    续写/Galgame 续接不新增用户消息，此时返回空串；前端据此判断
+    「请求是否真的在服务端落过盘」，未落盘的失败轮可以直接回滚输入框。
+    """
+    if turn_start <= 0 or turn_start > len(history):
+        return ""
+    last = history[turn_start - 1]
+    return last.id if last.role == "user" else ""
 
 
 def _effective_max_tokens(session, user_settings, preset_max: int = 0) -> Optional[int]:
@@ -1236,10 +1269,26 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         )
         if hasattr(_registry, "all") else None
     )
-    system_prompt = build_system_prompt(
-        character, world, DEFAULT_SYSTEM_PROMPT, roleplay=eff_roleplay,
-        user_character=user_char, variables=mvu_vars,
-    )
+    # EJS 提示词模板开启时，系统提示词里的卡/预设文本要保留模板到客户端执行
+    from ..tavern import reset_preserve_ejs, set_preserve_ejs
+    from ..template import policy as template_policy
+
+    _system_tpl_token = None
+    if template_policy.prompt_enabled(
+        getattr(state, "config", None),
+        _us,
+        int(getattr(sc, "level", 0) or 0),
+        getattr(sc, "uid", "") == ADMIN_UID,
+    ):
+        _system_tpl_token = set_preserve_ejs(True)
+    try:
+        system_prompt = build_system_prompt(
+            character, world, DEFAULT_SYSTEM_PROMPT, roleplay=eff_roleplay,
+            user_character=user_char, variables=mvu_vars,
+        )
+    finally:
+        if _system_tpl_token is not None:
+            reset_preserve_ejs(_system_tpl_token)
     services = {}
     # 沙箱工具依赖（fs_* 仅在 sandbox.enabled 时注册，缺省不影响其他工具）
     services["data_dir"] = getattr(state, "data_dir", None)
@@ -1318,6 +1367,8 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     try:
         # 图片参数先校验（非法直接 400，不能消耗对话次数），再扣费
         images = _build_images(req)
+        # 客户端预生成的消息 id 在扣费前认领：重复/非法不能扣了钱才失败
+        user_msg_id = _claim_user_message_id(req, session.messages)
         # 计费：按 token 计费的模型开轮前只要求余额 > 0，回复完成后按实际
         # 用量结算；其余模型沿用每轮固定扣费（管理员免扣）。余额不足抛 402，
         # 随 except 释放会话锁
@@ -1331,6 +1382,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         # 追加用户消息；首条用户消息自动设为标题
         session.messages.append(
             Message(
+                id=user_msg_id,
                 role="user",
                 content=req.message or None,
                 name=user_char.name if user_char else None,
@@ -1356,6 +1408,18 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         )
 
     async def drive():
+        from ..tavern import reset_preserve_ejs, set_preserve_ejs
+        from ..template import policy as template_policy
+
+        # 本轮组装期间保留卡/预设 EJS，交给 run_agent_loop 的客户端桥执行
+        _tpl_token = None
+        if template_policy.prompt_enabled(
+            getattr(state, "config", None),
+            _us,
+            int(getattr(sc, "level", 0) or 0),
+            getattr(sc, "uid", "") == ADMIN_UID,
+        ):
+            _tpl_token = set_preserve_ejs(True)
         try:
             await run.emit(
                 "message_start",
@@ -1363,6 +1427,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                     "session_id": session.id,
                     "character_id": session.character_id,
                     "world_id": session.world_id,
+                    "user_message_id": _turn_user_message_id(
+                        session.messages, len(session.messages)
+                    ),
                     "attributes": (
                         services["attributes"].get_all()
                         if "attributes" in services
@@ -1454,6 +1521,32 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 # MVU 更新块只从出站 prompt 剥离（存储原文留给展示侧正则）
                 st_regex = dict(st_regex or {})
                 st_regex["strip_updates"] = True
+            # EJS 提示词侧（方案 B）：最终骨架里的 <% %> 交给客户端沙箱执行。
+            # 功能关闭/用户未开启时不创建桥，提示词逐字节不变。
+            from ..template import policy as template_policy
+            from ..template.store import user_store
+
+            template_bridge = None
+            if template_policy.prompt_enabled(
+                getattr(state, "config", None),
+                _us,
+                int(getattr(sc, "level", 0) or 0),
+                getattr(sc, "uid", "") == ADMIN_UID,
+            ):
+                try:
+                    _tpl_store = user_store(state, sc)
+                except ValueError:
+                    _tpl_store = None
+                if _tpl_store is not None:
+                    from ..template.prompt import PromptTemplateBridge
+
+                    template_bridge = PromptTemplateBridge(
+                        run, session, _tpl_store,
+                        uid=str(getattr(sc, "uid", "") or ""),
+                        history=session.messages,
+                        char=character,
+                        user=user_char,
+                    )
             done_data = None
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
@@ -1493,6 +1586,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                     "group_names": [],
                     "variables": mvu_vars,
                 },
+                template_prompt=template_bridge,
             ):
                 if ev == "done":
                     session.add_usage(data.get("usage"))
@@ -1524,6 +1618,21 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 session.mvu["stat_data"] = cur
             # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
             _attach_recall(session.messages, recall_head, "", recall_items)
+            # EJS 提示词侧：变量 ops 在生成成功后随会话一起落盘
+            if template_bridge is not None:
+                template_bridge.finalize()
+            # EJS 输出侧（方案 B）：含 <% %> 的助手消息先标记 pending，
+            # 客户端渲染完成后回传；功能关闭时不改任何字段。
+            from ..template import output as template_output
+            from ..template import policy as template_policy
+
+            if template_policy.output_enabled(
+                getattr(state, "config", None),
+                getattr(sc, "user_settings", None),
+                int(getattr(sc, "level", 0) or 0),
+                getattr(sc, "uid", "") == ADMIN_UID,
+            ):
+                template_output.mark_pending_output(session, True)
             # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
             # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
             sc.store.save_merged(session)
@@ -1582,6 +1691,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 state, sc, session.id, loop_ctx, session.messages, failed=True
             )
             return "error"
+        finally:
+            if _tpl_token is not None:
+                reset_preserve_ejs(_tpl_token)
 
     _spawn_run(run, drive, run_manager)
     return _sse_response(run)
@@ -1882,6 +1994,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             if resume_call_id not in known_calls:
                 raise HTTPException(400, "对应的选项调用不存在或已失效")
 
+        # 追加用户消息前认领客户端 id（重复→409），必须在扣费之前失败
+        new_user_id = ""
+        if not (edit_id or regen_id or resume_body is not None
+                or continue_target is not None):
+            new_user_id = _claim_user_message_id(req, history)
+
         # 计费：校验通过后一次性预扣旧费率座位的费用（跳过/失败/取消在
         # drive 内退回）；有按 token 计费的座位时只要求余额 > 0，事后结算
         if any_priced:
@@ -1930,6 +2048,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             # 追加用户消息到该窗口（用户扮演自设时按角色名标注，便于展示）
             history.append(
                 Message(
+                    id=new_user_id,
                     role="user",
                     content=req.message or None,
                     name=user_char.name if user_char else None,
@@ -1956,6 +2075,17 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
         raise
 
     async def drive():
+        from ..tavern import reset_preserve_ejs, set_preserve_ejs
+        from ..template import policy as template_policy
+
+        _tpl_token = None
+        if template_policy.prompt_enabled(
+            getattr(state, "config", None),
+            _us,
+            int(getattr(sc, "level", 0) or 0),
+            getattr(sc, "uid", "") == ADMIN_UID,
+        ):
+            _tpl_token = set_preserve_ejs(True)
         unspent = total_cost  # 预扣费用中尚未实际发生的部分，跳过/出错/取消时退回
         # P2 长跑收尾标志：finally 统一写 loop_sessions 终态
         loop_failed = False
@@ -1968,7 +2098,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             await run.emit(
                 "message_start",
                 {"session_id": session.id, "thread_id": thread.id,
-                 "character_id": "", "world_id": ""},
+                 "character_id": "", "world_id": "",
+                 "user_message_id": _turn_user_message_id(history, turn_start)},
             )
             await _emit_context_warning(run, session, thread.id, history)
             # P3：真人发起的本轮刷新主动行为活跃时间（未 opt-in 时空转）
@@ -2263,6 +2394,33 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             ),
                         )
                     })
+                # EJS 提示词侧（方案 B）：每个座位独立上下文与变量快照；
+                # 同一座位本轮重试复用已渲染单元格。
+                from ..template import policy as template_policy
+                from ..template.store import user_store
+
+                spk_template_bridge = None
+                if template_policy.prompt_enabled(
+                    getattr(state, "config", None),
+                    _us,
+                    int(getattr(sc, "level", 0) or 0),
+                    getattr(sc, "uid", "") == ADMIN_UID,
+                ):
+                    try:
+                        _spk_tpl_store = user_store(state, sc)
+                    except ValueError:
+                        _spk_tpl_store = None
+                    if _spk_tpl_store is not None:
+                        from ..template.prompt import PromptTemplateBridge
+
+                        spk_template_bridge = PromptTemplateBridge(
+                            run, session, _spk_tpl_store,
+                            uid=str(getattr(sc, "uid", "") or ""),
+                            history=history,
+                            char=char,
+                            user=user_char,
+                            group=[m for m in speakers if m is not spk],
+                        )
                 # P3 LIVE_CTX：按本座位角色的心情/约定组装尾部实时块
                 live_block = await render_for_turn(
                     state, sc, session_id=session.id,
@@ -2340,6 +2498,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                             "group_names": others,
                             "variables": spk_vars,
                         },
+                        template_prompt=spk_template_bridge,
                     ):
                         if ev == "done":
                             done_data = data
@@ -2393,6 +2552,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         )
                         continue
                     break
+                # 本座位生成成功：模板变量随会话落盘，并让下一位座位看到变更
+                if spk_template_bridge is not None:
+                    spk_template_bridge.finalize()
                 # 召回条目随最终 assistant 消息持久化（仅前端展示，不回灌模型）
                 if not skipped:
                     _attach_recall(history, head_snapshot, spk.id, recall_items)
@@ -2445,6 +2607,16 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 先落盘再发终态帧：客户端收到 terminal done 会立即重拉会话，
                 # 磁盘上必须已包含本轮完整消息，否则读到缺回复的旧快照
                 if fan_done["terminal"]:
+                    from ..template import output as template_output
+                    from ..template import policy as template_policy
+
+                    if template_policy.output_enabled(
+                        getattr(state, "config", None),
+                        getattr(sc, "user_settings", None),
+                        int(getattr(sc, "level", 0) or 0),
+                        getattr(sc, "uid", "") == ADMIN_UID,
+                    ):
+                        template_output.mark_pending_output(session, True)
                     sc.store.save_merged(session)
                 await run.emit("done", fan_done)
                 if skipped:
@@ -2553,6 +2725,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     state, sc, session.id, loop_ctx, history,
                     failed=loop_failed,
                 )
+            if _tpl_token is not None:
+                reset_preserve_ejs(_tpl_token)
 
     _spawn_run(run, drive, run_manager)
     return _sse_response(run)

@@ -48,6 +48,8 @@ EXCLUDED_DIRS = {
     ".kotlin",
     "capacitor-cordova-android-plugins",
     ".smoke-quarantine",
+    # 本地 AI 工作区（worktrees/会话记录），不属于源码
+    ".claude",
 }
 
 EXCLUDED_FILES = {

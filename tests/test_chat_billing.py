@@ -228,6 +228,83 @@ def test_provider_error_full_refund(tmp_path):
     _run(body())
 
 
+async def _frames(resp):
+    return [frame async for frame in resp.body_iterator]
+
+
+def _stored_user_message(store, sid, tid):
+    thread = store.get(sid).thread(tid)
+    return [m for m in thread.messages if m.role == "user"]
+
+
+def test_client_message_id_persisted_and_echoed(tmp_path):
+    """供应商报错后仍能撤回/重发：服务端沿用前端预生成的消息 id 并回传。"""
+
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.5], quota=4)
+        s, members, _ = _room(store)
+        tid = s.threads[0].id
+        state.get_provider = lambda pid: _Provider(
+            state.config.providers[0], fail=True
+        )
+        resp = await _chat_in_thread(
+            state, sc, s,
+            _req(tid, client_message_id="local-turn-1"),
+        )
+        frames = await _frames(resp)
+        users = _stored_user_message(store, s.id, tid)
+        assert [m.id for m in users] == ["local-turn-1"]
+        # 失败轮也发 message_start：前端据此确认用户消息已落盘
+        assert any(
+            '"user_message_id": "local-turn-1"' in frame for frame in frames
+        )
+
+    _run(body())
+
+
+def test_client_message_id_invalid_falls_back(tmp_path):
+    """非法 id 不能进入历史/版本锚点，退回服务端生成的 id。"""
+
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0], quota=3)
+        s, members, _ = _room(store)
+        tid = s.threads[0].id
+        resp = await _chat_in_thread(
+            state, sc, s,
+            _req(tid, client_message_id="../../etc/passwd"),
+        )
+        await _drain(resp)
+        users = _stored_user_message(store, s.id, tid)
+        assert len(users) == 1
+        assert users[0].id and users[0].id != "../../etc/passwd"
+
+    _run(body())
+
+
+def test_client_message_id_duplicate_409(tmp_path):
+    """同一 id 重复提交直接拒绝，避免一轮出现两条同 id 用户消息。"""
+
+    async def body():
+        state, sc, store, u = _setup(tmp_path, rates=[1.0], quota=3)
+        s, members, _ = _room(store)
+        tid = s.threads[0].id
+        thread = s.thread(tid)
+        from flyai.schemas import Message
+
+        thread.messages.append(Message(id="dup-turn", role="user", content="旧"))
+        store.save(s)
+        with pytest.raises(HTTPException) as ei:
+            await _chat_in_thread(
+                state, sc, s,
+                _req(tid, client_message_id="dup-turn"),
+            )
+        assert ei.value.status_code == 409
+        users = _stored_user_message(store, s.id, tid)
+        assert len(users) == 1
+
+    _run(body())
+
+
 def test_regenerate_charges(tmp_path):
     async def body():
         state, sc, store, u = _setup(tmp_path, rates=[1.0], quota=3)

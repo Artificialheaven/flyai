@@ -8,7 +8,11 @@ import {
   useAuth,
   type RegisterInfo,
 } from '../../services/flyai/auth.js'
-import { CONFIG_OVERRIDE_KEY, getApiBase } from '../../services/flyai/runtimeConfig.js'
+import {
+  CONFIG_OVERRIDE_KEY,
+  getApiBase,
+  isDebugRuntime,
+} from '../../services/flyai/runtimeConfig.js'
 import { Button } from '../base/Button.js'
 import styles from './LoginView.module.css'
 
@@ -41,13 +45,16 @@ export const LoginView = () => {
   const [registerInfo, setRegisterInfo] = useState<RegisterInfo>(NO_EMAIL_INFO)
   // 登录页显示实际生效的后端地址：连不上主机时先确认 APK 到底在连哪
   const apiBase = getApiBase()
-  const hasServerOverride = (() => {
-    try {
-      return localStorage.getItem(CONFIG_OVERRIDE_KEY) !== null
-    } catch {
-      return false
-    }
-  })()
+  const debugRuntime = isDebugRuntime()
+  const hasServerOverride =
+    debugRuntime &&
+    (() => {
+      try {
+        return localStorage.getItem(CONFIG_OVERRIDE_KEY) !== null
+      } catch {
+        return false
+      }
+    })()
 
   useEffect(() => {
     let cancelled = false
@@ -344,7 +351,7 @@ export const LoginView = () => {
               {apiBase || t('loginServerSameOrigin')}
             </span>
           </div>
-          {hasServerOverride ? (
+          {debugRuntime && hasServerOverride ? (
             <div className={styles.serverOverride}>
               <span>{t('loginServerOverrideHint')}</span>
               <button

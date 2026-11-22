@@ -52,10 +52,13 @@ type FormState = {
   stExternalImages: TriValue
   stImageProxy: TriValue
   stJsSandbox: TriValue
+  stAuthorScripts: TriValue
   stCardActions: TriValue
   stCardWrite: TriValue
   stNetProxy: TriValue
   mvu: TriValue
+  templatePrompt: TriValue
+  templateOutput: TriValue
 }
 
 const tri = (value: boolean | null | undefined): TriValue =>
@@ -112,10 +115,13 @@ const toForm = (settings: Awaited<ReturnType<typeof getMySettings>>): FormState 
   stExternalImages: tri(settings.st_external_images_enabled),
   stImageProxy: tri(settings.st_image_proxy_enabled),
   stJsSandbox: tri(settings.st_js_sandbox_enabled),
+  stAuthorScripts: tri(settings.st_author_scripts_enabled),
   stCardActions: tri(settings.st_card_actions_enabled),
   stCardWrite: tri(settings.st_card_write_enabled),
   stNetProxy: tri(settings.st_net_proxy_enabled),
   mvu: tri(settings.mvu_enabled),
+  templatePrompt: tri(settings.template_enabled),
+  templateOutput: tri(settings.template_output_enabled),
 })
 
 export const FeaturesPanel = () => {
@@ -202,10 +208,13 @@ export const FeaturesPanel = () => {
       st_external_images_enabled: triBool(form.stExternalImages),
       st_image_proxy_enabled: triBool(form.stImageProxy),
       st_js_sandbox_enabled: triBool(form.stJsSandbox),
+      st_author_scripts_enabled: triBool(form.stAuthorScripts),
       st_card_actions_enabled: triBool(form.stCardActions),
       st_card_write_enabled: triBool(form.stCardWrite),
       st_net_proxy_enabled: triBool(form.stNetProxy),
       mvu_enabled: triBool(form.mvu),
+      template_enabled: triBool(form.templatePrompt),
+      template_output_enabled: triBool(form.templateOutput),
     }
     setSaving(true)
     setError('')
@@ -433,6 +442,12 @@ export const FeaturesPanel = () => {
               onChange={(value) => patch({ stJsSandbox: tri(value) })}
             />
             <TriRow
+              label={t('featuresStAuthorScripts')}
+              desc={t('featuresStAuthorScriptsDesc')}
+              value={form.stAuthorScripts === 'inherit' ? null : form.stAuthorScripts === 'on'}
+              onChange={(value) => patch({ stAuthorScripts: tri(value) })}
+            />
+            <TriRow
               label={t('featuresStExternalImages')}
               desc={t('featuresStExternalImagesDesc')}
               value={
@@ -474,6 +489,24 @@ export const FeaturesPanel = () => {
               value={form.mvu === 'inherit' ? null : form.mvu === 'on'}
               onChange={(value) => patch({ mvu: tri(value) })}
             />
+            {global?.prompt_template?.enabled ? (
+              <>
+                <TriRow
+                  label={t('featuresTemplatePrompt')}
+                  desc={t('featuresTemplatePromptDesc')}
+                  value={form.templatePrompt === 'inherit' ? null : form.templatePrompt === 'on'}
+                  globalValue={global.prompt_template.enabled}
+                  onChange={(value) => patch({ templatePrompt: tri(value) })}
+                />
+                <TriRow
+                  label={t('featuresTemplateOutput')}
+                  desc={t('featuresTemplateOutputDesc')}
+                  value={form.templateOutput === 'inherit' ? null : form.templateOutput === 'on'}
+                  globalValue={global.prompt_template.allow_output_side}
+                  onChange={(value) => patch({ templateOutput: tri(value) })}
+                />
+              </>
+            ) : null}
           </div>
         </>
       )}

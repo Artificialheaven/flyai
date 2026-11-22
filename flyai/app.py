@@ -588,6 +588,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if state.search_browser is not None:
             await state.search_browser.aclose()
         await state.aclose_providers()
+        from .api.routes_st import aclose_net_client
+
+        await aclose_net_client()
 
     app = FastAPI(title="FlyAI", lifespan=lifespan)
 
@@ -602,6 +605,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["Authorization", "Content-Type"],
+        # 跨源（Capacitor）时 JS 需读取运行 id 与限流退避时间
+        expose_headers=["X-Run-Id", "Retry-After"],
     )
 
     # 大 JSON（会话详情、内容库列表）走 gzip；SSE 由上面的响应器跳过
@@ -648,6 +653,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_session import router as session_router
     from .api.routes_speech import router as speech_router
     from .api.routes_st import router as st_router
+    from .api.routes_template import router as template_router
     from .api.routes_usage import router as usage_router
 
     app.include_router(afdian_router)
@@ -672,6 +678,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(session_router)
     app.include_router(speech_router)
     app.include_router(st_router)
+    app.include_router(template_router)
     app.include_router(usage_router)
 
     # 静态资源与头像上传目录（挂载目录需先存在；各用户上传在 /uploads/<uid>/...）

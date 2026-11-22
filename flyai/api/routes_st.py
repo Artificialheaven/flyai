@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
+import math
 import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
@@ -48,13 +50,41 @@ _UA = (
 _NET_METHODS = frozenset({"GET", "HEAD", "POST"})
 _NET_UPLOAD_MAX = 256 * 1024
 _NET_INFLIGHT_MAX = 4
+# 超出并发时先排队而不是立即 429；等待要覆盖一次上游超时（15s），
+# 否则海外/高延迟链路上排队请求会先于上游完成而误报 429。
+_NET_INFLIGHT_WAIT = 20.0
 # 只透传这两个请求头；Cookie/Authorization/Referer/Origin 等一律丢弃
 _NET_REQUEST_HEADERS = frozenset({"accept", "content-type"})
 _NET_RATE_WINDOW = 60.0
 
-# uid → 滑动窗口内的时间戳；uid → 进行中请求数。进程内限流，重启即清空。
-_net_rate: Dict[str, Deque[float]] = {}
-_net_inflight: Dict[str, int] = {}
+# (uid, get|post) → 滑动窗口内的时间戳；uid → 并发信号量。
+# 进程内状态，重启即清空。
+_net_rate: Dict[Tuple[str, str], Deque[float]] = {}
+_net_sems: Dict[str, asyncio.Semaphore] = {}
+# 复用一个连接池：高延迟链路上避免每个资源都重新 DNS/TCP/TLS
+_net_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_net_client() -> httpx.AsyncClient:
+    global _net_client
+    if _net_client is None or getattr(_net_client, "is_closed", False):
+        _net_client = httpx.AsyncClient(
+            timeout=None,
+            follow_redirects=False,
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=16,
+                keepalive_expiry=30.0,
+            ),
+        )
+    return _net_client
+
+
+async def aclose_net_client() -> None:
+    global _net_client
+    if _net_client is not None:
+        await _net_client.aclose()
+        _net_client = None
 
 
 def _check_access(sc, cfg):
@@ -191,16 +221,42 @@ def _net_host_allowed(scheme: str, host: str, allow_any_https: bool,
     return bool(allow_any_https) and scheme == "https"
 
 
-def _net_rate_check(uid: str, per_minute: int) -> None:
+def _net_rate_check(uid: str, per_minute: int, kind: str = "post") -> None:
     now = time.monotonic()
-    window = _net_rate.setdefault(uid, deque())
+    window = _net_rate.setdefault((uid, kind), deque())
     while window and now - window[0] >= _NET_RATE_WINDOW:
         window.popleft()
     if len(window) >= per_minute:
-        raise HTTPException(429, "请求过于频繁，请稍后再试")
-    if _net_inflight.get(uid, 0) >= _NET_INFLIGHT_MAX:
-        raise HTTPException(429, "并发请求过多，请稍后再试")
+        # 告诉客户端窗口最早一条还有多久过期；批量请求可据此退避重试
+        retry_after = max(
+            1, int(math.ceil(_NET_RATE_WINDOW - (now - window[0])))
+        )
+        raise HTTPException(
+            429, "请求过于频繁，请稍后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
     window.append(now)
+
+
+def _net_sem(uid: str) -> asyncio.Semaphore:
+    sem = _net_sems.get(uid)
+    if sem is None:
+        sem = asyncio.Semaphore(_NET_INFLIGHT_MAX)
+        _net_sems[uid] = sem
+    return sem
+
+
+async def _net_acquire(uid: str, timeout: float = _NET_INFLIGHT_WAIT):
+    """并发超限时排队等待，尽量让批量请求自然排空而不是立刻 429。"""
+    sem = _net_sem(uid)
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            429, "并发请求过多，请稍后再试",
+            headers={"Retry-After": "1"},
+        )
+    return sem
 
 
 def _net_clean_headers(raw: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -223,59 +279,60 @@ async def _fetch_net(seg, method: str, url: str, headers: Dict[str, str],
     domains = list(getattr(seg, "allowed_domains", []) or [])
     max_bytes = int(getattr(seg, "max_bytes", 5 * 1024 * 1024) or 5 * 1024 * 1024)
     timeout = float(getattr(seg, "timeout", 15.0) or 15.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        for _ in range(_MAX_REDIRECTS + 1):
-            parsed = urlsplit(url)
-            if parsed.scheme not in ("http", "https") or not parsed.hostname:
-                raise HTTPException(400, "仅支持 http/https 地址")
-            if parsed.username or parsed.password:
-                raise HTTPException(400, "地址不能包含用户名或密码")
-            if not _net_host_allowed(
-                parsed.scheme, parsed.hostname, allow_any, domains
-            ):
-                raise HTTPException(403, "域名不在网络代理白名单内")
-            try:
-                ips = await resolve_and_check(parsed.hostname)
-            except BlockedHost as exc:
-                raise HTTPException(403, str(exc))
-            req_headers = {"User-Agent": _UA}
-            req_headers.update(headers)
-            req = client.build_request(
-                method, url, headers=req_headers,
-                content=(body if method == "POST" else None),
+    client = _get_net_client()
+    for _ in range(_MAX_REDIRECTS + 1):
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise HTTPException(400, "仅支持 http/https 地址")
+        if parsed.username or parsed.password:
+            raise HTTPException(400, "地址不能包含用户名或密码")
+        if not _net_host_allowed(
+            parsed.scheme, parsed.hostname, allow_any, domains
+        ):
+            raise HTTPException(403, "域名不在网络代理白名单内")
+        try:
+            ips = await resolve_and_check(parsed.hostname)
+        except BlockedHost as exc:
+            raise HTTPException(403, str(exc))
+        req_headers = {"User-Agent": _UA}
+        req_headers.update(headers)
+        req = client.build_request(
+            method, url, headers=req_headers,
+            content=(body if method == "POST" else None),
+            timeout=timeout,
+        )
+        pin_request(req, ips[0])
+        resp = await client.send(req, stream=True)
+        try:
+            location = (
+                resp.headers.get("location")
+                if resp.status_code in _REDIRECT_CODES else ""
             )
-            pin_request(req, ips[0])
-            resp = await client.send(req, stream=True)
-            try:
-                location = (
-                    resp.headers.get("location")
-                    if resp.status_code in _REDIRECT_CODES else ""
-                )
-                if location:
-                    url = str(httpx.URL(url).join(location))
-                    if resp.status_code == 303 or (
-                        resp.status_code in (301, 302) and method != "HEAD"
-                    ):
-                        method = "GET"
-                        body = b""
-                    continue
-                data = bytearray()
-                truncated = False
-                async for chunk in resp.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > max_bytes:
-                        truncated = True
-                        del data[max_bytes:]
-                        break
-                out_headers = {}
-                for name in ("content-type", "content-length"):
-                    value = resp.headers.get(name)
-                    if value:
-                        out_headers[name] = value
-                return resp.status_code, out_headers, bytes(data), truncated
-            finally:
-                await resp.aclose()
-        raise HTTPException(502, "重定向次数过多")
+            if location:
+                url = str(httpx.URL(url).join(location))
+                if resp.status_code == 303 or (
+                    resp.status_code in (301, 302) and method != "HEAD"
+                ):
+                    method = "GET"
+                    body = b""
+                continue
+            data = bytearray()
+            truncated = False
+            async for chunk in resp.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    truncated = True
+                    del data[max_bytes:]
+                    break
+            out_headers = {}
+            for name in ("content-type", "content-length"):
+                value = resp.headers.get(name)
+                if value:
+                    out_headers[name] = value
+            return resp.status_code, out_headers, bytes(data), truncated
+        finally:
+            await resp.aclose()
+    raise HTTPException(502, "重定向次数过多")
 
 
 @router.post("/net-proxy")
@@ -307,17 +364,23 @@ async def net_proxy(payload: NetProxyPayload, request: Request):
         if len(body) > _NET_UPLOAD_MAX:
             raise HTTPException(413, "请求体超过 256KB 上限")
 
-    per_minute = int(getattr(seg, "per_minute", 60) or 60)
-    _net_rate_check(sc.uid, per_minute)
-    _net_inflight[sc.uid] = _net_inflight.get(sc.uid, 0) + 1
+    # 静态资源 GET/HEAD 单独用更宽松的窗口，避免卡启动批量加载撞 429
+    is_get = method in ("GET", "HEAD")
+    per_minute = int(
+        getattr(seg, "per_minute_get", 600) if is_get
+        else getattr(seg, "per_minute", 60)
+    ) or (600 if is_get else 60)
+    sem = await _net_acquire(sc.uid)
     started = time.monotonic()
     host = (urlsplit(url).hostname or "").lower()
     try:
+        # 拿到并发名额后再计入每分钟窗口：排队等待的时间不占用额度
+        _net_rate_check(sc.uid, per_minute, "get" if is_get else "post")
         status, headers, data, truncated = await _fetch_net(
             seg, method, url, _net_clean_headers(payload.headers), body
         )
     finally:
-        _net_inflight[sc.uid] = max(0, _net_inflight.get(sc.uid, 1) - 1)
+        sem.release()
     elapsed_ms = int((time.monotonic() - started) * 1000)
     # 审计只记 host（不含 path/query），避免把卡内业务数据写进日志
     log.info(

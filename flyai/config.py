@@ -752,6 +752,26 @@ class GalgameSettings(BaseModel):
         return max(1, min(v, 200))
 
 
+class PromptTemplateSettings(BaseModel):
+    """酒馆 EJS 提示词模板（方案 B：客户端执行 + 服务端校验生效）。
+
+    总开关关闭时后端不标记/不提供模板接口，行为与旧版本逐字节一致。
+    输出侧执行模型生成的代码，需 allow_output_side 单独授权。
+    """
+
+    enabled: bool = False
+    min_level: int = 0
+    allow_output_side: bool = False
+
+    @validator("min_level")
+    def _clamp_min_level(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(v, 255))
+
+
 class SandboxSettings(BaseModel):
     """AI 文件沙箱（P0）：双根目录、单文件大小与配额。
 
@@ -1166,7 +1186,10 @@ class StNetSettings(BaseModel):
     min_level: int = 0
     max_bytes: int = 5 * 1024 * 1024
     timeout: float = 15.0
+    # POST 等动态请求的每分钟上限；GET 静态资源单独用更宽松的上限，
+    # 否则卡启动时批量加载 JS/图片会瞬间撞 429。
     per_minute: int = 60
+    per_minute_get: int = 600
 
     @validator("min_level", pre=True)
     def _clamp_level(cls, v):  # noqa: N805
@@ -1207,6 +1230,13 @@ class StNetSettings(BaseModel):
         except (TypeError, ValueError):
             return 60
 
+    @validator("per_minute_get", pre=True)
+    def _clamp_rate_get(cls, v):  # noqa: N805
+        try:
+            return max(1, min(int(v), 100000))
+        except (TypeError, ValueError):
+            return 600
+
 
 class MvuSettings(BaseModel):
     """原生 MVU 变量系统总开关（关闭后不解析、不注入）。"""
@@ -1236,6 +1266,7 @@ class AppConfig(BaseModel):
     tts: TtsSettings = TtsSettings()
     galgame: GalgameSettings = GalgameSettings()
     sandbox: SandboxSettings = SandboxSettings()
+    prompt_template: PromptTemplateSettings = PromptTemplateSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
     custom_tools: CustomToolSettings = CustomToolSettings()
     loop: LoopSettings = LoopSettings()

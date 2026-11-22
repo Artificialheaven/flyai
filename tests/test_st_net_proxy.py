@@ -45,7 +45,7 @@ class _FakeClient:
     async def __aexit__(self, *exc):
         return False
 
-    def build_request(self, method, url, headers=None, content=None):
+    def build_request(self, method, url, headers=None, content=None, timeout=None):
         req = httpx.Request(method, url, headers=headers, content=content)
         self.requests.append(req)
         return req
@@ -68,11 +68,17 @@ def _clean_state(monkeypatch):
         return [ipaddress.IPv4Address("93.184.216.34")]
 
     monkeypatch.setattr(routes_st, "resolve_and_check", fake_resolve)
+    # 测试机可能带系统代理；钉住断言按“无代理”环境验证
+    import flyai.netguard as netguard
+
+    monkeypatch.setattr(netguard, "proxy_in_use", lambda *a, **k: False)
     routes_st._net_rate.clear()
-    routes_st._net_inflight.clear()
+    routes_st._net_sems.clear()
+    routes_st._net_client = None
     yield
     routes_st._net_rate.clear()
-    routes_st._net_inflight.clear()
+    routes_st._net_sems.clear()
+    routes_st._net_client = None
 
 
 def _run(coro):
@@ -98,6 +104,7 @@ def _cfg(enabled=True, min_level=0, domains=None, allow_any=True, **kw):
         max_bytes=5 * 1024 * 1024,
         timeout=15.0,
         per_minute=60,
+        per_minute_get=600,
     )
     base.update(kw)
     return SimpleNamespace(st_net=SimpleNamespace(**base))
@@ -294,6 +301,9 @@ def test_rate_limit_per_minute():
     with pytest.raises(HTTPException) as exc:
         routes_st._net_rate_check("u1", 2)
     assert exc.value.status_code == 429
+    # 客户端据此退避重试，不能把批量请求的错误直接抛给卡片
+    retry_after = int(exc.value.headers["Retry-After"])
+    assert 1 <= retry_after <= 60
 
 
 def test_rate_limit_is_per_user():
@@ -303,11 +313,21 @@ def test_rate_limit_is_per_user():
         routes_st._net_rate_check("u1", 1)
 
 
-def test_concurrency_cap():
-    routes_st._net_inflight["u1"] = routes_st._NET_INFLIGHT_MAX
-    with pytest.raises(HTTPException) as exc:
-        routes_st._net_rate_check("u1", 60)
-    assert exc.value.status_code == 429
+def test_concurrency_waits_then_times_out():
+    async def scenario():
+        sem = routes_st._net_sem("u1")
+        for _ in range(routes_st._NET_INFLIGHT_MAX):
+            await sem.acquire()
+        with pytest.raises(HTTPException) as exc:
+            await routes_st._net_acquire("u1", timeout=0.02)
+        assert exc.value.status_code == 429
+        assert exc.value.headers["Retry-After"] == "1"
+        sem.release()
+        acquired = await routes_st._net_acquire("u1", timeout=0.02)
+        assert acquired is sem
+        sem.release()
+
+    _run(scenario())
 
 
 # ---- 路由 ----
@@ -377,12 +397,25 @@ def test_route_returns_base64_and_releases_inflight(monkeypatch):
     assert base64.b64decode(out["body_base64"]) == b"hello"
     assert out["truncated"] is False
     assert out["headers"] == {"content-type": "text/plain"}
-    assert routes_st._net_inflight.get("u1", 0) == 0
 
 
 def test_route_rate_limited(monkeypatch):
     _patch_http(monkeypatch, [_FakeResponse(200, {}, [b"ok"])])
-    cfg = _cfg(per_minute=1)
+    cfg = _cfg(per_minute=1, per_minute_get=1)
+    _run(routes_st.net_proxy(_payload(), _request(_sc(), cfg)))
+    with pytest.raises(HTTPException) as exc:
+        _run(routes_st.net_proxy(_payload(), _request(_sc(), cfg)))
+    assert exc.value.status_code == 429
+
+
+def test_get_has_separate_higher_limit(monkeypatch):
+    # POST 上限 1，但 GET 另有独立窗口：两次 GET 都放行
+    _patch_http(monkeypatch, [
+        _FakeResponse(200, {}, [b"a"]),
+        _FakeResponse(200, {}, [b"b"]),
+    ])
+    cfg = _cfg(per_minute=1, per_minute_get=2)
+    _run(routes_st.net_proxy(_payload(), _request(_sc(), cfg)))
     _run(routes_st.net_proxy(_payload(), _request(_sc(), cfg)))
     with pytest.raises(HTTPException) as exc:
         _run(routes_st.net_proxy(_payload(), _request(_sc(), cfg)))

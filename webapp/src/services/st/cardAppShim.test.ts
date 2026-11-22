@@ -20,11 +20,13 @@ type Posted = {
   bodyBase64?: unknown
 }
 type MessageLike = {
+  type?: string
   source?: unknown
   data?: unknown
   error?: unknown
   reason?: unknown
   message?: unknown
+  preventDefault?: () => void
 }
 
 type CharacterLike = { name?: string; avatar?: string }
@@ -38,6 +40,41 @@ const makeSandbox = (
   const posted: Posted[] = []
   const listeners: Record<string, Array<(event: MessageLike) => void>> = {}
 
+  // 极简 DOM：酒馆输入框兼容层会 createElement/appendChild/事件派发
+  const makeElement = (tag: string) => {
+    const handlers: Record<string, Array<(event: MessageLike) => void>> = {}
+    const element = {
+      tagName: tag.toUpperCase(),
+      id: '',
+      type: '',
+      value: '',
+      textContent: '',
+      tabIndex: 0,
+      style: { cssText: '' },
+      isConnected: true,
+      children: [] as unknown[],
+      setAttribute: () => undefined,
+      appendChild: (child: { isConnected?: boolean } | undefined) => {
+        if (child) {
+          child.isConnected = true
+          element.children.push(child)
+        }
+      },
+      addEventListener: (type: string, fn: (event: MessageLike) => void) => {
+        handlers[type] = handlers[type] || []
+        handlers[type].push(fn)
+      },
+      dispatch: (type: string) => {
+        for (const fn of handlers[type] || []) {
+          fn({ type, preventDefault: () => undefined })
+        }
+      },
+      click: () => element.dispatch('click'),
+      focus: () => undefined,
+    }
+    return element
+  }
+
   const sandbox: Record<string, unknown> = {
     console: { error: () => undefined, log: () => undefined },
     setInterval: () => 1,
@@ -46,10 +83,14 @@ const makeSandbox = (
     clearTimeout: () => undefined,
     document: {
       readyState: 'complete',
+      createElement: (tag: string) => makeElement(tag),
+      getElementById: () => null,
+      querySelector: () => null,
       body: {
         scrollHeight: 10,
         offsetHeight: 10,
         getBoundingClientRect: () => ({ height: 10 }),
+        appendChild: () => undefined,
       },
       addEventListener: () => undefined,
       querySelectorAll: () => [],
@@ -131,6 +172,65 @@ describe('buildCardAppShim', () => {
     expect(getAllVariables()).toEqual({ stat_data: { hp: 7 } })
     const getChatVariable = sandbox.getChatVariable as (key: string) => unknown
     expect(getChatVariable('hp')).toBe(7)
+  })
+
+  it('提供酒馆输入框兼容层：#send_textarea 与 context.generate', () => {
+    const { sandbox, posted } = makeSandbox('hi', null, null, {
+      actions: true,
+      write: false,
+      net: false,
+    })
+    const doc = sandbox.document as {
+      getElementById: (id: string) => { value: string } | null
+      querySelector: (selector: string) => { value: string } | null
+    }
+    const area = doc.getElementById('send_textarea')
+    expect(area).toBeTruthy()
+    // 展示侧脚本（小猫之神/仓鼠之神）两种取法都要命中
+    expect(doc.querySelector('#send_textarea')).toBe(area)
+    if (area) {
+      area.value = '选它'
+    }
+    const context = (sandbox.SillyTavern as {
+      getContext: () => {
+        generate: () => boolean
+        extensionSettings: Record<string, unknown>
+      }
+    }).getContext()
+    context.extensionSettings.Astro = { optionMode: 'append' }
+    expect(context.extensionSettings.Astro).toEqual({ optionMode: 'append' })
+    expect(context.generate()).toBe(true)
+    const action = posted.find((item) => item.type === 'flyai-card-action')
+    expect(action?.intent).toEqual({ kind: 'action', action: 'send', text: '选它' })
+  })
+
+  it('兼容层没有动作能力时只提示只读，不发送', () => {
+    const { sandbox, posted } = makeSandbox()
+    const area = (sandbox.document as { getElementById: (id: string) => { value: string } })
+      .getElementById('send_textarea')
+    area.value = '选它'
+    const generate = (sandbox.SillyTavern as { getContext: () => { generate: () => boolean } })
+      .getContext().generate
+    expect(generate()).toBe(false)
+    expect(posted.some((item) => item.type === 'flyai-card-action')).toBe(false)
+    expect(toasts(posted).map((item) => item.code)).toEqual(['read-only'])
+  })
+
+  it('宿主草稿同步到兼容输入框，修改后回传 compose 意图', () => {
+    const { sandbox, posted, emitMessage } = makeSandbox()
+    emitMessage({
+      source: sandbox.host,
+      data: { v: 1, type: 'flyai-card-draft', text: '已有内容' },
+    })
+    const area = (sandbox.document as {
+      getElementById: (id: string) => { value: string; dispatch: (type: string) => void }
+    }).getElementById('send_textarea')
+    expect(area.value).toBe('已有内容')
+    // 展示侧脚本常见写法：改 value 后派发 input
+    area.value = '已有内容 追加'
+    area.dispatch('input')
+    const compose = posted.filter((item) => item.type === 'flyai-card-compose')
+    expect(compose.at(-1)?.text).toBe('已有内容 追加')
   })
 
   it('getVariables 区分 chat/global，重复载荷不重复广播', () => {

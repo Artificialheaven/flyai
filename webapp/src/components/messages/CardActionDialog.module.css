@@ -99,3 +99,20 @@
   font-size: 12px;
   line-height: 18px;
 }
+
+.allowAll {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.allowAll input {
+  flex: none;
+  margin-top: 3px;
+}

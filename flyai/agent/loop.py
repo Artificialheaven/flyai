@@ -285,6 +285,8 @@ def _inject_depth_blocks(messages: List[Message],
                 role=str(b.get("role") or "system")
                 if str(b.get("role")) in ("user", "assistant") else "system",
                 content=(b.get("content") or "").strip(),
+                # 世界书/预设 @depth 块：EJS 提示词侧可执行（含 user/assistant 角色）
+                template_source=True,
             )
             for _o, _i, b in group
         ]
@@ -320,6 +322,7 @@ async def run_agent_loop(
     loop_ctx: Optional[LoopContext] = None,
     st_regex: Optional[Dict[str, Any]] = None,
     macro_ctx: Optional[Dict[str, Any]] = None,
+    template_prompt: Optional[Any] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -354,6 +357,9 @@ async def run_agent_loop(
     loop_ctx：P2 长跑上下文。非 None 时跳过双预算封顶，启用强制汇报/空转
     自停/滚动压缩/安全点打断与干净停止；依赖 services 中的 loop_state、
     loop_compact、interrupt_hub、loop_settings 钩子（缺失时相应保护降级）。
+    template_prompt：EJS 提示词侧 prepare/commit 桥（每 run 一个）。在最终
+    请求骨架组装完成、assistant prefill 追加之前调用；无模板时不产生事件。
+    超时/失败直接抛异常中止本次生成，绝不把模板源码发给模型。
     st_regex：酒馆正则脚本 prompt 侧上下文
     ``{"by_character": {cid: [Script]}, "fallback": [Script], "extra": [Script]}``；
     对请求副本应用（绝不改 history 中的原文），无效脚本已在编译期跳过。
@@ -416,20 +422,30 @@ async def run_agent_loop(
             "note": (note or "")[:300],
         })
 
-    def build_request(loop_notice: str = "", idle_nudge: bool = False):
+    async def build_request(loop_notice: str = "", idle_nudge: bool = False):
         """组装单轮请求消息与工具 specs（超长重试时按最新历史重建）。"""
         macro_render = None
+        post_render = None
         if macro_ctx:
             from ..tavern import render_card_text
 
-            def macro_render(text: str) -> str:
+            def _card_render(text: str, preserve: Optional[bool]) -> str:
                 return render_card_text(
                     text,
                     char_name=macro_ctx.get("char_name", "") or "",
                     user_name=macro_ctx.get("user_name", "") or "",
                     group_names=macro_ctx.get("group_names") or [],
                     variables=macro_ctx.get("variables"),
+                    preserve_ejs=preserve,
                 )
+
+            def macro_render(text: str) -> str:
+                # ST 正则：是否保留 EJS 跟随本轮提示词模式（无桥时仍剥离）
+                return _card_render(text, None)
+
+            def post_render(text: str) -> str:
+                # EJS 执行后的宏展开：保留可能出现的字面 <% 文本
+                return _card_render(text, True)
         # extra_tools 为请求级自定义工具（每用户独立，不进全局注册表）；
         # 仅在非空时传 extras，保持对精简测试注册表（无该形参）的兼容
         if not settings.enabled:
@@ -439,6 +455,16 @@ async def run_agent_loop(
         else:
             specs = registry.specs(allowed_tools)
         msgs = _actor_view(history, actor, actor_name)
+        # EJS 模板消息：历史里改用原文；模板代码在 ST 正则之后统一剥离。
+        # raw_content 只在模板功能开启并标记过时存在，未开启时行为不变。
+        from dataclasses import replace as _replace_message
+
+        msgs = [
+            _replace_message(m, content=m.raw_content)
+            if getattr(m, "raw_content", None) is not None and m.content
+            else m
+            for m in msgs
+        ]
         msgs = _keep_recent_turns(msgs, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
         msgs = [m for m in msgs if not getattr(m, "tombstone", None)]
@@ -465,22 +491,38 @@ async def run_agent_loop(
                 if m.role == "assistant" and m.content else m
                 for m in msgs
             ]
+        # EJS 模板代码绝不发给模型：只处理被标记过 raw_content 的消息，
+        # 避免把普通聊天里讨论的 <% %> 文本误删。正则处理完再剥离（不执行）。
+        from ..template.output import strip_template_markers
+
+        msgs = [
+            _replace_message(m, content=strip_template_markers(m.content))
+            if getattr(m, "raw_content", None) is not None and m.content
+            else m
+            for m in msgs
+        ]
         # 普通聊天兜底：窗口超过硬上限时静默截断旧轮次（只影响本轮请求）
         msgs = _truncate_context(msgs)
         if system_prompt:
-            msgs.insert(0, Message(role="system", content=system_prompt))
+            msgs.insert(0, Message(
+                role="system", content=system_prompt, template_source=True,
+            ))
         # 酒馆 @depth 常驻块（世界书条目/预设 prompt）：插到历史深处、PHI 之前
         _inject_depth_blocks(msgs, depth_blocks)
         # PHI（角色卡历史后指令）：紧贴历史尾部；工具轮时续写 nudge 放在它之后，
         # 让"继续完成回复"保持为模型看到的最后一句
         phi = (post_history_instructions or "").strip()
         if phi:
-            msgs.append(Message(role="system", content=phi))
+            msgs.append(Message(
+                role="system", content=phi, template_source=True,
+            ))
         # P3 LIVE_CTX：逐轮易变的实时块（心情/自我记忆/约定/时钟/独白），
         # 独立一条尾部 system，保证静态前缀字节稳定以命中前缀缓存
         live = (live_ctx or "").strip()
         if live:
-            msgs.append(Message(role="system", content=live))
+            msgs.append(Message(
+                role="system", content=live, template_source=True,
+            ))
         if pending_nudge:
             msgs.append(Message(role="system", content=_POST_TOOL_NUDGE))
         if idle_nudge:
@@ -488,6 +530,10 @@ async def run_agent_loop(
         # P2 安全点打断的系统通知（用户原话已入 history，这里只加渲染指令）
         if loop_notice:
             msgs.append(Message(role="system", content=loop_notice))
+        # EJS 提示词侧（方案 B）：骨架全部组装完、prefill 追加前执行模板。
+        # 单元格按文本缓存，工具轮复用；无模板时零额外开销。
+        if template_prompt is not None:
+            msgs = await template_prompt.apply(msgs, macro_render=post_render)
         # 预设 jailbreak：assistant 强制前缀必须是最后一条
         prefill = (assistant_prefill or "").strip()
         if prefill:
@@ -538,7 +584,7 @@ async def run_agent_loop(
                 async for _ev in _compact_history("threshold"):
                     yield _ev
 
-        request_messages, tool_specs = build_request(
+        request_messages, tool_specs = await build_request(
             loop_notice, idle_nudge=idle_nudge_next
         )
         idle_nudge_next = False
@@ -549,7 +595,7 @@ async def run_agent_loop(
             and loop_settings is not None
             and loop_ctx.since_spoke >= int(loop_settings.every_rounds)
         ):
-            report_msgs, _ = build_request(loop_notice)
+            report_msgs, _ = await build_request(loop_notice)
             report_msgs.append(Message(role="system", content=_REPORT_NUDGE))
             report_parts: List[str] = []
             async for ev in provider.stream_chat(
@@ -659,7 +705,7 @@ async def run_agent_loop(
                 overflow_retries += 1
                 if not compacted:
                     raise  # 没有可压缩的完整工具轮，重试无意义
-                request_messages, _ = build_request(loop_notice)
+                request_messages, _ = await build_request(loop_notice)
 
         assistant = Message(
             role="assistant",

@@ -10,6 +10,7 @@ import type { Session } from '../../services/chat/types.js'
 import { closeSearchPanel } from '../search/searchPanelState.js'
 import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
+import { authorRuntimeMessages } from '../../services/st/authorRuntime.js'
 import { mergeRegexScripts } from '../../services/st/regex.js'
 import { CardAppCharacterContext } from '../markdown/CardAppFrame.js'
 import { MarkdownMacroNamesContext } from '../markdown/Markdown.js'
@@ -156,6 +157,21 @@ export const MessageList = ({
     const fallback = st.regex_scripts ?? []
     const byCharacter = st.by_character ?? {}
     const globalScripts = st.regex_scripts_global ?? []
+    // 作者脚本面板：正文里的占位符正则只产出“脚本未启动”兜底文案，
+    // 真正的面板在消息下方由 AuthorPanelFrame 渲染。这里先移除占位符，
+    // 避免用户同时看到误导性的兜底提示和完整面板。
+    const authorTokens = (st.panels ?? [])
+      .filter((panel) => panel.author && panel.token)
+      .map((panel) => panel.token)
+    const authorRemovals = authorTokens.map((token) => ({
+      scriptName: 'FlyAI 作者面板占位符',
+      findRegex: token,
+      replaceString: '',
+      placement: [2],
+      markdownOnly: true,
+      // 只用于消息正文；状态面板渲染必须先过滤掉，否则会把占位符删空
+      flyaiAuthorRemoval: true,
+    }))
     // 每个角色缓存合并后的数组，避免每次渲染新建数组使 WeakMap 编译缓存失效
     const mergedByCharacter = new Map<string, ReturnType<typeof mergeRegexScripts>>()
     return (characterId?: string) => {
@@ -166,10 +182,11 @@ export const MessageList = ({
       }
       const own = characterId ? byCharacter[characterId] : undefined
       const local = own && own.length > 0 ? own : fallback
-      // 顺序：预设全局正则 → 角色卡正则
+      // 顺序：作者面板移除 → 预设全局正则 → 角色卡正则
       const scripts = mergeRegexScripts(globalScripts, local)
-      mergedByCharacter.set(key, scripts)
-      return scripts.length > 0 ? scripts : undefined
+      const merged = authorRemovals.length > 0 ? [...authorRemovals, ...scripts] : scripts
+      mergedByCharacter.set(key, merged)
+      return merged.length > 0 ? merged : undefined
     }
   }, [session.st])
   // 酒馆卡 MVU：每条消息优先用自己的变量快照，旧消息回退到会话当前状态。
@@ -225,6 +242,10 @@ export const MessageList = ({
     [session.st]
   )
   const cardWriteContext = (session.st?.write_context ?? null) as CardAppWriteContext | null
+  const authorMessages = useMemo(
+    () => authorRuntimeMessages(messages),
+    [messages]
+  )
   const uploadRetryId = getUploadRetryId(messages, streaming)
   // 群聊窗口由后端按座位分别应答，暂不支持编辑/重新生成；只读会话同理。
   const editable = !session.readOnly && session.threadKind !== 'group'
@@ -274,6 +295,8 @@ export const MessageList = ({
                     stHtml={stHtml}
                     stVariables={stVariablesFor(message)}
                     stPanels={session.st?.panels}
+                    stAuthor={session.st?.author}
+                    stAuthorMessages={authorMessages}
                     cardFeatures={cardFeatures}
                     cardWriteContext={cardWriteContext}
                     threadId={session.threadId}

@@ -73,6 +73,10 @@ type FormState = {
   stNetMaxMb: string
   stNetTimeout: string
   stNetPerMinute: string
+  stNetPerMinuteGet: string
+  promptTemplateEnabled: boolean
+  promptTemplateAllowOutput: boolean
+  promptTemplateMinLevel: string
   galgameEnabled: boolean
   galgameLoops: string
   ttsEnabled: boolean
@@ -143,6 +147,7 @@ const toForm = (config: AdminConfig): FormState => {
   const image = asRecord(raw.image_generation)
   const stImage = asRecord(raw.st_image)
   const stNet = asRecord(raw.st_net)
+  const promptTemplate = asRecord(raw.prompt_template)
   const galgame = asRecord(raw.galgame)
   const tts = asRecord(raw.tts)
   const loop = asRecord(raw.loop)
@@ -205,6 +210,10 @@ const toForm = (config: AdminConfig): FormState => {
     stNetMaxMb: bytesToMbText(stNet.max_bytes),
     stNetTimeout: num(stNet, 'timeout', 15),
     stNetPerMinute: num(stNet, 'per_minute', 60),
+    stNetPerMinuteGet: num(stNet, 'per_minute_get', 600),
+    promptTemplateEnabled: bool(promptTemplate, 'enabled', false),
+    promptTemplateAllowOutput: bool(promptTemplate, 'allow_output_side', false),
+    promptTemplateMinLevel: num(promptTemplate, 'min_level', 0),
     galgameEnabled: bool(galgame, 'enabled', true),
     galgameLoops: num(galgame, 'max_loops', 40),
     ttsEnabled: bool(tts, 'enabled', true),
@@ -319,6 +328,7 @@ export const SystemPanel = () => {
       stNetMaxMb: form.stNetMaxMb.trim() ? Number(form.stNetMaxMb) : NaN,
       stNetTimeout: form.stNetTimeout.trim() ? Number(form.stNetTimeout) : NaN,
       stNetPerMinute: form.stNetPerMinute.trim() ? Number(form.stNetPerMinute) : NaN,
+      stNetPerMinuteGet: form.stNetPerMinuteGet.trim() ? Number(form.stNetPerMinuteGet) : NaN,
       galgameLoops: Number(form.galgameLoops),
       ttsMinLevel: Number(form.ttsMinLevel),
       ttsSampleRate: Number(form.ttsSampleRate),
@@ -421,6 +431,13 @@ export const SystemPanel = () => {
         max_bytes: mbTextToBytes(form.stNetMaxMb),
         timeout: ints.stNetTimeout,
         per_minute: ints.stNetPerMinute,
+        per_minute_get: ints.stNetPerMinuteGet,
+      },
+      prompt_template: {
+        ...asRecord(raw.prompt_template),
+        enabled: form.promptTemplateEnabled,
+        allow_output_side: form.promptTemplateAllowOutput,
+        min_level: ints.promptTemplateMinLevel,
       },
       tts: {
         ...asRecord(raw.tts),
@@ -787,6 +804,34 @@ export const SystemPanel = () => {
               label={t('systemStNetPerMinute')}
               value={form.stNetPerMinute}
               onChange={(value) => patch({ stNetPerMinute: value })}
+            />
+            <NumberField
+              label={t('systemStNetPerMinuteGet')}
+              value={form.stNetPerMinuteGet}
+              onChange={(value) => patch({ stNetPerMinuteGet: value })}
+            />
+          </div>
+
+          <div className={styles.sectionTitle}>{t('systemTemplate')}</div>
+          <div className={styles.hint}>{t('systemTemplateHint')}</div>
+          <div className={styles.rows}>
+            <SwitchRow
+              label={t('systemTemplateEnabled')}
+              desc={t('systemTemplateEnabledDesc')}
+              checked={form.promptTemplateEnabled}
+              onChange={(checked) => patch({ promptTemplateEnabled: checked })}
+            />
+            <SwitchRow
+              label={t('systemTemplateOutput')}
+              desc={t('systemTemplateOutputDesc')}
+              checked={form.promptTemplateAllowOutput}
+              onChange={(checked) => patch({ promptTemplateAllowOutput: checked })}
+            />
+            <NumberField
+              label={t('systemTemplateMinLevel')}
+              hint={t('systemTemplateMinLevelHint')}
+              value={form.promptTemplateMinLevel}
+              onChange={(value) => patch({ promptTemplateMinLevel: value })}
             />
           </div>
 

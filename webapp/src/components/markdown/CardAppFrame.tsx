@@ -24,6 +24,11 @@ import {
 } from 'react'
 import { FlyApiError, assetUrl } from '../../services/flyai/client.js'
 import {
+  clearCardResourceCache,
+  readCachedNetProxy,
+} from '../../services/flyai/cardResourceCache.js'
+import { clearImageProxyCache } from '../../services/st/imageProxy.js'
+import {
   proxyNet,
   writeSessionCharacter,
   writeSessionMvu,
@@ -36,6 +41,11 @@ import {
   sendCardMessage,
 } from '../../services/chat/store.js'
 import {
+  getDraft,
+  setDraftText,
+  useDrafts,
+} from '../../services/chat/drafts.js'
+import {
   CARD_APP_PROTOCOL_VERSION,
   CARD_CODE_ACTION_FAILED,
   CARD_CODE_ACTION_REJECTED,
@@ -47,6 +57,8 @@ import {
   CARD_CODE_VARS_TOO_LARGE,
   CARD_MSG_ACTION,
   CARD_MSG_ACTION_RESULT,
+  CARD_MSG_COMPOSE,
+  CARD_MSG_DRAFT,
   CARD_MSG_ERROR,
   CARD_MSG_FETCH,
   CARD_MSG_FETCH_ABORT,
@@ -66,10 +78,16 @@ import {
 import {
   checkCardIntent,
   createCardActionLimiter,
+  MAX_CARD_SEND_TEXT,
   resolveCapabilities,
   type CardActionRateLimiter,
   type CardIntent,
 } from '../../services/st/cardActions.js'
+import {
+  acquireCardConfirm,
+  type ConfirmRelease,
+  type ConfirmTicket,
+} from '../../services/st/cardConfirmQueue.js'
 import { useTranslate } from '../../i18n/index.js'
 import { IconButton } from '../base/IconButton.js'
 import { showToast } from '../base/toastState.js'
@@ -77,6 +95,7 @@ import {
   IconCollapseOutline16,
   IconExpandOutline16,
   IconRefreshOutline16,
+  IconTrashOutline16,
 } from '../base/icons.js'
 import { CardActionDialog, type CardConfirmRequest } from '../messages/CardActionDialog.js'
 import styles from './CardAppFrame.module.css'
@@ -176,7 +195,13 @@ const resolveAvatar = (avatar?: string | null): string => {
   }
 }
 
-type ConfirmEntry = { request: CardConfirmRequest; resolve: (ok: boolean) => void }
+type ConfirmEntry = {
+  request: CardConfirmRequest
+  resolve: (ok: boolean) => void
+  /** 用户勾选“允许后续所有请求”时执行（仅网络确认） */
+  onAllowAll?: () => void
+  release: ConfirmRelease
+}
 
 export const CardAppFrame = memo(function CardAppFrame({
   html,
@@ -216,7 +241,7 @@ export const CardAppFrame = memo(function CardAppFrame({
   const cardHostRef = useRef<CardAppHost | undefined>(host)
   const pendingFetchesRef = useRef(new Map<string, AbortController>())
   const currentConfirmRef = useRef<ConfirmEntry | null>(null)
-  const confirmQueueRef = useRef<ConfirmEntry[]>([])
+  const confirmTicketsRef = useRef(new Set<ConfirmTicket>())
   const mountedRef = useRef(true)
 
   useLayoutEffect(() => {
@@ -306,43 +331,93 @@ export const CardAppFrame = memo(function CardAppFrame({
     sendWriteContext()
   }, [sendWriteContext])
 
-  /** 弹窗确认队列：同一卡片连续发多个意图时逐个展示，卸载时全部拒绝 */
+  // 输入框草稿同步给卡内兼容层：追加模式要基于用户当前输入，而不是空文本。
+  const sendDraft = useCallback(() => {
+    const sessionId = cardHostRef.current?.sessionId
+    if (!sessionId) {
+      return
+    }
+    postToCard({ type: CARD_MSG_DRAFT, text: getDraft(sessionId).text })
+  }, [postToCard])
+
+  useEffect(() => {
+    if (!host?.sessionId) {
+      return
+    }
+    sendDraft()
+    // 用户在主输入框打字/切换会话时也同步；非本会话的草稿变化只是多一次广播
+    return useDrafts.subscribe(sendDraft)
+  }, [host?.sessionId, sendDraft])
+
+  /**
+   * 弹窗确认：全局闸门保证同一时刻只有一个卡片确认弹窗。
+   * 同一张卡连续请求、页面上多张卡同时请求，都按到达顺序逐个弹出。
+   */
   const askConfirm = useCallback(
-    (request: CardConfirmRequest): Promise<boolean> =>
+    (
+      request: CardConfirmRequest,
+      options?: { onAllowAll?: () => void; skipIf?: () => boolean }
+    ): Promise<boolean> =>
       new Promise((resolve) => {
-        const entry: ConfirmEntry = { request, resolve }
-        if (currentConfirmRef.current) {
-          confirmQueueRef.current.push(entry)
-          return
-        }
-        currentConfirmRef.current = entry
-        setConfirmRequest(request)
+        const ticket = acquireCardConfirm()
+        confirmTicketsRef.current.add(ticket)
+        ticket.ready
+          .then((release) => {
+            confirmTicketsRef.current.delete(ticket)
+            if (!mountedRef.current) {
+              release()
+              resolve(false)
+              return
+            }
+            // 排队期间可能已有同源请求被允许（或勾选了“允许后续所有”），
+            // 直接放行，不再弹第二次
+            if (options?.skipIf?.()) {
+              release()
+              resolve(true)
+              return
+            }
+            currentConfirmRef.current = {
+              request,
+              resolve,
+              onAllowAll: options?.onAllowAll,
+              release,
+            }
+            setConfirmRequest(request)
+          })
+          .catch(() => {
+            confirmTicketsRef.current.delete(ticket)
+            resolve(false)
+          })
       }),
     []
   )
 
-  const finishConfirm = useCallback((ok: boolean) => {
+  const finishConfirm = useCallback((ok: boolean, allowAll = false) => {
     const current = currentConfirmRef.current
+    if (!current) {
+      return
+    }
     currentConfirmRef.current = null
     setConfirmRequest(null)
-    current?.resolve(ok)
-    const next = confirmQueueRef.current.shift()
-    if (next) {
-      currentConfirmRef.current = next
-      setConfirmRequest(next.request)
+    if (ok && allowAll) {
+      current.onAllowAll?.()
     }
+    current.resolve(ok)
+    current.release()
   }, [])
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      currentConfirmRef.current?.resolve(false)
-      currentConfirmRef.current = null
-      for (const entry of confirmQueueRef.current) {
-        entry.resolve(false)
+      for (const ticket of confirmTicketsRef.current) {
+        ticket.cancel()
       }
-      confirmQueueRef.current = []
+      confirmTicketsRef.current.clear()
+      const current = currentConfirmRef.current
+      currentConfirmRef.current = null
+      current?.resolve(false)
+      current?.release()
       for (const controller of pendingFetchesRef.current.values()) {
         controller.abort()
       }
@@ -371,6 +446,10 @@ export const CardAppFrame = memo(function CardAppFrame({
           let started = false
           if (intent.action === 'send') {
             started = sendCardMessage(target.sessionId, intent.text ?? '')
+            // 卡片通常是先填输入框再发；发送成功后清掉同一份草稿，避免重复发送
+            if (started && getDraft(target.sessionId).text === (intent.text ?? '')) {
+              setDraftText(target.sessionId, '')
+            }
           } else if (intent.action === 'continue') {
             started = continueReply(target.sessionId, target.messageId)
           } else {
@@ -491,19 +570,44 @@ export const CardAppFrame = memo(function CardAppFrame({
         reply({ ok: false, error: CARD_CODE_NET_FAILED })
         return
       }
+      const netHeaders = pickNetHeaders(raw?.headers)
+      // 本地已缓存过的静态资源：不发请求，也不再弹网络确认
+      const cached = await readCachedNetProxy({
+        method,
+        url: url.href,
+        headers: netHeaders,
+      })
+      if (cached) {
+        reply({
+          ok: true,
+          status: cached.status,
+          headers: cached.headers,
+          bodyBase64: cached.body_base64,
+          truncated: cached.truncated,
+        })
+        return
+      }
       // 首次访问某站点时确认；同一会话内后续请求不再重复弹窗
       let approved = approvedNetHosts.get(target.sessionId)
       if (!approved) {
         approved = new Set()
         approvedNetHosts.set(target.sessionId, approved)
       }
-      if (!approved.has(url.origin)) {
-        const allowed = await askConfirm({
-          kind: 'net',
-          method,
-          url: url.href,
-          bodySize,
-        })
+      if (!approved.has('*') && !approved.has(url.origin)) {
+        const allowed = await askConfirm(
+          {
+            kind: 'net',
+            method,
+            url: url.href,
+            bodySize,
+          },
+          {
+            // 勾选“允许后续所有请求”：本会话内所有来源都不再逐个确认
+            onAllowAll: () => approved.add('*'),
+            // 排队期间同源已被允许，或已勾选允许全部：直接放行
+            skipIf: () => approved.has('*') || approved.has(url.origin),
+          }
+        )
         if (!allowed) {
           reply({ ok: false, error: CARD_CODE_ACTION_REJECTED })
           return
@@ -517,7 +621,7 @@ export const CardAppFrame = memo(function CardAppFrame({
           {
             method: method as 'GET' | 'HEAD' | 'POST',
             url: url.href,
-            headers: pickNetHeaders(raw?.headers),
+            headers: netHeaders,
             body_base64: method === 'POST' ? bodyBase64 : undefined,
           },
           controller.signal
@@ -578,6 +682,7 @@ export const CardAppFrame = memo(function CardAppFrame({
       if (data.type === CARD_MSG_READY) {
         sendContext()
         sendWriteContext()
+        sendDraft()
         return
       }
       if (data.type === CARD_MSG_ERROR) {
@@ -600,6 +705,14 @@ export const CardAppFrame = memo(function CardAppFrame({
         }
         return
       }
+      if (data.type === CARD_MSG_COMPOSE) {
+        const target = cardHostRef.current
+        const text = typeof data.text === 'string' ? data.text : ''
+        if (target?.editable && text.length <= MAX_CARD_SEND_TEXT) {
+          setDraftText(target.sessionId, text)
+        }
+        return
+      }
       if (data.type === CARD_MSG_ACTION) {
         void handleAction(data)
         return
@@ -617,7 +730,7 @@ export const CardAppFrame = memo(function CardAppFrame({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [handleAction, handleFetch, sendContext, sendWriteContext, t])
+  }, [handleAction, handleFetch, sendContext, sendDraft, sendWriteContext, t])
 
   // 变量超限时提示一次：卡片只能拿到空状态
   const truncatedRef = useRef(false)
@@ -651,7 +764,8 @@ export const CardAppFrame = memo(function CardAppFrame({
   const handleLoad = useCallback(() => {
     sendContext()
     sendWriteContext()
-  }, [sendContext, sendWriteContext])
+    sendDraft()
+  }, [sendContext, sendDraft, sendWriteContext])
 
   if (!doc) {
     return null
@@ -687,6 +801,19 @@ export const CardAppFrame = memo(function CardAppFrame({
           </span>
           <div className={styles.actions}>
             <IconButton
+              icon={<IconTrashOutline16 />}
+              size="xs"
+              tooltip={t('cardAppClearCache')}
+              onClick={() => {
+                void (async () => {
+                  clearImageProxyCache()
+                  await clearCardResourceCache()
+                  showToast(t('cardAppCacheCleared'))
+                  setReloadKey((key) => key + 1)
+                })()
+              }}
+            />
+            <IconButton
               icon={<IconRefreshOutline16 />}
               size="xs"
               tooltip={t('cardAppRefresh')}
@@ -719,7 +846,7 @@ export const CardAppFrame = memo(function CardAppFrame({
       {confirmRequest ? (
         <CardActionDialog
           request={confirmRequest}
-          onConfirm={() => finishConfirm(true)}
+          onConfirm={(options) => finishConfirm(true, options?.allowAll === true)}
           onCancel={() => finishConfirm(false)}
         />
       ) : null}

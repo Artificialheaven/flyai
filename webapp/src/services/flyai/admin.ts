@@ -189,6 +189,8 @@ export type AdminConfig = {
   }
   /** 原生 MVU 总开关 */
   mvu?: { enabled: boolean }
+  /** EJS 模板（方案 B）总开关与输出侧授权 */
+  prompt_template?: { enabled: boolean; min_level: number; allow_output_side: boolean }
   /** 当前用户是否可用图片代理（管理员按权限等级判定） */
   st_image_available?: boolean
   /** 当前用户是否可用网络代理（管理员按权限等级判定） */
@@ -242,11 +244,15 @@ export type MySettings = {
   st_external_images_enabled: boolean | null
   st_image_proxy_enabled: boolean | null
   st_js_sandbox_enabled: boolean | null
+  st_author_scripts_enabled: boolean | null
   mvu_enabled: boolean | null
   /** L4 卡片授权动作/会话副本写入/网络代理（null = 跟随默认关） */
   st_card_actions_enabled: boolean | null
   st_card_write_enabled: boolean | null
   st_net_proxy_enabled: boolean | null
+  /** EJS 模板个人开关（默认关；输出侧需管理员 allow_output_side） */
+  template_enabled: boolean | null
+  template_output_enabled: boolean | null
 }
 
 export type MySettingsPayload = Omit<MySettings, 'active_preset_id'>

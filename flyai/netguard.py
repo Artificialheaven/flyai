@@ -18,6 +18,7 @@ import asyncio
 import ipaddress
 import socket
 from typing import List, Union
+from urllib.request import getproxies, proxy_bypass
 
 IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 
@@ -135,14 +136,43 @@ async def resolve_and_check(hostname: str) -> List[IPAddress]:
     return ips
 
 
+def proxy_in_use(hostname: str, scheme: str = "https") -> bool:
+    """httpx（trust_env）是否会为该目标走系统/环境 HTTP 代理。
+
+    与 httpx 的取代理逻辑一致：getproxies()（Windows 会读系统注册表），
+    再按方案和 NO_PROXY 判断。代理可能是用户在系统里为翻墙/内网配置的，
+    服务器进程即使没有 HTTPS_PROXY 环境变量也会命中。
+    """
+    try:
+        info = getproxies()
+        keys = (scheme, "all") if scheme in ("http", "https") else ("all",)
+        if not any(info.get(k) for k in keys):
+            return False
+        if str(info.get("no") or "").strip() == "*":
+            return False
+        try:
+            return not proxy_bypass(hostname)
+        except Exception:
+            return True
+    except Exception:
+        return False
+
+
 def pin_request(request, ip: IPAddress) -> None:
     """把已构造的 httpx 请求改连指定 IP（必须事先通过 resolve_and_check）。
 
     保留原主机名用于虚拟主机与 TLS：重写 URL 主机、固定 Host 头，
     HTTPS 时通过 httpcore 的 sni_hostname 扩展维持原 SNI 与证书名校验。
+
+    有 HTTP(S) 代理时不做 IP 钉住：httpcore 的 HTTP 代理通道不处理
+    sni_hostname 扩展，URL 改成 IP 后 TLS 会按 IP 校验证书直接失败
+    （CERTIFICATE_VERIFY_FAILED: IP address mismatch）。代理会自行解析
+    域名，SSRF 的解析校验仍由调用方在请求前完成。
     """
     url = request.url
     host = url.host
+    if proxy_in_use(host, url.scheme):
+        return
     request.url = url.copy_with(host=str(ip))
     # httpx 在构造时已写入 host 头；显式覆盖，避免发成 IP
     request.headers["host"] = host

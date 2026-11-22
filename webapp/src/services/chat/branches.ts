@@ -115,6 +115,106 @@ export const buildMessageVersions = (
   return unchanged ? previous : versions
 }
 
+/**
+ * 把本地乐观消息 id 换成服务端落盘 id，并同步分支图里的所有引用。
+ *
+ * 用于发送失败（供应商报错/断流）后仍能按服务端 id 撤回、编辑或重新生成：
+ * 本地乐观消息在服务端只登记了用户消息，id 必须与它一致。
+ */
+export const rekeyMessage = (session: Session, fromId: string, toId: string): Session => {
+  if (!fromId || !toId || fromId === toId) {
+    return session
+  }
+  return {
+    ...session,
+    rootMessageId:
+      session.rootMessageId === fromId ? toId : session.rootMessageId,
+    messages: session.messages.map((message) => {
+      let next = message
+      if (message.id === fromId) {
+        next = { ...next, id: toId }
+      }
+      if (message.parentId === fromId) {
+        next = { ...next, parentId: toId }
+      }
+      if (message.selectedChildId === fromId) {
+        next = { ...next, selectedChildId: toId }
+      }
+      return next
+    }),
+  }
+}
+
+const isFailedReply = (message: Message) =>
+  message.role === 'assistant' && message.status === 'error'
+
+/**
+ * 刷新时把「失败轮」的本地气泡与服务端历史对齐。
+ *
+ * 后端只保存成功的助手消息：供应商报错后，本地会多出一条 error 气泡，
+ * 而它的用户消息在服务端已落盘（id 不同）。若直接用 keepLocal 保留本地列表，
+ * 撤回/重新生成会带着服务端不认识的 id 请求，永远 404。
+ *
+ * 仅在「本地去掉 error 气泡后」与服务端逐条 role（用户消息还要 content）一致，
+ * 且两边都是线性列表时采纳：用服务端消息（权威 id）重建，再把 error 气泡插回
+ * 原位置。任何不一致都返回 null，保持原有本地优先逻辑。
+ */
+export const reconcileFailedReplies = (
+  local: Session,
+  remote: Session
+): Session | null => {
+  if (remote.rootMessageId !== undefined || local.rootMessageId !== undefined) {
+    return null
+  }
+  const kept = local.messages.filter((message) => !isFailedReply(message))
+  if (
+    kept.length === local.messages.length ||
+    kept.length !== remote.messages.length
+  ) {
+    return null
+  }
+  // extras[i] = 对齐完 i 条正常消息之后要插回的失败气泡
+  const extras: Message[][] = Array.from(
+    { length: remote.messages.length + 1 },
+    () => []
+  )
+  let keptIndex = 0
+  for (const message of local.messages) {
+    if (isFailedReply(message)) {
+      extras[keptIndex].push(message)
+      continue
+    }
+    const twin = remote.messages[keptIndex]
+    if (!twin || twin.role !== message.role) {
+      return null
+    }
+    if (
+      message.role === 'user' &&
+      twin.role === 'user' &&
+      message.content !== twin.content
+    ) {
+      return null
+    }
+    keptIndex += 1
+  }
+  const messages: Message[] = []
+  for (let index = 0; index <= remote.messages.length; index += 1) {
+    if (index > 0) {
+      messages.push({
+        ...remote.messages[index - 1],
+        parentId: messages[messages.length - 1]?.id ?? null,
+      })
+    }
+    for (const extra of extras[index]) {
+      messages.push({
+        ...extra,
+        parentId: messages[messages.length - 1]?.id ?? null,
+      })
+    }
+  }
+  return { ...remote, messages }
+}
+
 /** 新消息挂在指定父节点下，并选择新分支；原节点与其后续对话保持不变。 */
 export const appendBranch = (
   original: Session,

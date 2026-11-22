@@ -135,6 +135,14 @@ export type AssistantMessage = MessageBranch & {
   recall?: RecallItem[]
   /** 消息来源：卡片在宿主确认后发起的动作为 'card'，缺省为用户手动操作 */
   origin?: 'card'
+  /** EJS 模板原文（仅输出侧功能开启且含模板时存在） */
+  rawContent?: string
+  /** false=等待客户端渲染；true=已渲染；缺省=不含模板 */
+  templateRendered?: boolean
+  /** 该消息的 message 作用域模板变量 */
+  templateVars?: Record<string, unknown>
+  /** 后端返回的已渲染标记（用于补渲染幂等） */
+  templateRenderId?: string
   /** 是否允许作为续写前缀；仍需满足回复状态与内容限制。 */
   prefix: boolean
   status: ReplyStatus

@@ -140,7 +140,7 @@ def test_import_report_stats_and_warnings():
         "depth_prompt": True,
     }
     text = "\n".join(report["warnings"])
-    assert "不会执行任何卡内 JavaScript" in text
+    assert "tavern_helper 脚本默认仅保存" in text
     assert "其中 1 条正则无效" in text
     assert "和睦小镇" in text
     assert "assets" in text

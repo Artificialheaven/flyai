@@ -29,6 +29,8 @@ import { StatusPanelInline } from '../session/StatusPanel.js'
 import { useReplyView } from './useReplyView.js'
 import { ImageViewer } from '../images/ImageViewer.js'
 import type { ToolImage } from '../../services/chat/view.js'
+import type { StAuthorPayload } from '../../services/flyai/types.js'
+import type { AuthorRuntimeMessage } from '../../services/st/authorRuntime.js'
 import {
   BranchSwitcher,
   type MessageVersions,
@@ -51,6 +53,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   stHtml,
   stVariables,
   stPanels,
+  stAuthor,
+  stAuthorMessages,
   cardFeatures,
   cardWriteContext,
   threadId,
@@ -79,6 +83,10 @@ export const AssistantMessage = memo(function AssistantMessage({
    * 最后一条消息即使未开启也会渲染（正文已内嵌面板时不重复）。
    */
   stPanels?: StPanel[]
+  /** 酒馆助手作者脚本；有脚本时状态面板改走作者运行时 */
+  stAuthor?: StAuthorPayload
+  /** 作者运行时的消息镜像 */
+  stAuthorMessages?: AuthorRuntimeMessage[]
   /** 用户设置层面的卡片能力开关；缺省全部关闭（只读） */
   cardFeatures?: CardAppCapabilities
   /** 会话副本写入读侧快照（世界书、角色白名单字段） */
@@ -119,8 +127,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   const answer = refused ? null : view.answer
   // 消息原文里已经带面板占位符时，展示侧正则会把它渲染在正文里；
   // 此时不再追加宿主面板，避免出现两份。模型漏写占位符时由最后一条消息兜底。
+  const hasAuthorScripts = (stAuthor?.scripts?.length ?? 0) > 0
   const embeddedPanel = useMemo(
     () =>
+      !hasAuthorScripts &&
       Boolean(
         stScripts?.length &&
           stPanels?.some(
@@ -128,7 +138,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               panel.token && (answer?.text || '').includes(panel.token)
           )
       ),
-    [answer?.text, stPanels, stScripts]
+    [answer?.text, hasAuthorScripts, stPanels, stScripts]
   )
   const responseText = [answer?.text, notice?.presentation === 'response' ? notice.text : null]
     .filter(Boolean)
@@ -209,7 +219,15 @@ export const AssistantMessage = memo(function AssistantMessage({
           scripts={stScripts}
           options={stHtml}
           statData={message.statData}
+          author={stAuthor}
+          authorMessages={stAuthorMessages}
           sessionId={sessionId}
+          threadId={threadId}
+          canWrite={cardFeatures?.write === true}
+          canAct={cardFeatures?.actions === true}
+          actionMessageId={message.id}
+          writeContext={cardWriteContext ?? undefined}
+          streaming={streaming || busy}
           netEnabled={cardFeatures?.net === true}
           always={isLast}
         />

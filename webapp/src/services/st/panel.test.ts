@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RegexScript } from '../flyai/types.js'
-import { renderPanel, statDataRows } from './panel.js'
+import { renderPanel, statDataRows, withoutAuthorRemovals } from './panel.js'
 
 const PANEL_SCRIPTS: RegexScript[] = [
   {
@@ -66,5 +66,23 @@ describe('statDataRows', () => {
 
   it('空对象给出占位行', () => {
     expect(statDataRows({})).toEqual([{ key: '—', value: '' }])
+  })
+})
+
+describe('withoutAuthorRemovals', () => {
+  it('过滤消息正文用的合成移除脚本，保留作者正则', () => {
+    const scripts: RegexScript[] = [
+      {
+        scriptName: '移除',
+        findRegex: '<Panel/>',
+        replaceString: '',
+        flyaiAuthorRemoval: true,
+      },
+      ...PANEL_SCRIPTS,
+    ]
+    const kept = withoutAuthorRemovals(scripts)
+    expect(kept).toHaveLength(1)
+    expect(kept?.[0].scriptName).toBe('状态面板')
+    expect(withoutAuthorRemovals(undefined)).toBeUndefined()
   })
 })

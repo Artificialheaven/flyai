@@ -5,8 +5,8 @@
   值为 base64 编码的卡片 JSON；PNG 图片本身作为角色头像。
 - JSON 卡片：同样的信封（{"spec": ..., "data": {...}}），或更老的 v1 平铺字段。
 
-字段映射以扮演效果为主；同时尽量保真地保留酒馆扩展数据（不执行其中的
-JavaScript）：
+字段映射以扮演效果为主；同时尽量保真地保留酒馆扩展数据（默认不执行其中的
+JavaScript；tavern_helper 作者脚本需显式开启兼容运行时）：
 
 - ``extensions``：depth_prompt / world / talkativeness / fav / tavern_helper 等；
 - ``regex_scripts``：酒馆正则脚本（由 FlyAI 原生引擎解释，见 flyai.st）；
@@ -234,7 +234,10 @@ def import_report(character: Character) -> Dict[str, Any]:
     }
     warnings: List[str] = []
     if ext.get("tavern_helper"):
-        warnings.append("卡内 tavern_helper 脚本仅保留为数据，FlyAI 不会执行任何卡内 JavaScript")
+        warnings.append(
+            "卡内 tavern_helper 脚本默认仅保存为数据；"
+            "开启作者脚本运行时后会在沙箱 iframe 中执行"
+        )
     if character.regex_scripts:
         note = "已保留 %d 条酒馆正则脚本，将由 FlyAI 原生正则引擎解释" % len(character.regex_scripts)
         try:

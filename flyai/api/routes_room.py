@@ -248,6 +248,17 @@ def create_room(body: RoomCreate, request: Request):
                 # 开场白里的更新块同样落快照，后续 recompute 才不会回退
                 msg.stat_data = copy.deepcopy(cur)
             s.threads[0].messages.append(msg)
+    # EJS 输出侧：开场白也可能含模板，标记后由客户端首次打开会话时补渲染
+    from ..template import output as template_output
+    from ..template import policy as template_policy
+
+    if template_policy.output_enabled(
+        getattr(request.app.state.flyai, "config", None),
+        getattr(sc, "user_settings", None),
+        int(getattr(sc, "level", 0) or 0),
+        sc.uid == ADMIN_UID,
+    ):
+        template_output.mark_pending_output(s, True)
     sc.store.save(s)
     return _session_dict(
         s, with_messages=True, lore=sc.lore,

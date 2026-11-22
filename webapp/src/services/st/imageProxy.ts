@@ -6,6 +6,10 @@
  * 避免滚动/重渲时重复请求；缓存超限时回收最早的 blob URL。
  */
 
+import {
+  readCachedImage,
+  writeCachedImage,
+} from '../flyai/cardResourceCache.js'
 import { apiUrl, authHeaders } from '../flyai/client.js'
 
 const MAX_CACHE = 64
@@ -44,6 +48,13 @@ export const fetchProxyImage = (remote: string): Promise<string> => {
     return inflight
   }
   const task = (async () => {
+    // 先读 IndexedDB：之前下载过的图片不再请求服务器
+    const saved = await readCachedImage(key)
+    if (saved) {
+      const blobUrl = URL.createObjectURL(saved)
+      remember(key, blobUrl)
+      return blobUrl
+    }
     const resp = await fetch(
       apiUrl(`/api/st/img-proxy?url=${encodeURIComponent(key)}`),
       { headers: authHeaders() }
@@ -51,8 +62,10 @@ export const fetchProxyImage = (remote: string): Promise<string> => {
     if (!resp.ok) {
       throw new Error(`图片代理失败（HTTP ${resp.status}）`)
     }
-    const blobUrl = URL.createObjectURL(await resp.blob())
+    const blob = await resp.blob()
+    const blobUrl = URL.createObjectURL(blob)
     remember(key, blobUrl)
+    void writeCachedImage(key, blob)
     return blobUrl
   })()
   pending.set(key, task)
@@ -62,4 +75,13 @@ export const fetchProxyImage = (remote: string): Promise<string> => {
       pending.delete(key)
     })
   return task
+}
+
+/** 清空本页内存缓存（IndexedDB 由 cardResourceCache 单独清理）。 */
+export const clearImageProxyCache = (): void => {
+  for (const url of cache.values()) {
+    URL.revokeObjectURL(url)
+  }
+  cache.clear()
+  pending.clear()
 }

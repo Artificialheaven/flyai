@@ -9,8 +9,12 @@
 |---|---|---|---|
 | `jquery-3.6.0.min.js` | 3.6.0 | `https://code.jquery.com/jquery-3.6.0.min.js` | MIT（文件头保留版权声明） |
 | `lodash-4.18.1.min.js` | 4.18.1 | npm `lodash-es`，经 `esbuild --bundle --format=iife --global-name=__lodashVendor --minify` 打成全局 | MIT（`lodash-LICENSE.txt`） |
+| `zod-4.6.7.min.js` | 4.6.7 | npm `zod`，经 `esbuild --bundle --format=iife --global-name=z --platform=browser --minify` 打成全局 | MIT（`zod-LICENSE.txt`） |
 
-升级时替换文件并同步更新本表与 `cardApp.ts` 中的说明；不要修改文件内容。
+酒馆助手脚本（`services/st/authorRuntime.ts`）会用到 MVU Zod 的全局 `z`；
+断网时卡内脚本无法从 CDN 加载 zod，这里内置一份。
+
+升级时替换文件并同步更新本表与 `cardApp.ts` / `authorRuntime.ts` 中的说明；不要修改文件内容。
 lodash 的再生成命令（在 `webapp/` 下）：
 
 ```bash

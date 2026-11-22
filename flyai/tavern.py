@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from contextvars import ContextVar
 from typing import List, Optional
 
 
@@ -141,6 +142,36 @@ def strip_prompt_template(text: str, variables=None) -> str:
     return out
 
 
+# EJS 提示词模板开启时，卡/预设/世界书文本不能在宏渲染阶段被剥掉：
+# 先保留 `<% … %>`，交给客户端沙箱执行后再做宏展开。
+_PRESERVE_EJS: ContextVar[bool] = ContextVar("flyai_preserve_ejs", default=False)
+
+
+def set_preserve_ejs(enabled: bool):
+    """在提示词组装期间保留 EJS；返回 token 供 reset_preserve_ejs 恢复。"""
+    return _PRESERVE_EJS.set(bool(enabled))
+
+
+def reset_preserve_ejs(token) -> None:
+    _PRESERVE_EJS.reset(token)
+
+
+def preserve_ejs_enabled() -> bool:
+    return bool(_PRESERVE_EJS.get())
+
+
+def _outside_ejs(text: str, transform) -> str:
+    """只对 EJS 标签之外的片段应用 transform，标签内原样保留。"""
+    out: List[str] = []
+    pos = 0
+    for match in _EJS_TAG_RE.finditer(text or ""):
+        out.append(transform((text or "")[pos:match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(transform((text or "")[pos:]))
+    return "".join(out)
+
+
 def render_name_macros(
     text: str,
     *,
@@ -180,13 +211,19 @@ def render_card_text(
     last_message: str = "",
     variables=None,
     rng: Optional[random.Random] = None,
+    preserve_ejs: Optional[bool] = None,
 ) -> str:
     """卡内文本统一渲染入口。
 
     - 有 MVU 变量时：完整宏渲染（含 ``{{format_message_variable}}``）并剥 EJS；
     - 无变量时：剥 EJS + 只展开名字宏，``{{random}}`` 等保持原样，避免每次
       构建都被重新求值。
+    - EJS 提示词模板开启（preserve_ejs=True）：保留 ``<% … %>``，宏只作用于
+      标签之外的文本，等客户端沙箱执行后再做后置宏展开。
     """
+    preserve = (
+        preserve_ejs_enabled() if preserve_ejs is None else bool(preserve_ejs)
+    )
     if variables is not None:
         return render_tavern_macros(
             text or "",
@@ -196,6 +233,18 @@ def render_card_text(
             last_message=last_message,
             variables=variables,
             rng=rng,
+            preserve_ejs=preserve,
+        )
+    if preserve:
+        return _outside_ejs(
+            text or "",
+            lambda chunk: render_name_macros(
+                chunk,
+                char_name=char_name,
+                user_name=user_name,
+                group_names=group_names,
+                last_message=last_message,
+            ),
         )
     return render_name_macros(
         strip_prompt_template(text or "", variables=None),
@@ -206,25 +255,17 @@ def render_card_text(
     )
 
 
-def render_tavern_macros(
+def _expand_macros(
     text: str,
     *,
-    char_name: str = "",
-    user_name: str = "",
-    group_names: Optional[List[str]] = None,
-    last_message: str = "",
-    variables=None,
-    rng: Optional[random.Random] = None,
+    char_name: str,
+    user_name: str,
+    group_names: Optional[List[str]],
+    last_message: str,
+    variables,
+    rng,
 ) -> str:
-    """把酒馆宏替换为实际值；text 为空/非字符串原样返回。
-
-    variables：MVU 变量状态（``stat_data`` 或含该键的完整状态）；提供时展开
-    ``{{format_message_variable::stat_data.<path>}}`` 宏，缺失字段展开为空串。
-    """
-    if not text:
-        return text or ""
-    rng = rng or random
-    out = _COMMENT_RE.sub("", text)
+    out = _COMMENT_RE.sub("", text or "")
     out = _SETVAR_RE.sub("", out)
     out = _GETVAR_RE.sub("", out)
 
@@ -253,6 +294,53 @@ def render_tavern_macros(
     for pat, val in repl:
         out = re.sub(pat, lambda _m, v=val: v, out, flags=re.IGNORECASE)
     # 其余未识别宏（{{personality}}/{{model}} 等）一律剥除
-    out = _ANY_MACRO_RE.sub("", out)
+    return _ANY_MACRO_RE.sub("", out)
+
+
+def render_tavern_macros(
+    text: str,
+    *,
+    char_name: str = "",
+    user_name: str = "",
+    group_names: Optional[List[str]] = None,
+    last_message: str = "",
+    variables=None,
+    rng: Optional[random.Random] = None,
+    preserve_ejs: Optional[bool] = None,
+) -> str:
+    """把酒馆宏替换为实际值；text 为空/非字符串原样返回。
+
+    variables：MVU 变量状态（``stat_data`` 或含该键的完整状态）；提供时展开
+    ``{{format_message_variable::stat_data.<path>}}`` 宏，缺失字段展开为空串。
+    preserve_ejs=True 时不剥 EJS，宏只作用于标签之外的片段。
+    """
+    if not text:
+        return text or ""
+    preserve = (
+        preserve_ejs_enabled() if preserve_ejs is None else bool(preserve_ejs)
+    )
+    rng = rng or random
+    if preserve:
+        return _outside_ejs(
+            text,
+            lambda chunk: _expand_macros(
+                chunk,
+                char_name=char_name,
+                user_name=user_name,
+                group_names=group_names,
+                last_message=last_message,
+                variables=variables,
+                rng=rng,
+            ),
+        )
+    out = _expand_macros(
+        text,
+        char_name=char_name,
+        user_name=user_name,
+        group_names=group_names,
+        last_message=last_message,
+        variables=variables,
+        rng=rng,
+    )
     # EJS 模板标记：不执行，只移除/尽量展开 getvar
     return strip_prompt_template(out, variables)

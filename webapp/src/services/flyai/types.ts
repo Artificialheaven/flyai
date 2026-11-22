@@ -73,6 +73,28 @@ export type StPanel = {
   token: string
   /** 面板标题，缺省为占位符本身 */
   title?: string
+  /** 面板由卡内酒馆助手脚本生成；正文里的正则结果只是兜底提示 */
+  author?: boolean
+}
+
+/** 卡内酒馆助手脚本（只读数据；由前端独立 iframe 执行） */
+export type StAuthorScript = {
+  id: string
+  name: string
+  content: string
+}
+
+export type StAuthorPayload = {
+  /** 用户/管理员是否开启作者脚本运行时 */
+  enabled?: boolean
+  scripts?: StAuthorScript[]
+  /** 脚本数量或体积超限，已截断 */
+  truncated?: boolean
+  character?: {
+    name?: string
+    description?: string
+    avatar?: string
+  }
 }
 
 /** 会话打开时下发的酒馆扩展数据（GET /api/sessions/{sid}.st） */
@@ -82,6 +104,8 @@ export type StPayload = {
   regex_scripts_global?: RegexScript[]
   by_character?: Record<string, RegexScript[]>
   panels?: StPanel[]
+  /** 酒馆助手（TavernHelper）作者脚本；开关关闭时 scripts 为空 */
+  author?: StAuthorPayload
   html?: { enabled?: boolean; external_images?: boolean; image_proxy?: boolean }
   flags?: {
     regex_prompt?: boolean
@@ -105,13 +129,24 @@ export type StPayload = {
     net_proxy_available?: boolean
   }
   mvu?: { enabled?: boolean; stat_data?: Record<string, unknown> }
+  /** EJS 模板（方案 B）：开关与 local/message 变量快照 */
+  template?: {
+    prompt_enabled?: boolean
+    output_enabled?: boolean
+    vars?: {
+      local?: Record<string, unknown>
+      message?: Record<string, Record<string, unknown>>
+    }
+  }
   /** 宿主需要下发给卡片的副本快照：世界书条目与角色白名单字段 */
   write_context?: CardWriteContext
 }
 
 /** 卡片写入上下文（会话副本快照；根卡/公共卡永不下发可变引用） */
 export type CardWriteContext = {
-  worldbook?: { name?: string; entries?: LoreEntry[] } | null
+  worldbook?: { name?: string; entries?: unknown[] } | null
+  /** 角色卡自带世界书名（CC extensions.world） */
+  characterWorldName?: string
   character?: Record<string, unknown> | null
 }
 
@@ -139,6 +174,13 @@ export type Message = {
   stat_data?: Record<string, unknown> | null
   /** 消息来源：卡片在宿主确认后发起/发送的为 'card'，缺省为用户手动操作 */
   origin?: string | null
+  /** EJS 模板原文（仅输出侧功能开启且消息含模板时存在） */
+  raw_content?: string | null
+  /** false=等待客户端渲染；true=已渲染；null/缺省=不含模板 */
+  template_rendered?: boolean | null
+  /** 该消息的 message 作用域模板变量 */
+  template_vars?: Record<string, unknown> | null
+  template_render_id?: string | null
 }
 
 /** 内容库角色卡（当前阶段只用到展示/绑定所需字段，完整编辑器类型后续补齐） */

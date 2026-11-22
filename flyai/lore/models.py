@@ -93,7 +93,7 @@ class Character:
     voice: str = ""           # 绑定音色的 speaker ID（空=用全局默认音色）
     author: str = ""          # 创建者 uid（服务端注入）；对外以 author:id 唯一标识
     public: bool = False      # 是否已发布为全体用户共享（admin 操作）
-    # ---- 酒馆卡保真字段（原样保留，绝不执行其中的 JS）----
+    # ---- 酒馆卡保真字段（原样保留；服务端不执行其中的 JS）----
     regex_scripts: List[Dict[str, Any]] = field(default_factory=list)  # ST regex_scripts
     extensions: Dict[str, Any] = field(default_factory=dict)  # depth_prompt/world/talkativeness/fav/tavern_helper 等
     alternate_greetings: List[str] = field(default_factory=list)

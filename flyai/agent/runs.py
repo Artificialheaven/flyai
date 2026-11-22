@@ -39,6 +39,9 @@ class ChatRun:
         self.task: Optional[asyncio.Task] = None
         self.created = time.time()
         self.finished = 0.0
+        # EJS 提示词侧 prepare/commit：prepare_id -> 等待 commit 的 future。
+        # 只在进程内有效；超时由等待方处理，运行结束/取消时自然取消。
+        self.template_waiters: Dict[str, asyncio.Future] = {}
 
     async def emit(self, event: str, data: dict) -> None:
         """发布一个事件并通知所有订阅者。"""
@@ -51,6 +54,41 @@ class ChatRun:
             self.status = status
             self.finished = time.time()
             self.cond.notify_all()
+
+    def open_template(self, prepare_id: str) -> asyncio.Future:
+        """先登记等待者再发 prepare 事件，避免客户端回传早于登记而 409。"""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self.template_waiters[prepare_id] = future
+        return future
+
+    async def wait_template(
+        self, prepare_id: str, timeout: float,
+        future: Optional[asyncio.Future] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """等待客户端提交某个 prepare 的渲染结果；超时返回 None。
+
+        未显式传入 future 时按 prepare_id 现场登记（仅测试/兼容路径）。
+        等待期间运行被取消会抛 CancelledError。
+        """
+        if future is None:
+            future = self.open_template(prepare_id)
+        try:
+            return await asyncio.wait_for(future, max(0.2, float(timeout)))
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            # 只清理自己注册的 future（避免覆盖后误删别人）
+            if self.template_waiters.get(prepare_id) is future:
+                self.template_waiters.pop(prepare_id, None)
+
+    def resolve_template(self, prepare_id: str, payload: Dict[str, Any]) -> bool:
+        """提交客户端结果；prepare 不存在/已处理/已超时返回 False。"""
+        future = self.template_waiters.get(prepare_id)
+        if future is None or future.done():
+            return False
+        future.set_result(payload if isinstance(payload, dict) else {})
+        return True
 
     def mark_failed(self, status: str = "error") -> None:
         """请求在后台 drive 启动前就失败：同步终止，否则孤儿 running 运行会让
