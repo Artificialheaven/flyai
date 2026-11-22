@@ -121,7 +121,7 @@ const sandboxMain = () => {
     return {}
   }
 
-  function run(payload: any): void {
+  async function run(payload: any): Promise<void> {
     const started = Date.now()
     const cells = Array.isArray(payload.cells) ? payload.cells.slice(0, 500) : []
     const context = payload.context || {}
@@ -270,7 +270,7 @@ const sandboxMain = () => {
         ctx.chat = chat
         Object.defineProperty(ctx, 'variables', { get: merged, enumerable: true })
         if (context.escapeOutput === false) ctx.__escape = escapeRaw
-        const output = runner(String(cell?.text || ''), ctx)
+        const output = await runner(String(cell?.text || ''), ctx)
         results[id] = output
       } catch (error) {
         errors.push({
@@ -297,9 +297,7 @@ const sandboxMain = () => {
   window.addEventListener('message', (event) => {
     const data = (event as MessageEvent).data
     if (!data || data.__flyaiTemplateRequest !== 1) return
-    try {
-      run(data)
-    } catch (error) {
+    run(data).catch((error) => {
       ;(parent as Window).postMessage(
         {
           __flyaiTemplate: 1,
@@ -314,7 +312,7 @@ const sandboxMain = () => {
         },
         '*'
       )
-    }
+    })
   })
 }
 /* eslint-enable no-new-func */

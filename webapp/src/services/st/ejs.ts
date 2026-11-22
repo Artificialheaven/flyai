@@ -7,10 +7,15 @@
  * - `<%_` / `_%>` / `-%>` 空白裁剪
  * - `<#escape-ejs>…</#escape-ejs>` 转义区
  *
- * 不执行 include / 异步 / import；输出长度由调用方限额。
+ * 不执行 include / import；输出长度由调用方限额。
+ * 模板函数编译为 AsyncFunction，允许卡内模板使用顶层 `await`
+ *（酒馆 EJS 常见写法，如 `await globalThis.DALPhoneMainline.read()`）。
  */
 
-export type EjsRender = (template: string, context: Record<string, unknown>) => string
+export type EjsRender = (
+  template: string,
+  context: Record<string, unknown>
+) => Promise<string>
 
 type Segment =
   | { kind: 'text'; value: string }
@@ -168,6 +173,7 @@ export type EjsRuntime = {
 export const createEjsRuntime = (): EjsRuntime => {
   const MAX_TEMPLATE = 2 * 1024 * 1024
   const MAX_OUTPUT = 256 * 1024
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as FunctionConstructor
 
   const escapeHtml = (value: unknown): string =>
     String(value ?? '').replace(/[&<>"']/g, (ch) => {
@@ -302,11 +308,11 @@ export const createEjsRuntime = (): EjsRuntime => {
       }
     }
     lines.push('return __out;')
-    return new Function('ctx', `with (ctx) {\n${lines.join('\n')}\n}`)
+    return new AsyncFunction('ctx', `with (ctx) {\n${lines.join('\n')}\n}`)
   }
 
   const cache = new Map<string, Function>()
-  const render: EjsRender = (template, context) => {
+  const render: EjsRender = async (template, context) => {
     let fn = cache.get(template)
     if (!fn) {
       fn = compile(template)
@@ -316,7 +322,7 @@ export const createEjsRuntime = (): EjsRuntime => {
     const base = context || {}
     const ctx = Object.create(base)
     if (!('__escape' in base)) ctx.__escape = escapeHtml
-    const out = String(fn(ctx) ?? '')
+    const out = String((await fn(ctx)) ?? '')
     if (out.length > MAX_OUTPUT) throw new Error('模板输出超过 256KB')
     return out
   }
@@ -328,5 +334,7 @@ export const createEjsRuntime = (): EjsRuntime => {
 export const EJS_RUNTIME_SOURCE = `(${createEjsRuntime.toString()})()`
 
 /** 主线程调试/测试用；生产渲染走沙箱里的同源实现。 */
-export const renderEjs = (template: string, context: Record<string, unknown>): string =>
-  createEjsRuntime().render(template, context)
+export const renderEjs = (
+  template: string,
+  context: Record<string, unknown>
+): Promise<string> => createEjsRuntime().render(template, context)

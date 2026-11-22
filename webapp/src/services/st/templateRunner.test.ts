@@ -4,9 +4,9 @@ import { __sandboxRunnerSource } from './templateRunner.js'
 
 type Listener = (event: { data: unknown }) => void
 
-const withSandbox = (
-  run: (send: (payload: Record<string, unknown>) => void, posted: Record<string, unknown>[]) => void
-) => {
+const withSandbox = async (
+  run: (send: (payload: Record<string, unknown>) => void) => void
+): Promise<Record<string, unknown>[]> => {
   const posted: Record<string, unknown>[] = []
   let listener: Listener | null = null
   const fakeWindow = {
@@ -26,7 +26,10 @@ const withSandbox = (
     if (!listener) {
       throw new Error('runner 未注册 message 监听')
     }
-    run((payload) => (listener as Listener)({ data: payload }), posted)
+    run((payload) => (listener as Listener)({ data: payload }))
+    // runner 现在按单元格 await，等一个宏任务让 postMessage 落地
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return posted
   } finally {
     ;(globalThis as Record<string, unknown>).window = previousWindow
     ;(globalThis as Record<string, unknown>).parent = previousParent
@@ -38,8 +41,8 @@ afterEach(() => {
 })
 
 describe('模板沙箱 runner', () => {
-  it('执行单元格并记录变量 ops', () => {
-    withSandbox((send, posted) => {
+  it('执行单元格并记录变量 ops', async () => {
+    const posted = await withSandbox((send) => {
       send({
         __flyaiTemplateRequest: 1,
         id: 'req1',
@@ -63,34 +66,54 @@ describe('模板沙箱 runner', () => {
           user: { name: '用户' },
         },
       })
-      expect(posted).toHaveLength(1)
-      const result = posted[0] as Record<string, any>
-      expect(result.type).toBe('done')
-      expect(result.cells.c1).toBe('34')
-      expect(result.ops).toEqual([
-        { op: 'vars.set', scope: 'message', path: 'hp', value: 4 },
-        { op: 'vars.set', scope: 'local', path: 'count', value: 2 },
-      ])
-      expect(result.errors).toEqual([])
     })
+    expect(posted).toHaveLength(1)
+    const result = posted[0] as Record<string, any>
+    expect(result.type).toBe('done')
+    expect(result.cells.c1).toBe('34')
+    expect(result.ops).toEqual([
+      { op: 'vars.set', scope: 'message', path: 'hp', value: 4 },
+      { op: 'vars.set', scope: 'local', path: 'count', value: 2 },
+    ])
+    expect(result.errors).toEqual([])
   })
 
-  it('输出侧禁止注入类 API', () => {
-    withSandbox((send, posted) => {
+  it('支持模板内的 await', async () => {
+    const posted = await withSandbox((send) => {
+      send({
+        __flyaiTemplateRequest: 1,
+        id: 'req5',
+        cells: [
+          {
+            id: 'c1',
+            text: '<% let v = ""; try { v = await Promise.resolve("ok") } catch (_) {} -%><%= v %>',
+          },
+        ],
+        context: { messageId: 'm1', scopes: {}, escapeOutput: true },
+      })
+    })
+    const result = posted[0] as Record<string, any>
+    expect(result.type).toBe('done')
+    expect(result.cells.c1).toBe('ok')
+    expect(result.errors).toEqual([])
+  })
+
+  it('输出侧禁止注入类 API', async () => {
+    const posted = await withSandbox((send) => {
       send({
         __flyaiTemplateRequest: 1,
         id: 'req2',
         cells: [{ id: 'c1', text: '<% injectPrompt("x") %>' }],
         context: { messageId: 'm1', scopes: {}, escapeOutput: true },
       })
-      const result = posted[0] as Record<string, any>
-      expect(result.cells.c1).toBe('')
-      expect(result.errors[0].message).toContain('不允许')
     })
+    const result = posted[0] as Record<string, any>
+    expect(result.cells.c1).toBe('')
+    expect(result.errors[0].message).toContain('不允许')
   })
 
-  it('只读 stat_data 可通过 getvar 读取', () => {
-    withSandbox((send, posted) => {
+  it('只读 stat_data 可通过 getvar 读取', async () => {
+    const posted = await withSandbox((send) => {
       send({
         __flyaiTemplateRequest: 1,
         id: 'req4',
@@ -101,22 +124,22 @@ describe('模板沙箱 runner', () => {
           readonly: { stat_data: { hp: 7 } },
         },
       })
-      const result = posted[0] as Record<string, any>
-      expect(result.cells.c1).toBe('7')
-      expect(result.ops).toEqual([])
     })
+    const result = posted[0] as Record<string, any>
+    expect(result.cells.c1).toBe('7')
+    expect(result.ops).toEqual([])
   })
 
-  it('默认转义输出，escapeOutput=false 时原样', () => {
-    withSandbox((send, posted) => {
+  it('默认转义输出，escapeOutput=false 时原样', async () => {
+    const posted = await withSandbox((send) => {
       send({
         __flyaiTemplateRequest: 1,
         id: 'req3',
         cells: [{ id: 'c1', text: '<%= variables.html %>' }],
         context: { messageId: 'm1', scopes: { message: { html: '<b>x</b>' } } },
       })
-      const result = posted[0] as Record<string, any>
-      expect(result.cells.c1).toBe('&lt;b&gt;x&lt;/b&gt;')
     })
+    const result = posted[0] as Record<string, any>
+    expect(result.cells.c1).toBe('&lt;b&gt;x&lt;/b&gt;')
   })
 })
