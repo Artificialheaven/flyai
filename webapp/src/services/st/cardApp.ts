@@ -397,7 +397,9 @@ export const contentSecurityPolicy = (
   const originExtra = origins.length ? ` ${origins.join(' ')}` : ''
   return [
     "default-src 'none'",
-    `script-src 'unsafe-inline' 'unsafe-eval' ${SCRIPT_HOSTS}`,
+    // data: 供单文件卡把主逻辑内嵌成 `script src="data:text/javascript;base64,..."`；
+    // 沙箱本身已是 null origin，且已允许 inline/eval，放行 data: 不扩大权限面。
+    `script-src 'unsafe-inline' 'unsafe-eval' data: ${SCRIPT_HOSTS}`,
     `style-src 'unsafe-inline' ${STYLE_HOSTS}`,
     `font-src data: ${FONT_HOSTS}`,
     `img-src data: blob:${remote}${originExtra}`,

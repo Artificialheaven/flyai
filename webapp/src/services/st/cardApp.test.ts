@@ -111,6 +111,8 @@ describe('contentSecurityPolicy', () => {
     expect(csp).toContain("frame-src 'none'")
     expect(csp).toContain('img-src data: blob:;')
     expect(csp).toContain('media-src data: blob:;')
+    // 单文件卡把主逻辑内嵌为 data:text/javascript
+    expect(csp).toContain("script-src 'unsafe-inline' 'unsafe-eval' data:")
   })
 
   it('开启外链插图后放行 https 媒体', () => {
