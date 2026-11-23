@@ -788,6 +788,29 @@ describe('buildCardAppShim', () => {
     expect(updated.name1).toBe('新玩家')
   })
 
+  it('chats/get 的 metadata.variables 以当前 stat_data 为准（手机落盘校验）', async () => {
+    const { sandbox } = makeSandbox(
+      'hi',
+      { stat_data: { dal_phone: { messages: ['new'] } } },
+      null,
+      { actions: false, write: true, net: false },
+      {
+        chatId: 'c1',
+        userName: '士道',
+        characterName: '十香',
+        messages: [{ role: 'user', name: '士道', text: 'hi' }],
+        metadata: { integrity: 'c1', variables: { dal_phone: { messages: ['old'] }, other: 1 } },
+      }
+    )
+    const fetchFn = sandbox.fetch as (
+      url: string
+    ) => Promise<{ json: () => Promise<Array<{ chat_metadata?: { variables?: Record<string, unknown> } }>> }>
+    const data = await (await fetchFn('/api/chats/get')).json()
+    const variables = data[0]?.chat_metadata?.variables ?? {}
+    expect(variables.dal_phone).toEqual({ messages: ['new'] })
+    expect(variables.other).toBe(1)
+  })
+
   it('P1 宿主接口：settings/extensions/tokenizers 返回 ST 形状', async () => {
     const { sandbox } = makeSandbox('hi', null, null, {
       actions: false,

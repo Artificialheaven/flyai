@@ -265,10 +265,11 @@ def test_mvu_requires_dm_and_visible_reply(tmp_path):
     )
     _sc.store = store2
     request2 = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(flyai=state2)))
-    with pytest.raises(HTTPException) as ei:
-        st_write_mvu(s2.id, batch, request2)
-    assert ei.value.status_code == 400
-    assert "没有可写回" in ei.value.detail
+    # 没有可见 AI 楼层时仍写会话级 s.mvu（手机/作者脚本在新聊天里也能落盘）。
+    result = st_write_mvu(s2.id, batch, request2)
+    assert result["stat_data"]["hp"] == 1
+    reloaded = store2.get(s2.id)
+    assert (reloaded.mvu or {}).get("stat_data", {}).get("hp") == 1
 
 
 # ---- 世界书写回 ----

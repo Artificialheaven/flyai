@@ -38,6 +38,8 @@ import {
 export const AUTHOR_MSG_VARS = 'flyai-author-vars'
 /** 卡 → 宿主：MVU 变量写入意图 */
 export const AUTHOR_MSG_WRITE = 'flyai-author-write'
+/** 宿主 → 卡：变量是否真正落盘 `{id, ok, stat_data?, error?}` */
+export const AUTHOR_MSG_WRITE_RESULT = 'flyai-author-write-result'
 /** 卡 → 宿主：作者脚本想填入输入框的文本（不直接发送） */
 export const AUTHOR_MSG_COMPOSE = 'flyai-author-compose'
 /** 卡 → 宿主：发送/继续/重生成等模型动作（宿主逐次确认） */
@@ -570,6 +572,7 @@ const buildShim = ({
   var ERROR_EVENT = ${escapeForScript(CARD_MSG_ERROR)};
   var MSG_VARS = ${escapeForScript(AUTHOR_MSG_VARS)};
   var MSG_WRITE = ${escapeForScript(AUTHOR_MSG_WRITE)};
+  var MSG_WRITE_RESULT = ${escapeForScript(AUTHOR_MSG_WRITE_RESULT)};
   var MSG_COMPOSE = ${escapeForScript(AUTHOR_MSG_COMPOSE)};
   var MSG_ACTION = ${escapeForScript(AUTHOR_MSG_ACTION)};
   var MSG_WRITE_WORLD = ${escapeForScript(AUTHOR_MSG_WRITE_WORLD)};
@@ -879,6 +882,72 @@ const buildShim = ({
       ? CHAT_VARIABLES.stat_data
       : {};
   }
+  var variableWriteSeq = 0;
+  var pendingVariableWrites = {};
+  // 本地刚写入、宿主还没确认时，忽略旧的 VARS 快照，避免把手机刚写进去的
+  // dal_phone 回滚成父组件的旧状态。
+  var chatWritesInFlight = 0;
+  var chatWriteBase = null;
+  var chatWriteFailed = false;
+  function endChatVariableWrite(){
+    if (chatWritesInFlight > 0) chatWritesInFlight -= 1;
+    if (chatWritesInFlight > 0) return;
+    if (chatWriteFailed && chatWriteBase) {
+      CHAT_VARIABLES = chatWriteBase;
+      emit(MVU_EVENTS.SINGLE_VARIABLE_UPDATED, null, null, null, clone(chatStat()));
+    }
+    chatWriteBase = null;
+    chatWriteFailed = false;
+  }
+  // 手机把 dal_phone / dal_phone_config 写在 chat 变量里，随后立刻用
+  // /api/chats/get 回读校验。如果宿主落盘失败（例如当前窗口没有可写回的
+  // AI 楼层），本地乐观状态不能让校验误判为成功：写入必须等宿主确认。
+  function requestChatVariableWrite(statData){
+    var id = 'w' + (++variableWriteSeq);
+    if (chatWritesInFlight === 0) {
+      chatWriteBase = clone(CHAT_VARIABLES);
+      chatWriteFailed = false;
+    }
+    chatWritesInFlight += 1;
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingVariableWrites[id];
+        endChatVariableWrite();
+        reject(new Error('flyai-variable-write-timeout'));
+      }, 15000);
+      pendingVariableWrites[id] = {
+        resolve: resolve, reject: reject, timer: timer
+      };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MSG_WRITE,
+          id: id,
+          scope: 'chat',
+          stat_data: statData
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingVariableWrites[id];
+        endChatVariableWrite();
+        reject(e);
+      }
+    });
+  }
+  function settleVariableWrite(data){
+    if (!data || data.id == null) return;
+    var item = pendingVariableWrites[data.id];
+    if (!item) return;
+    delete pendingVariableWrites[data.id];
+    clearTimeout(item.timer);
+    endChatVariableWrite();
+    if (data.ok) {
+      item.resolve();
+      return;
+    }
+    chatWriteFailed = true;
+    item.reject(new Error(String(data.error || 'flyai-variable-write-failed')));
+  }
   window.Mvu = {
     events: MVU_EVENTS,
     getMvuData: function(option){
@@ -896,21 +965,23 @@ const buildShim = ({
       var index = type === 'message' ? resolveId(option.message_id) : null;
       if (index !== null) {
         if (MESSAGES[index]) MESSAGES[index].statData = clone(normalized.stat_data);
-      } else {
-        CHAT_VARIABLES = normalized;
+        try {
+          HOST.postMessage({
+            v: VERSION,
+            type: MSG_WRITE,
+            scope: type,
+            messageId: index,
+            stat_data: clone(normalized.stat_data)
+          }, '*');
+        } catch (e) {}
+        emit(MVU_EVENTS.SINGLE_VARIABLE_UPDATED, null, null, null, clone(normalized.stat_data));
+        emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, clone(normalized));
+        return Promise.resolve();
       }
-      try {
-        HOST.postMessage({
-          v: VERSION,
-          type: MSG_WRITE,
-          scope: type,
-          messageId: index,
-          stat_data: clone(normalized.stat_data)
-        }, '*');
-      } catch (e) {}
+      CHAT_VARIABLES = normalized;
       emit(MVU_EVENTS.SINGLE_VARIABLE_UPDATED, null, null, null, clone(normalized.stat_data));
       emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, clone(normalized));
-      return Promise.resolve();
+      return requestChatVariableWrite(clone(normalized.stat_data));
     },
     getCurrentMvuData: function(){
       return { stat_data: clone(chatStat()), display_data: {}, delta_data: {} };
@@ -1126,10 +1197,13 @@ const buildShim = ({
     var flatVars = currentVariables({ type: 'chat' });
     var storedVars = metadata.variables && typeof metadata.variables === 'object'
       ? clone(metadata.variables) : {};
+    // 当前变量（MVU stat_data）比 chat_metadata 里的旧副本新：手机发送后
+    // 卡会用 /api/chats/get 回读 chat_metadata.variables 校验落盘，旧副本
+    // 覆盖新值会让校验误判为未保存。以 flatVars 为准。
     metadata.variables = Object.assign(
       {},
-      flatVars && typeof flatVars === 'object' ? clone(flatVars) : {},
-      storedVars
+      storedVars,
+      flatVars && typeof flatVars === 'object' ? clone(flatVars) : {}
     );
     var out = [{
       user_name: USER_NAME,
@@ -2172,6 +2246,7 @@ const buildShim = ({
   window.addEventListener('message', function(event){
     var data = event && event.data;
     if (!data || typeof data !== 'object') return;
+    if (data.type === MSG_WRITE_RESULT) { settleVariableWrite(data); return; }
     if (data.type === MSG_GENERATE_RESULT) { settleGenerate(data); return; }
     if (data.type === MSG_SAVE_METADATA_RESULT) { settleMetadata(data); return; }
     if (data.type === MSG_SAVE_MESSAGES_RESULT) { settleMessages(data); return; }
@@ -2219,7 +2294,7 @@ const buildShim = ({
       return;
     }
     if (data.type !== MSG_VARS) return;
-    if (data.variables && typeof data.variables === 'object') {
+    if (data.variables && typeof data.variables === 'object' && chatWritesInFlight === 0) {
       CHAT_VARIABLES = normalizeMvu(data.variables);
       emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, clone(CHAT_VARIABLES));
     }

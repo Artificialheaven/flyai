@@ -2600,11 +2600,19 @@ export const buildCardAppShim = (
   // /api/worldinfo/* 是酒馆的本地世界书接口，不应走外网代理；
   // 其余 URL 仅在宿主授予 net 能力时交给受控代理，否则直接拒绝。
   function chatFileData(){
+    // 与作者面板一致：chat_metadata.variables 以当前 stat_data 为准，
+    // 手机用 /api/chats/get 回读 dal_phone/dal_phone_config 做落盘校验。
+    var metadata = clone(CHAT_METADATA);
+    var flatVars = (VARIABLES && VARIABLES.stat_data && typeof VARIABLES.stat_data === 'object')
+      ? clone(VARIABLES.stat_data) : {};
+    var storedVars = metadata.variables && typeof metadata.variables === 'object'
+      ? clone(metadata.variables) : {};
+    metadata.variables = Object.assign({}, storedVars, flatVars);
     var out = [{
       user_name: USER_NAME,
       character_name: CHAR_NAME,
       create_date: '',
-      chat_metadata: clone(CHAT_METADATA)
+      chat_metadata: metadata
     }];
     for (var i = 0; i < CHAT.length; i += 1) {
       var item = CHAT[i] || {};

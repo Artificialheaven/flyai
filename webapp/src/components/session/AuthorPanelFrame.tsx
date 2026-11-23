@@ -36,6 +36,7 @@ import {
   AUTHOR_MSG_VARS,
   AUTHOR_MSG_WRITE,
   AUTHOR_MSG_WRITE_CHARACTER,
+  AUTHOR_MSG_WRITE_RESULT,
   AUTHOR_MSG_WRITE_WORLD,
   buildAuthorDoc,
   type AuthorRuntimeMessage,
@@ -104,7 +105,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   const initialMessages = useRef(messages)
   const pendingWrite = useRef<{
     timer: ReturnType<typeof setTimeout>
-    stat: Record<string, unknown>
+    entries: Array<{ id: string; stat: Record<string, unknown> }>
   } | null>(null)
 
   const doc = useMemo(
@@ -284,34 +285,67 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
     }
   }
 
-  const flushWrite = () => {
-    const pending = pendingWrite.current
-    if (!pending || !sessionId || !canWrite) {
+  const postWriteResult = (id: string, payload: Record<string, unknown>) => {
+    if (!id) {
       return
     }
-    pendingWrite.current = null
-    clearTimeout(pending.timer)
-    void writeSessionMvu(sessionId, {
-      mode: 'replace',
-      stat_data: pending.stat,
-      thread_id: threadId,
-    }).catch(() => {
-      // 写入失败保留面板本地状态；用户继续操作会再次提交
-    })
+    const win = iframeRef.current?.contentWindow
+    if (!win) {
+      return
+    }
+    try {
+      win.postMessage(
+        { v: CARD_APP_PROTOCOL_VERSION, type: AUTHOR_MSG_WRITE_RESULT, id, ...payload },
+        '*'
+      )
+    } catch {
+      // iframe 已卸载
+    }
   }
 
-  const queueWrite = (stat: Record<string, unknown>) => {
-    if (!sessionId || !canWrite) {
+  const flushWrite = () => {
+    const pending = pendingWrite.current
+    pendingWrite.current = null
+    if (!pending) {
       return
     }
+    clearTimeout(pending.timer)
+    const stat = pending.entries[pending.entries.length - 1]?.stat
+    const failAll = (error: string) => {
+      for (const entry of pending.entries) {
+        postWriteResult(entry.id, { ok: false, error })
+      }
+    }
+    if (!sessionId || !canWrite || !stat) {
+      failAll('read-only')
+      return
+    }
+    void writeSessionMvu(sessionId, {
+      mode: 'replace',
+      stat_data: stat,
+      thread_id: threadId,
+    })
+      .then(() => {
+        // 手机保存会 await 这个确认，再把 /api/chats/get 的结果当作落盘依据；
+        // 只有服务端真正写回后才回报成功。
+        for (const entry of pending.entries) {
+          postWriteResult(entry.id, { ok: true })
+        }
+      })
+      .catch((error) => {
+        failAll(error instanceof Error ? error.message : String(error))
+      })
+  }
+
+  const queueWrite = (id: string, stat: Record<string, unknown>) => {
     const pending = pendingWrite.current
     if (pending) {
-      pending.stat = stat
+      pending.entries.push({ id, stat })
       return
     }
     pendingWrite.current = {
-      stat,
-      timer: setTimeout(flushWrite, 350),
+      entries: [{ id, stat }],
+      timer: setTimeout(flushWrite, 120),
     }
   }
 
@@ -324,6 +358,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         type?: unknown
         height?: unknown
         text?: unknown
+        id?: unknown
         stat_data?: unknown
       } | null
       if (!data) {
@@ -435,7 +470,10 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         return
       }
       if (data.type === AUTHOR_MSG_WRITE && data.stat_data && typeof data.stat_data === 'object') {
-        queueWrite(data.stat_data as Record<string, unknown>)
+        queueWrite(
+          typeof data.id === 'string' ? data.id : '',
+          data.stat_data as Record<string, unknown>
+        )
         return
       }
       if (data.type === AUTHOR_MSG_WRITE_WORLD && canWrite && sessionId && Array.isArray((data as { entries?: unknown }).entries)) {

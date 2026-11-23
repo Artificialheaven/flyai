@@ -565,10 +565,11 @@ def st_write_mvu(sid: str, body: StMvuBody, request: Request):
             raise HTTPException(400, str(exc))
 
     target = _st_last_assistant(t)
-    if target is None:
-        raise HTTPException(400, "当前窗口没有可写回的 AI 回复")
-    target.stat_data = copy.deepcopy(new_state)
-    versions.sync_active_reply(t, target)
+    # 手机/作者脚本可能在没有可见 AI 楼层的窗口写变量（例如新开聊天、
+    # 楼层全部隐藏）。此时仍落会话级 s.mvu，保证刷新后能读回。
+    if target is not None:
+        target.stat_data = copy.deepcopy(new_state)
+        versions.sync_active_reply(t, target)
     s.mvu = dict(s.mvu or {})
     s.mvu["stat_data"] = copy.deepcopy(new_state)
     sc.store.save_merged(s)
