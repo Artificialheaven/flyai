@@ -27,6 +27,9 @@ class LoreEntry:
     insert_order: int = 100  # 同一深度多条时的排序（小的在前）
     role: str = "system"     # depth 注入时的消息角色：system/user/assistant
     probability: int = 100   # 触发概率 0-100（酒馆 useProbability/probability）
+    # 酒馆世界书 uid：卡内脚本按 uid 读写/核对条目；卡内写回时原样保留，
+    # 避免会话世界书副本回读时按行号重排导致 uid 漂移。
+    uid: Optional[int] = None
     # ---- 酒馆世界书保真字段 ----
     enabled: bool = True                 # ST disable=false；False 时永不注入
     constant: bool = False               # ST constant：无条件常驻（与 pinned 同义）
@@ -66,6 +69,8 @@ class LoreEntry:
             "probability": max(1, min(100, int(self.probability or 100))),
         }
         # 酒馆保真字段只在非默认时落盘，旧数据/旧断言保持原形状。
+        if self.uid is not None:
+            d["uid"] = int(self.uid)
         if not self.enabled:
             d["enabled"] = False
         if self.constant:
@@ -161,6 +166,7 @@ class LoreEntry:
             insert_order=_int("insert_order", 100),
             role=d.get("role") if d.get("role") in ("user", "assistant") else "system",
             probability=max(1, min(100, _int("probability", 100))),
+            uid=_opt_int(d, "uid"),
             enabled=bool(d.get("enabled", not bool(d.get("disable", False)))),
             constant=bool(d.get("constant", False) or d.get("pinned", False)),
             selective=bool(d.get("selective", True)),

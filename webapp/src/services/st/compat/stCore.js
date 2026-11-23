@@ -412,6 +412,10 @@
     var list = ST.worldbookEntryList(book);
     return list.map(function (entry) {
       return {
+        // 保留酒馆 uid：卡按 uid 读写条目，行号重排会让回读核对失败
+        uid: typeof entry.uid === 'number' && isFinite(entry.uid)
+          ? Number(entry.uid)
+          : null,
         title: entry.name || entry.comment || String(entry.uid),
         content: entry.content || '',
         pinned: entry.constant === true,

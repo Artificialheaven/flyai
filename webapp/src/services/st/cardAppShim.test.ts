@@ -1214,11 +1214,91 @@ describe('L4 授权能力', () => {
       additional: [],
     })
     // 卡期望的书名与两份书都不匹配时仍然返回全部条目；A 在两份书中重复只保留一份
+    // 会话世界书副本在前：卡刚写回的启用状态/内容不会被角色卡原始 table 盖住
     const getWorldbook = sandbox.getWorldbook as (name: string) => unknown[]
     const titles = (name: string) =>
       getWorldbook(name).map((entry) => (entry as { title?: string }).title)
-    expect(titles('卡片期望的名字')).toEqual(['A', 'C', 'B'])
-    expect(titles('卡内书')).toEqual(['A', 'C', 'B'])
+    expect(titles('卡片期望的名字')).toEqual(['B', 'A', 'C'])
+    expect(titles('卡内书')).toEqual(['B', 'A', 'C'])
+  })
+
+  it('write：按卡内剧情清单（OWNED_PLOT_UIDS/entryComment）还原世界书 uid', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox('x', null, null, writeOnly)
+    // 卡运行时会把剧情目录挂到 window 上；节点带 entryComment + uid
+    ;(sandbox as Record<string, unknown>).DALPanelStoryCatalog = {
+      OWNED_PLOT_UIDS: [0, 1, 2, 9],
+      INNER_GRAPHS: {
+        main: {
+          nodes: [
+            { uid: 0, entryComment: '[剧情] 前史1' },
+            { uid: 1, entryComment: '[剧情] 前史2' },
+            { uid: 2, entryComment: '[剧情] 第1卷' },
+          ],
+        },
+      },
+    }
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-write-context',
+        context: {
+          worldbook: {
+            name: '约会大作战',
+            entries: [
+              { title: '[本局] 玩家资料', content: '资料', enabled: true },
+              { title: '[剧情] 前史1', content: '前史1', enabled: false },
+              { title: '[剧情] 前史2', content: '前史2', enabled: true },
+              { title: '[剧情] 第1卷', content: '第1卷', enabled: false },
+              { title: '[设定] 无关条目', content: '设定', enabled: true },
+            ],
+          },
+          characterWorldName: '约会大作战',
+        },
+      },
+    })
+    const getWorldbook = sandbox.getWorldbook as (name: string) => Array<{
+      uid?: number
+      title?: string
+      enabled?: boolean
+    }>
+    const book = getWorldbook('约会大作战')
+    const uidOf = (title: string) => book.find((entry) => entry.title === title)?.uid
+    expect(uidOf('[剧情] 前史1')).toBe(0)
+    expect(uidOf('[剧情] 前史2')).toBe(1)
+    expect(uidOf('[剧情] 第1卷')).toBe(2)
+    // 清单里没有映射到标题的 uid 补禁用占位，卡启用后能回读
+    const placeholder = book.find((entry) => entry.uid === 9)
+    expect(placeholder?.title).toBe('UID 9')
+    expect(placeholder?.enabled).toBe(false)
+
+    // 卡启用 uid 0：世界书副本的启用状态要优先于角色卡原始 table 回读
+    const updateWorldbookWith = sandbox.updateWorldbookWith as (
+      name: string,
+      updater: (entries: unknown[]) => unknown[]
+    ) => Promise<unknown>
+    const pending = updateWorldbookWith('约会大作战', (entries) =>
+      (entries as Array<Record<string, unknown>>).map((entry) =>
+        entry.uid === 0 ? { ...entry, enabled: true, disable: false } : entry
+      )
+    )
+    const message = posted.find(
+      (item) =>
+        item.type === 'flyai-card-action' &&
+        (item.intent as { kind?: string } | undefined)?.kind === 'world'
+    )
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-action-result',
+        id: message?.id,
+        ok: true,
+      },
+    })
+    await pending
+    const after = getWorldbook('约会大作战')
+    expect(after.find((entry) => entry.uid === 0)?.enabled).toBe(true)
   })
 
   it('write：没有挂载世界书时，写回落到会话角色副本的 table', async () => {

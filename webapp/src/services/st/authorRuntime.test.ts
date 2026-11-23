@@ -1,4 +1,5 @@
 import vm from 'node:vm'
+import { deflateSync } from 'fflate'
 import { describe, expect, it } from 'vitest'
 import type { Message } from '../chat/types.js'
 import type { StAuthorPayload } from '../flyai/types.js'
@@ -8,6 +9,7 @@ import {
   adaptHtmlScripts,
   authorRuntimeMessages,
   buildAuthorDoc,
+  storyUidMapFromScripts,
 } from './authorRuntime.js'
 
 const AUTHOR: StAuthorPayload = {
@@ -344,5 +346,73 @@ describe('DALPhoneRuntime 兼容实现', () => {
     expect(runtime.responseText(raw)).toBe(
       '<dal_phone_reply><msg>好</msg></dal_phone_reply>'
     )
+  })
+})
+
+describe('卡内剧情目录 → 世界书 uid 映射', () => {
+  const catalogScript = () => {
+    // 目录体积要超过解码阈值；用伪随机字符填充，deflate 压不小
+    let seed = 20261123
+    let pad = ''
+    for (let index = 0; index < 6000; index += 1) {
+      seed = (seed * 1103515245 + 12345) % 2147483648
+      pad += String.fromCharCode(33 + (seed % 94))
+    }
+    const catalog = {
+      OWNED_PLOT_UIDS: [0, 1, 7],
+      pad,
+      INNER_GRAPHS: {
+        main: {
+          nodes: [
+            { uid: 0, entryComment: '[剧情] 前史1' },
+            { uid: 1, entryComment: '[剧情] 前史2' },
+            { uid: 7, entryComment: '[剧情] 第1卷' },
+          ],
+        },
+      },
+    }
+    const packed = deflateSync(
+      new TextEncoder().encode(JSON.stringify(catalog))
+    )
+    let binary = ''
+    packed.forEach((byte) => {
+      binary += String.fromCharCode(byte)
+    })
+    return (
+      'var meta = { OWNED_PLOT_UIDS: [] };\n' +
+      'var packed = atob("' + btoa(binary) + '");'
+    )
+  }
+
+  it('从 base64+deflate 脚本目录还原标题与 uid', () => {
+    const map = storyUidMapFromScripts([{ content: catalogScript() }])
+    expect(map).not.toBeNull()
+    expect(map?.byTitle['[剧情] 前史1']).toBe(0)
+    expect(map?.byTitle['[剧情] 第1卷']).toBe(7)
+    expect(map?.owned).toEqual([0, 1, 7])
+    // 没有目录的普通脚本不做处理
+    expect(storyUidMapFromScripts([{ content: 'console.log(1)' }])).toBeNull()
+  })
+
+  it('buildAuthorDoc 把映射注入内嵌运行时', () => {
+    const doc = buildAuthorDoc({
+      html: '<div data-test></div>',
+      author: {
+        enabled: true,
+        scripts: [
+          { id: 'story', name: '剧情', content: catalogScript() },
+        ],
+        character: { name: '约会大作战', description: '', avatar: '' },
+      },
+      messages: [{ role: 'assistant', text: 'hi' }],
+    })
+    expect(doc).toContain('STORY_UID_MAP')
+    expect(doc).toContain('[剧情] 前史1')
+    const scripts = [...doc.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+      (match) => match[1]
+    )
+    const shim = scripts.find((source) => source.includes('STORY_UID_MAP'))
+    expect(shim).toBeTruthy()
+    expect(() => new Function(shim as string)).not.toThrow()
   })
 })

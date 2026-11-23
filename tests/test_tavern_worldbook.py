@@ -187,6 +187,24 @@ def test_lore_entry_new_fields_roundtrip():
     assert e3.depth == 4 and e3.probability == 100
 
 
+def test_worldbook_import_keeps_entry_uid():
+    """酒馆世界书 entries 是 uid→entry 字典：导入时把 uid 留在条目上。"""
+    first = _entry(comment="七", content="内容七")
+    first.pop("uid")
+    second = _entry(comment="九", content="内容九")
+    second.pop("uid")
+    w, stats = tavern.worldbook_from_dict(
+        {"entries": {"7": first, "9": second}}
+    )
+    assert stats["entries"] == 2
+    assert [e.uid for e in w.table] == [7, 9]
+    assert [e["uid"] for e in w.to_dict()["table"]] == [7, 9]
+    # 旧格式（条目内没有 uid）依旧可用
+    plain = LoreEntry.from_dict({"title": "无 uid", "content": "x"})
+    assert plain.uid is None
+    assert "uid" not in plain.to_dict()
+
+
 # ---- depth_block_specs 概率 ----
 
 def test_depth_block_specs_probability():

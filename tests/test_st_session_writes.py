@@ -31,7 +31,7 @@ from flyai.api.routes_session import (
     st_write_world,
 )
 from flyai.lore.models import Character, LoreEntry, World
-from flyai.sessions.resolve import effective_character
+from flyai.sessions.resolve import effective_character, effective_world
 from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore
 from flyai.sessions.models import RoomMember, Session, Thread
@@ -322,6 +322,26 @@ def test_world_write_compact_skips_echo(tmp_path):
     )
     assert out == {"ok": True, "scoped": True}
     assert store.get(s.id).world_override["table"][0]["title"] == "一"
+
+
+def test_world_write_keeps_card_uids(tmp_path):
+    """卡内脚本按酒馆 uid 核对条目：写回/回读都要原样保留 uid。"""
+    request, lore, store, s = _world_env(tmp_path)
+    entries = [
+        {"title": "[剧情] 前史1", "content": "a", "uid": 0, "enabled": False},
+        {"title": "[本局] 玩家资料", "content": "b", "uid": 265, "enabled": True},
+        {"title": "未映射条目", "content": "c"},
+    ]
+    out = st_write_world(s.id, StWorldBody(entries=entries), request)
+    assert [e.get("uid") for e in out["entries"]] == [0, 265, None]
+
+    s2 = store.get(s.id)
+    table = s2.world_override["table"]
+    assert table[0]["uid"] == 0
+    assert table[1]["uid"] == 265
+    assert "uid" not in table[2]
+    # 会话详情（卡启动的 worldbook 上下文）同样带 uid
+    assert effective_world(s2, lore).to_dict()["table"][0]["uid"] == 0
 
 
 def test_world_write_without_binding_is_400(tmp_path):

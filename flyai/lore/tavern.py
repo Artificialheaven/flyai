@@ -32,10 +32,24 @@ class WorldbookError(ValueError):
 
 
 def iter_entries(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """entries 可能是 id→entry 字典（世界书 v2）或列表。"""
+    """entries 可能是 id→entry 字典（世界书 v2）或列表。
+
+    字典形式的键就是酒馆世界书 uid；把它补进条目里，卡内脚本按 uid
+    读写条目时才不会因为行号重排而失配。
+    """
     book = data.get("entries") if isinstance(data, dict) else None
     if isinstance(book, dict):
-        return [e for e in book.values() if isinstance(e, dict)]
+        out = []
+        for key, entry in book.items():
+            if not isinstance(entry, dict):
+                continue
+            item = dict(entry)
+            try:
+                item.setdefault("uid", int(key))
+            except (TypeError, ValueError):
+                pass
+            out.append(item)
+        return out
     if isinstance(book, list):
         return [e for e in book if isinstance(e, dict)]
     raise WorldbookError("文件中没有 entries 字段，不是酒馆世界书")
@@ -131,6 +145,7 @@ def parse_entry(e: Dict[str, Any]) -> LoreEntry:
         title=_entry_title(e),
         content=e.get("content") or "",
         pinned=constant and not disabled,
+        uid=_opt("uid"),
         keys=keys,
         position="depth" if st_position == 4 else "system",
         depth=max(0, _as_int(e.get("depth"), 4)),

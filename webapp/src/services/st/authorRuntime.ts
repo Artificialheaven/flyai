@@ -11,6 +11,7 @@
  * 脚本对变量的写入通过 postMessage 交回宿主（P2 再接持久化）。
  */
 
+import { inflateSync } from 'fflate'
 import type { Message } from '../chat/types.js'
 import type {
   CardWriteContext,
@@ -107,6 +108,108 @@ export type AuthorRuntimeOptions = {
   canWrite?: boolean
   /** 是否允许发送/继续/重生成 */
   canAct?: boolean
+}
+
+/** 卡内剧情清单：条目标题 → 酒馆世界书 uid（卡按 uid 核对启用状态）。 */
+export type StoryUidMap = {
+  byTitle: Record<string, number>
+  owned: number[]
+}
+
+const STORY_CATALOG_BLOBS = 8
+const STORY_CATALOG_MIN_BLOB = 2000
+
+const catalogToUidMap = (catalog: unknown): StoryUidMap | null => {
+  if (!catalog || typeof catalog !== 'object') return null
+  const root = catalog as Record<string, unknown>
+  if (!Array.isArray(root.OWNED_PLOT_UIDS)) return null
+  const byTitle: Record<string, number> = {}
+  const visit = (node: unknown, depth: number) => {
+    if (!node || typeof node !== 'object' || depth > 6) return
+    if (Array.isArray(node)) {
+      node.forEach((item) => visit(item, depth + 1))
+      return
+    }
+    const entry = node as Record<string, unknown>
+    const uid = Number(entry.uid)
+    const title = entry.entryComment
+    if (
+      Number.isFinite(uid) &&
+      uid >= 0 &&
+      typeof title === 'string' &&
+      title &&
+      byTitle[title] === undefined
+    ) {
+      byTitle[title] = uid
+    }
+    for (const key of Object.keys(entry)) {
+      const value = entry[key]
+      if (value && typeof value === 'object') visit(value, depth + 1)
+    }
+  }
+  visit(root, 0)
+  const owned: number[] = []
+  for (const raw of root.OWNED_PLOT_UIDS) {
+    const uid = Number(raw)
+    if (Number.isFinite(uid) && uid >= 0 && !owned.includes(uid)) owned.push(uid)
+  }
+  return { byTitle, owned }
+}
+
+const decodeStoryCatalog = (blob: string): unknown => {
+  try {
+    const binary = globalThis.atob(blob)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return JSON.parse(new TextDecoder().decode(inflateSync(bytes)))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 部分酒馆卡把剧情条目 uid 目录以 base64+deflate 打包在脚本里。导入角色卡时
+ * 酒馆世界书的原始 uid 已经丢失，行号又因空条目被跳过而漂移；这里从脚本正文
+ * 里解出目录，按标题还原 uid，交给内嵌运行时映射世界书条目。
+ */
+const storyUidCache = new WeakMap<object, StoryUidMap | null>()
+
+/** buildAuthorDoc 每次写回都可能重建文档；脚本内容不变时复用解码结果。 */
+const storyUidMapForAuthor = (
+  author: StAuthorPayload
+): StoryUidMap | null => {
+  const cached = storyUidCache.get(author)
+  if (cached !== undefined) return cached
+  const map = storyUidMapFromScripts(author.scripts)
+  storyUidCache.set(author, map)
+  return map
+}
+
+export const storyUidMapFromScripts = (
+  scripts: readonly { content?: string | null }[] | null | undefined
+): StoryUidMap | null => {
+  if (!scripts || scripts.length === 0) return null
+  for (const script of scripts) {
+    const text = script && typeof script.content === 'string' ? script.content : ''
+    if (!text || !text.includes('OWNED_PLOT_UIDS')) continue
+    const marker = 'atob("'
+    let at = text.indexOf(marker)
+    let tried = 0
+    while (at >= 0 && tried < STORY_CATALOG_BLOBS) {
+      const start = at + marker.length
+      const end = text.indexOf('"', start)
+      if (end < 0) break
+      const blob = text.slice(start, end)
+      at = text.indexOf(marker, end + 1)
+      if (blob.length < STORY_CATALOG_MIN_BLOB) continue
+      tried += 1
+      const map = catalogToUidMap(decodeStoryCatalog(blob))
+      if (map && Object.keys(map.byTitle).length > 0) return map
+    }
+  }
+  return null
 }
 
 /** 会话可见消息 → 作者运行时镜像；只保留文本与变量快照。 */
@@ -514,6 +617,8 @@ type ShimOptions = {
   userName?: string
   canWrite?: boolean
   canAct?: boolean
+  /** 卡内剧情清单的标题 → uid 映射（由脚本里的目录解出） */
+  storyUidMap?: StoryUidMap | null
 }
 
 const buildShim = ({
@@ -527,6 +632,7 @@ const buildShim = ({
   userName,
   canWrite,
   canAct,
+  storyUidMap,
 }: ShimOptions): string => {
   const messageData = JSON.stringify(messages)
   const chatVariables = JSON.stringify({
@@ -599,6 +705,11 @@ const buildShim = ({
   var CHAT_VARIABLES = JSON.parse(${escapeForScript(chatVariables)});
   var CHARACTER = JSON.parse(${escapeForScript(characterData)});
   var WORLD = JSON.parse(${escapeForScript(worldbookData)});
+  // 卡内剧情条目的原始 uid 目录（脚本里打包的 OWNED_PLOT_UIDS/entryComment）。
+  // 导入时酒馆 uid 丢失，按它还原世界书条目的 uid，卡的启用核对才能通过。
+  var STORY_UID_MAP = JSON.parse(${escapeForScript(
+    JSON.stringify(storyUidMap || null)
+  )});
   var WORLD_ENTRIES = Array.isArray(WORLD.entries) ? WORLD.entries : [];
   var CHARACTER_FIELDS = WORLD.character && typeof WORLD.character === 'object' ? WORLD.character : {};
   var SESSION_ID = ${escapeForScript(sessionId ?? '')};
@@ -1086,12 +1197,104 @@ const buildShim = ({
       return out;
     } catch (e) { return {}; }
   }
+  // 剧情清单：卡在脚本里打包的「标题 → 世界书 uid」目录（OWNED_PLOT_UIDS +
+  // 节点 entryComment）。导入时原始 uid 丢失、行号漂移，卡按 uid 核对启用
+  // 状态会报「回读核对不一致」，这里按标题还原 uid。
+  var STORY_CATALOG_CACHE = null;
+  function storyCatalog(){
+    try {
+      var direct = window.DALPanelStoryCatalog;
+      if (direct && typeof direct === 'object' &&
+          Array.isArray(direct.OWNED_PLOT_UIDS)) {
+        return direct;
+      }
+    } catch (e) {}
+    try {
+      var seen = 0;
+      for (var key in window) {
+        if (!Object.prototype.hasOwnProperty.call(window, key)) continue;
+        seen += 1;
+        if (seen > 6000) break;
+        var value;
+        try { value = window[key]; } catch (e) { continue; }
+        if (value && typeof value === 'object' && !Array.isArray(value) &&
+            Array.isArray(value.OWNED_PLOT_UIDS)) {
+          return value;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  function catalogUidMap(){
+    if (STORY_CATALOG_CACHE) return STORY_CATALOG_CACHE;
+    if (STORY_UID_MAP && typeof STORY_UID_MAP === 'object' &&
+        STORY_UID_MAP.byTitle) {
+      var ownedInjected = Array.isArray(STORY_UID_MAP.owned)
+        ? STORY_UID_MAP.owned.slice() : [];
+      STORY_CATALOG_CACHE = { byTitle: STORY_UID_MAP.byTitle, owned: ownedInjected };
+      return STORY_CATALOG_CACHE;
+    }
+    var catalog = storyCatalog();
+    if (!catalog) return null;
+    var byTitle = {};
+    function visit(node, depth){
+      if (!node || typeof node !== 'object' || depth > 6) return;
+      if (Array.isArray(node)) {
+        for (var i = 0; i < node.length; i += 1) visit(node[i], depth + 1);
+        return;
+      }
+      var uid = Number(node.uid);
+      var title = node.entryComment;
+      if (isFinite(uid) && uid >= 0 && typeof title === 'string' && title &&
+          byTitle[title] == null) {
+        byTitle[title] = uid;
+      }
+      for (var key in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+        var value = node[key];
+        if (value && typeof value === 'object') visit(value, depth + 1);
+      }
+    }
+    visit(catalog, 0);
+    var owned = [];
+    var rawOwned = Array.isArray(catalog.OWNED_PLOT_UIDS)
+      ? catalog.OWNED_PLOT_UIDS : [];
+    for (var i = 0; i < rawOwned.length; i += 1) {
+      var uid = Number(rawOwned[i]);
+      if (isFinite(uid) && uid >= 0 && owned.indexOf(uid) < 0) owned.push(uid);
+    }
+    STORY_CATALOG_CACHE = { byTitle: byTitle, owned: owned };
+    return STORY_CATALOG_CACHE;
+  }
+  function reservedWorldUids(named, catalog){
+    var reserved = {};
+    var key;
+    for (key in named) {
+      if (!Object.prototype.hasOwnProperty.call(named, key)) continue;
+      if (named[key] && named[key].uid != null) {
+        reserved[Number(named[key].uid)] = true;
+      }
+    }
+    if (catalog) {
+      for (key in catalog.byTitle) {
+        if (!Object.prototype.hasOwnProperty.call(catalog.byTitle, key)) continue;
+        reserved[Number(catalog.byTitle[key])] = true;
+      }
+      for (var i = 0; i < catalog.owned.length; i += 1) {
+        reserved[catalog.owned[i]] = true;
+      }
+    }
+    return reserved;
+  }
   function worldbookFromCharacter(){
     return buildWorldbookFromRows(CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
       ? CHARACTER_FIELDS.table : []);
   }
   function buildWorldbookFromRows(table){
     var named = characterWorldSlots();
+    var catalog = catalogUidMap();
+    var titleUids = catalog ? catalog.byTitle : null;
+    var reserved = reservedWorldUids(named, catalog);
     var entries = {};
     // 先预置 manifest 槽位，角色书缺条目时 readSlots 仍有完整 uid 列表
     for (var key in named) {
@@ -1127,8 +1330,29 @@ const buildShim = ({
         target.order = Number(item.insert_order == null ? 100 : item.insert_order);
         continue;
       }
-      var uid = 100000 + i;
-      while (entries[uid]) uid += 1;
+      // uid 优先级：剧情目录原始 uid（按标题）> 已保存 uid > 顺序号兜底。
+      var uid = null;
+      if (titleUids && title && titleUids[title] != null) {
+        uid = Number(titleUids[title]);
+        if (!isFinite(uid)) uid = null;
+      }
+      if (uid == null && item.uid != null && item.uid !== '' &&
+          isFinite(Number(item.uid))) {
+        uid = Number(item.uid);
+      }
+      if (uid == null) {
+        uid = i + 1;
+        while (entries[uid] || reserved[uid]) uid += 1;
+      } else if (entries[uid]) {
+        var filled = entries[uid];
+        if (!filled.content && content) {
+          filled.content = content;
+          filled.key = keys;
+          filled.depth = Number(item.depth == null ? 4 : item.depth);
+          filled.order = Number(item.insert_order == null ? 100 : item.insert_order);
+        }
+        continue;
+      }
       entries[uid] = {
         uid: uid,
         comment: title || String(uid),
@@ -1141,6 +1365,25 @@ const buildShim = ({
         order: Number(item.insert_order == null ? 100 : item.insert_order),
         probability: 100
       };
+    }
+    if (catalog) {
+      // 清单里没映射到标题的条目（扩展设定等）补禁用占位：卡启用后能回读
+      for (var oi = 0; oi < catalog.owned.length; oi += 1) {
+        var ownedUid = catalog.owned[oi];
+        if (entries[ownedUid]) continue;
+        entries[ownedUid] = {
+          uid: ownedUid,
+          comment: 'UID ' + ownedUid,
+          key: [],
+          content: '',
+          constant: false,
+          disable: true,
+          position: 0,
+          depth: 4,
+          order: 100,
+          probability: 100
+        };
+      }
     }
     return { entries: entries };
   }
@@ -2446,6 +2689,7 @@ export const buildAuthorDoc = (options: AuthorRuntimeOptions): string => {
     userName: options.userName,
     canWrite: options.canWrite,
     canAct: options.canAct,
+    storyUidMap: storyUidMapForAuthor(options.author),
   })
   const importMap = buildImportMap(source, buildNativeImportMapEntries())
   const chineseFallback =

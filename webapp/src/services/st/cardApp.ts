@@ -1308,23 +1308,79 @@ export const buildCardAppShim = (
       ? clone(CHARACTER_FIELDS.table)
       : [];
   }
-  function entryKey(entry){
-    if (!entry || typeof entry !== 'object') return String(entry);
-    return String(entry.title || '') + '\u0000' + String(entry.content || '');
+  function resolveEntryUid(entry, named, titleUids){
+    if (!entry || typeof entry !== 'object') return null;
+    var title = String(entry.title == null ? '' : entry.title);
+    var slot = named[title];
+    if (slot && slot.uid != null && isFinite(Number(slot.uid))) {
+      return Number(slot.uid);
+    }
+    if (titleUids && title && titleUids[title] != null &&
+        isFinite(Number(titleUids[title]))) {
+      return Number(titleUids[title]);
+    }
+    if (entry.uid != null && entry.uid !== '' && isFinite(Number(entry.uid))) {
+      return Number(entry.uid);
+    }
+    return null;
   }
   function mergedWorldEntries(){
+    var named = characterWorldSlots();
+    var catalog = catalogUidMap();
+    var titleUids = catalog ? catalog.byTitle : null;
+    var reserved = reservedWorldUids(named, catalog);
     var out = [];
-    var seen = {};
-    function add(entry){
-      var key = entryKey(entry);
-      if (seen[key]) return;
-      seen[key] = true;
-      out.push(clone(entry));
+    var used = {};
+    var usedTitles = {};
+    var seenContent = {};
+    function add(entry, index){
+      if (!entry || typeof entry !== 'object') return;
+      var title = String(entry.title == null ? '' : entry.title);
+      var content = String(entry.content == null ? '' : entry.content);
+      var contentKey = title + '\u0000' + content;
+      if (seenContent[contentKey]) return;
+      var uid = resolveEntryUid(entry, named, titleUids);
+      if (uid != null && used[uid] && usedTitles[uid] !== title) uid = null;
+      if (uid == null) {
+        uid = index + 1;
+        while (used[uid] || reserved[uid]) uid += 1;
+      }
+      if (used[uid]) return; // 同 uid：会话世界书副本优先
+      seenContent[contentKey] = true;
+      used[uid] = true;
+      usedTitles[uid] = title;
+      var copy = clone(entry);
+      copy.uid = uid;
+      out.push(copy);
     }
-    var table = charWorldEntries();
+    // 会话世界书副本是卡写回的目标，比角色卡原始 table 新；重复条目的
+    // 启用状态以副本为准，否则卡刚启用的剧情条目回读仍是旧的禁用状态。
     var i;
-    for (i = 0; i < table.length; i += 1) add(table[i]);
-    for (i = 0; i < WORLD_ENTRIES.length; i += 1) add(WORLD_ENTRIES[i]);
+    for (i = 0; i < WORLD_ENTRIES.length; i += 1) add(WORLD_ENTRIES[i], i);
+    var table = charWorldEntries();
+    for (i = 0; i < table.length; i += 1) add(table[i], i);
+    if (catalog) {
+      // 与 buildWorldbookFromRows 一致：清单里缺映射的 uid 补禁用占位，
+      // 卡启用这些 uid 后回读仍能拿到条目，不会判定同步失败。
+      for (i = 0; i < catalog.owned.length; i += 1) {
+        var ownedUid = catalog.owned[i];
+        if (used[ownedUid]) continue;
+        used[ownedUid] = true;
+        out.push({
+          uid: ownedUid,
+          title: 'UID ' + ownedUid,
+          content: '',
+          pinned: false,
+          keys: [],
+          enabled: false,
+          constant: false,
+          position: 'system',
+          depth: 4,
+          insert_order: 100,
+          probability: 100
+        });
+      }
+    }
     return out;
   }
   function worldbookNames(){
@@ -2043,6 +2099,90 @@ export const buildCardAppShim = (
       return {};
     }
   }
+  // 剧情清单（故事目录）：部分酒馆卡（如约会大作战）把剧情条目的 uid 表
+  // 打包在脚本里，运行时挂在 window 上（对象带 OWNED_PLOT_UIDS，节点带
+  // entryComment/uid）。导入角色卡时我们丢掉了酒馆世界书的原始 uid，行号
+  // 又因空条目被跳过而漂移，卡按 uid 核对启用状态就会报「回读核对不一致」。
+  // 这里按条目标题还原卡期望的 uid；没有这种目录的卡按原序号兜底。
+  var STORY_CATALOG_CACHE = null;
+  function storyCatalog(){
+    try {
+      var direct = window.DALPanelStoryCatalog;
+      if (direct && typeof direct === 'object' &&
+          Array.isArray(direct.OWNED_PLOT_UIDS)) {
+        return direct;
+      }
+    } catch (e) {}
+    try {
+      var seen = 0;
+      for (var key in window) {
+        if (!Object.prototype.hasOwnProperty.call(window, key)) continue;
+        seen += 1;
+        if (seen > 6000) break;
+        var value;
+        try { value = window[key]; } catch (e) { continue; }
+        if (value && typeof value === 'object' && !Array.isArray(value) &&
+            Array.isArray(value.OWNED_PLOT_UIDS)) {
+          return value;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  function catalogUidMap(){
+    if (STORY_CATALOG_CACHE) return STORY_CATALOG_CACHE;
+    var catalog = storyCatalog();
+    if (!catalog) return null;
+    var byTitle = {};
+    function visit(node, depth){
+      if (!node || typeof node !== 'object' || depth > 6) return;
+      if (Array.isArray(node)) {
+        for (var i = 0; i < node.length; i += 1) visit(node[i], depth + 1);
+        return;
+      }
+      var uid = Number(node.uid);
+      var title = node.entryComment;
+      if (isFinite(uid) && uid >= 0 && typeof title === 'string' && title &&
+          byTitle[title] == null) {
+        byTitle[title] = uid;
+      }
+      for (var key in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+        var value = node[key];
+        if (value && typeof value === 'object') visit(value, depth + 1);
+      }
+    }
+    visit(catalog, 0);
+    var owned = [];
+    var rawOwned = Array.isArray(catalog.OWNED_PLOT_UIDS)
+      ? catalog.OWNED_PLOT_UIDS : [];
+    for (var i = 0; i < rawOwned.length; i += 1) {
+      var uid = Number(rawOwned[i]);
+      if (isFinite(uid) && uid >= 0 && owned.indexOf(uid) < 0) owned.push(uid);
+    }
+    STORY_CATALOG_CACHE = { byTitle: byTitle, owned: owned };
+    return STORY_CATALOG_CACHE;
+  }
+  function reservedWorldUids(named, catalog){
+    var reserved = {};
+    var key;
+    for (key in named) {
+      if (!Object.prototype.hasOwnProperty.call(named, key)) continue;
+      if (named[key] && named[key].uid != null) {
+        reserved[Number(named[key].uid)] = true;
+      }
+    }
+    if (catalog) {
+      for (key in catalog.byTitle) {
+        if (!Object.prototype.hasOwnProperty.call(catalog.byTitle, key)) continue;
+        reserved[Number(catalog.byTitle[key])] = true;
+      }
+      for (var i = 0; i < catalog.owned.length; i += 1) {
+        reserved[catalog.owned[i]] = true;
+      }
+    }
+    return reserved;
+  }
   function worldbookFromCharacter(){
     return buildWorldbookFromRows(CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
       ? CHARACTER_FIELDS.table
@@ -2050,6 +2190,9 @@ export const buildCardAppShim = (
   }
   function buildWorldbookFromRows(table){
     var named = characterWorldSlots();
+    var catalog = catalogUidMap();
+    var titleUids = catalog ? catalog.byTitle : null;
+    var reserved = reservedWorldUids(named, catalog);
     var entries = {};
     // 先按 manifest 预置槽位：即使角色书里暂时没有对应条目，卡的 readSlots
     // 也能读到完整 uid 列表，不会因为缺少槽位直接失败。
@@ -2086,9 +2229,31 @@ export const buildCardAppShim = (
         target.order = Number(item.insert_order == null ? 100 : item.insert_order);
         continue;
       }
-      // 非槽位条目放进高段 uid，避免占用 manifest 预留的编号
-      var uid = 100000 + i;
-      while (entries[uid]) uid += 1;
+      // uid 优先级：剧情目录里的原始 uid（按标题匹配）> 会话副本里已保存的
+      // uid > 顺序号兜底。剧情目录是卡核对启用状态的基准，必须优先。
+      var uid = null;
+      if (titleUids && title && titleUids[title] != null) {
+        uid = Number(titleUids[title]);
+        if (!isFinite(uid)) uid = null;
+      }
+      if (uid == null && item.uid != null && item.uid !== '' &&
+          isFinite(Number(item.uid))) {
+        uid = Number(item.uid);
+      }
+      if (uid == null) {
+        uid = i + 1;
+        while (entries[uid] || reserved[uid]) uid += 1;
+      } else if (entries[uid]) {
+        // 同一 uid 已由槽位预置/重复标题占住：补内容即可
+        var filled = entries[uid];
+        if (!filled.content && content) {
+          filled.content = content;
+          filled.key = keys;
+          filled.depth = Number(item.depth == null ? 4 : item.depth);
+          filled.order = Number(item.insert_order == null ? 100 : item.insert_order);
+        }
+        continue;
+      }
       entries[uid] = {
         uid: uid,
         comment: title || String(uid),
@@ -2101,6 +2266,26 @@ export const buildCardAppShim = (
         order: Number(item.insert_order == null ? 100 : item.insert_order),
         probability: 100
       };
+    }
+    if (catalog) {
+      // 卡会按 uid 启用自己剧情清单里的条目；没映射到标题的条目（如扩展
+      // 设定）补一条禁用占位，否则卡启用后回读不到该 uid，会判定同步失败。
+      for (var oi = 0; oi < catalog.owned.length; oi += 1) {
+        var ownedUid = catalog.owned[oi];
+        if (entries[ownedUid]) continue;
+        entries[ownedUid] = {
+          uid: ownedUid,
+          comment: 'UID ' + ownedUid,
+          key: [],
+          content: '',
+          constant: false,
+          disable: true,
+          position: 0,
+          depth: 4,
+          order: 100,
+          probability: 100
+        };
+      }
     }
     return { entries: entries };
   }
