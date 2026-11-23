@@ -74,3 +74,13 @@ APK (top.eastcloud.flyai.poc, targetSdk 28)
 
 见 `mobile/poc/README.md`：`fetch-proot.sh` → `build-rootfs.sh` → `npx cap add android`
 → `apply-android.sh` → `./gradlew assembleRelease`。
+
+
+## 8. 修订记录
+
+### v1.1（2026-11-24）
+
+- 修复首启失败：`rootfs_payload.bin: open failed: ENOENT`。
+  原实现把 APK 内的 asset 当成私有目录文件打开；现改为 `AssetManager.open()`
+  直接流式解包，同时省掉一次 101MB 的临时复制。
+- `versionCode=2 / versionName=1.1`，签名与包名不变，可覆盖安装。

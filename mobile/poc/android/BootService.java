@@ -1,0 +1,220 @@
+package top.eastcloud.flyai.poc;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
+import android.os.IBinder;
+import android.util.Log;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+
+/**
+ * 前台服务：首次启动解包 Debian 用户态 + 用 PRoot 拉起 FlyAI（FastAPI）。
+ * 原生侧只负责进程与文件，业务全部在 rootfs 里的 Python 中。
+ */
+public class BootService extends Service {
+    private static final String TAG = "FlyAI-Boot";
+    private static final String CHANNEL = "flyai_server";
+    private static final int NOTIFICATION_ID = 1001;
+
+    private volatile Process server;
+    private volatile boolean starting;
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        createChannel();
+        startForegroundCompat("正在准备运行环境…");
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!starting && (server == null || !server.isAlive())) {
+            starting = true;
+            new Thread(this::boot, "flyai-boot").start();
+        }
+        return START_STICKY;
+    }
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL, "FlyAI 本地服务", NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("在设备上运行 FlyAI 服务端");
+        manager.createNotificationChannel(channel);
+    }
+
+    private void startForegroundCompat(String text) {
+        Intent open = new Intent(this, MainActivity.class);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent pending = PendingIntent.getActivity(this, 0, open, flags);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                ? new Notification.Builder(this, CHANNEL)
+                : new Notification.Builder(this);
+        Notification notification = builder
+                .setContentTitle("FlyAI 本地服务")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setOngoing(true)
+                .setContentIntent(pending)
+                .build();
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    private void notify(String text) {
+        try {
+            startForegroundCompat(text);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void boot() {
+        File files = getFilesDir();
+        File rootfs = new File(files, "rootfs");
+        File prootDir = new File(files, "proot");
+        try {
+            installProot(prootDir);
+            File marker = new File(rootfs, ".installed");
+            if (!marker.isFile()) {
+                notify("首次启动：正在解压运行环境（约 350MB）…");
+                deleteRecursive(rootfs);
+                try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
+                    TarGzExtractor.extract(payload, rootfs);
+                }
+                if (!marker.createNewFile()) {
+                    throw new RuntimeException("无法写入安装标记");
+                }
+            }
+            notify("正在启动 FlyAI…");
+            startServer(files, rootfs, prootDir);
+            readLogTail(files);
+            notify("FlyAI 正在运行");
+        } catch (Throwable error) {
+            Log.e(TAG, "boot failed", error);
+            notify("启动失败：" + error.getMessage());
+        } finally {
+            starting = false;
+        }
+    }
+
+    private void installProot(File dir) throws Exception {
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new RuntimeException("无法创建 proot 目录");
+        }
+        String[] names = {"proot", "loader", "libtalloc.so.2", "libandroid-shmem.so"};
+        for (String name : names) {
+            File out = new File(dir, name);
+            try (InputStream in = getAssets().open("proot/" + name);
+                 FileOutputStream os = new FileOutputStream(out)) {
+                copy(in, os);
+            }
+            out.setReadable(true, true);
+            out.setExecutable(true, true);
+        }
+    }
+
+    private void startServer(File files, File rootfs, File prootDir) throws Exception {
+        File loader = new File(prootDir, "loader");
+        File proot = new File(prootDir, "proot");
+        File tmp = new File(files, "proot-tmp");
+        if (!tmp.isDirectory()) tmp.mkdirs();
+        File log = new File(files, "server.log");
+        if (log.exists()) log.delete();
+
+        ProcessBuilder pb = new ProcessBuilder(
+                proot.getAbsolutePath(),
+                "--link2symlink",
+                "-0",
+                "-r", rootfs.getAbsolutePath(),
+                "-b", "/dev",
+                "-b", "/proc",
+                "-b", "/sys",
+                "-b", "/proc/self/fd",
+                "-w", "/opt/flyai",
+                "/usr/bin/env", "-i",
+                "HOME=/root",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TERM=xterm",
+                "PYTHONUNBUFFERED=1",
+                "LANG=C.UTF-8",
+                "/bin/sh", "/opt/flyai/start.sh"
+        );
+        pb.directory(files);
+        pb.redirectErrorStream(true);
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log));
+        pb.environment().put("PROOT_LOADER", loader.getAbsolutePath());
+        pb.environment().put("PROOT_TMP_DIR", tmp.getAbsolutePath());
+        pb.environment().put("PROOT_NO_SECCOMP", "1");
+        pb.environment().put("LD_LIBRARY_PATH", prootDir.getAbsolutePath());
+        server = pb.start();
+
+        new Thread(() -> {
+            try {
+                int code = server.waitFor();
+                Log.w(TAG, "server exited: " + code);
+                notify("FlyAI 已停止（退出码 " + code + "）");
+            } catch (InterruptedException ignored) {
+            }
+        }, "flyai-watch").start();
+    }
+
+    private void readLogTail(File files) {
+        File log = new File(files, "server.log");
+        // 只用于调试：日志留在 filesDir，MainActivity 失败时会展示末尾内容
+    }
+
+    private static void copy(InputStream in, OutputStream out) throws Exception {
+        byte[] buffer = new byte[1 << 16];
+        int n;
+        while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
+    }
+
+    private static void deleteRecursive(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteRecursive(child);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        file.delete();
+    }
+
+    static String tail(File log, int maxBytes) {
+        if (!log.isFile()) return "";
+        try (RandomAccessFile raf = new RandomAccessFile(log, "r")) {
+            long length = raf.length();
+            long start = Math.max(0, length - maxBytes);
+            raf.seek(start);
+            byte[] data = new byte[(int) (length - start)];
+            raf.readFully(data);
+            return new String(data, "UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        if (server != null) server.destroy();
+        super.onDestroy();
+    }
+}
