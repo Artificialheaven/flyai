@@ -20,6 +20,21 @@ import type {
 
 /** 角色卡 / 世界观：登录态（Bearer）由 request 统一注入。 */
 
+/** 写接口会带回文件 md5：顺手把整卡写进本地缓存，下次打开直接命中 */
+type WithDigest<T> = T & { md5?: string }
+
+const rememberCharacter = (character: WithDigest<Character> | null | undefined) => {
+  if (character && character.id && character.md5) {
+    void writeLoreDetail('character', character.id, character.md5, character)
+  }
+}
+
+const rememberWorld = (world: WithDigest<World> | null | undefined) => {
+  if (world && world.id && world.md5) {
+    void writeLoreDetail('world', world.id, world.md5, world)
+  }
+}
+
 /**
  * 内容库列表：只取轻量摘要（不含 table/extensions 等大字段）。
  * 15MB 级的酒馆卡走全量 to_dict 会把列表接口拖到几十秒，编辑器再按 id 拉详情。
@@ -57,19 +72,24 @@ export const getCharacter = async (cid: string, md5?: string): Promise<Character
 }
 
 export const createCharacter = async (body: Partial<Character>): Promise<Character> => {
-  const character = await request<Character>('/api/characters', {
+  const character = await request<WithDigest<Character>>('/api/characters', {
     method: 'POST',
     body: JSON.stringify(body),
   })
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
 
 export const updateCharacter = async (cid: string, body: Partial<Character>): Promise<Character> => {
-  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}`, {
-    method: 'PUT',
-    body: JSON.stringify(body),
-  })
+  const character = await request<WithDigest<Character>>(
+    `/api/characters/${encodeURIComponent(cid)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }
+  )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -83,9 +103,11 @@ export const deleteCharacter = async (cid: string): Promise<void> => {
 
 /** 把可见（含共享）卡复制为自己的独立根角色卡 */
 export const forkCharacter = async (cid: string): Promise<Character> => {
-  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}/fork`, {
-    method: 'POST',
-  })
+  const character = await request<WithDigest<Character>>(
+    `/api/characters/${encodeURIComponent(cid)}/fork`,
+    { method: 'POST' }
+  )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -130,16 +152,21 @@ export const getWorld = async (wid: string, md5?: string): Promise<World> => {
 }
 
 export const createWorld = async (body: Partial<World>): Promise<World> => {
-  const world = await request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })
+  const world = await request<WithDigest<World>>('/api/worlds', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }
 
 export const updateWorld = async (wid: string, body: Partial<World>): Promise<World> => {
-  const world = await request<World>(`/api/worlds/${encodeURIComponent(wid)}`, {
+  const world = await request<WithDigest<World>>(`/api/worlds/${encodeURIComponent(wid)}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }
@@ -187,11 +214,10 @@ export const importCharacterCard = async (
   file: File,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<Character> => {
-  const character = await uploadFile<Character>(
-    '/api/characters/import-card',
-    file,
-    onProgress
-  )
+  const character = await uploadFile<
+    WithDigest<Character> & { character?: WithDigest<Character> }
+  >('/api/characters/import-card', file, onProgress)
+  rememberCharacter(character.character ?? character)
   invalidateCatalog('characters')
   return character
 }
@@ -220,11 +246,12 @@ export const importCharacterJson = async (
       ? envelope.data
       : parsed
   const type = typeof envelope.type === 'string' && envelope.type ? envelope.type : 'character'
-  const character = await uploadRequest<Character>(
+  const character = await uploadRequest<WithDigest<Character>>(
     '/api/characters/import',
     JSON.stringify({ type, data }),
     { contentType: 'application/json', onProgress }
   )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -233,11 +260,12 @@ export const importWorldbook = async (
   file: File,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<{ world: World; stats: Record<string, unknown> }> => {
-  const result = await uploadFile<{ world: World; stats: Record<string, unknown> }>(
-    '/api/worlds/import-worldbook',
-    file,
-    onProgress
-  )
+  const result = await uploadFile<{
+    world: World
+    stats: Record<string, unknown>
+    md5?: string
+  }>('/api/worlds/import-worldbook', file, onProgress)
+  rememberWorld({ ...result.world, md5: result.md5 })
   invalidateCatalog('worlds')
   return result
 }
@@ -257,10 +285,12 @@ export const importWorldJson = async (
     parsed && typeof parsed === 'object' && 'data' in parsed
       ? (parsed as { data: Partial<World> }).data
       : (parsed as Partial<World>)
-  const world = await uploadRequest<World>('/api/worlds', JSON.stringify(data), {
-    contentType: 'application/json',
-    onProgress,
-  })
+  const world = await uploadRequest<WithDigest<World>>(
+    '/api/worlds',
+    JSON.stringify(data),
+    { contentType: 'application/json', onProgress }
+  )
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }

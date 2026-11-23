@@ -202,7 +202,9 @@ def create_character(payload: CharacterPayload, request: Request):
             raise HTTPException(400, "不能在共享根卡下直接建副本，请先复制为我的角色卡")
         c.parent_id = root.id
     sc.lore.save_character(c)
-    return c.to_dict()
+    body = c.to_dict()
+    body["md5"] = sc.lore.character_digest(c.id)
+    return body
 
 
 @router.put("/characters/{cid}")
@@ -223,7 +225,9 @@ def update_character(cid: str, payload: CharacterPayload, request: Request):
     # 已发布的卡：改动同步到共享目录
     if cur.public and source == "own":
         sc.lore.publish_character(c)
-    return c.to_dict()
+    body = c.to_dict()
+    body["md5"] = sc.lore.character_digest(c.id)
+    return body
 
 
 @router.delete("/characters/{cid}")
@@ -264,7 +268,9 @@ def fork_character_to_own(cid: str, request: Request):
     c = Character.from_dict(d)
     c.author = sc.uid
     sc.lore.save_character(c)
-    return c.to_dict()
+    body = c.to_dict()
+    body["md5"] = sc.lore.character_digest(c.id)
+    return body
 
 
 @router.post("/characters/{cid}/publish")
@@ -358,7 +364,10 @@ def import_character(payload: LoreImportPayload, request: Request):
         c.avatar = materialize_avatar(
             getattr(sc, "upload_dir", None), sc.uid, blob) or ""
     sc.lore.save_character(c)
-    return c.to_dict()
+    body = c.to_dict()
+    # 前端上传后立即把整卡写进本地缓存，下次打开靠 md5 命中直接读本地
+    body["md5"] = sc.lore.character_digest(c.id)
+    return body
 
 
 # ---- 世界观 ----
@@ -383,10 +392,13 @@ def get_world(wid: str, request: Request):
 
 @router.post("/worlds")
 def create_world(payload: WorldPayload, request: Request):
+    sc = _state(request)
     w = _build_world(payload)
     w.id = uuid.uuid4().hex
-    _state(request).lore.save_world(w)
-    return w.to_dict()
+    sc.lore.save_world(w)
+    body = w.to_dict()
+    body["md5"] = sc.lore.world_digest(w.id)
+    return body
 
 
 @router.put("/worlds/{wid}")
@@ -394,10 +406,13 @@ def update_world(wid: str, payload: WorldPayload, request: Request):
     _safe_wid(wid)
     if _state(request).lore.get_world(wid) is None:
         raise HTTPException(404, "世界观不存在")
+    sc = _state(request)
     w = _build_world(payload)
     w.id = wid
-    _state(request).lore.save_world(w)
-    return w.to_dict()
+    sc.lore.save_world(w)
+    body = w.to_dict()
+    body["md5"] = sc.lore.world_digest(w.id)
+    return body
 
 
 @router.delete("/worlds/{wid}")
@@ -448,6 +463,8 @@ async def import_character_card(request: Request, file: UploadFile = File(...)):
     body = c.to_dict()
     body.update(report)
     body["character"] = c.to_dict()
+    body["md5"] = sc.lore.character_digest(c.id)
+    body["character"]["md5"] = body["md5"]
     return body
 
 
@@ -473,7 +490,11 @@ async def import_worldbook(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, "世界书里没有可用的非空条目")
     w.id = uuid.uuid4().hex
     sc.lore.save_world(w)
-    return {"world": w.to_dict(), "stats": stats}
+    return {
+        "world": w.to_dict(),
+        "stats": stats,
+        "md5": sc.lore.world_digest(w.id),
+    }
 
 
 @router.post("/worlds/import")
@@ -481,10 +502,13 @@ def import_world(payload: LoreImportPayload, request: Request):
     data = payload.data or {}
     if not (data.get("name") or "").strip():
         raise HTTPException(400, "导入的世界观缺少名称")
+    sc = _state(request)
     w = World.from_dict(data)
     w.id = uuid.uuid4().hex
-    _state(request).lore.save_world(w)
-    return w.to_dict()
+    sc.lore.save_world(w)
+    body = w.to_dict()
+    body["md5"] = sc.lore.world_digest(w.id)
+    return body
 
 
 # ---- 头像上传 ----
