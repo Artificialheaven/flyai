@@ -788,7 +788,7 @@ export const openai_max_tokens = __num(__hostState.maxResponse, 4096);
 export const custom_prompt_post_processing_types = { NONE: 0, MERGE: 1, SEMI: 2, STRICT: 3 };
 
 export function getChatCompletionModel() {
-  return String(__oai.openai_model || 'flyai');
+  return String(__oai.custom_model || __oai.openai_model || 'flyai');
 }
 export function getChatCompletionSource() {
   return String(__oai.chat_completion_source || 'custom');
@@ -799,6 +799,254 @@ export function isServiceAllowed() {
 export function openAICompatibleModels() {
   return model_list;
 }
+`
+
+// ── P2：其余常用 ST 模块（按需只读子集） ────────────────────────────────
+const EVENTS_SOURCE =
+  MODULE_HEADER +
+  String.raw`const __helper = globalThis.TavernHelper || globalThis.tavernHelper || {};
+const __types = globalThis.tavern_events || {};
+
+export const event_types = __types;
+export const eventTypes = __types;
+export const eventSource = {
+  on: function(name, handler){ return __helper.eventOn ? __helper.eventOn(name, handler) : function(){}; },
+  once: function(name, handler){ return __helper.eventOnce ? __helper.eventOnce(name, handler) : function(){}; },
+  off: function(name, handler){ return __helper.eventOff ? __helper.eventOff(name, handler) : undefined; },
+  emit: function(name){
+    var args = Array.prototype.slice.call(arguments);
+    return __helper.eventEmit ? __helper.eventEmit.apply(null, args) : undefined;
+  },
+  emitAndWait: function(name){
+    var args = Array.prototype.slice.call(arguments);
+    return __helper.eventEmitAndWait ? __helper.eventEmitAndWait.apply(null, args) : Promise.resolve();
+  },
+  removeListener: function(name, handler){ return eventSource.off(name, handler); },
+  clearEvent: function(name){ return __helper.eventClearEvent ? __helper.eventClearEvent(name) : undefined; },
+  clearListener: function(name){ return __helper.eventClearListener ? __helper.eventClearListener(name) : undefined; },
+  clearAll: function(){ return __helper.eventClearAll ? __helper.eventClearAll() : undefined; },
+};
+`
+
+const TEMPLATES_SOURCE =
+  MODULE_HEADER +
+  String.raw`export const Handlebars = globalThis.Handlebars || null;
+export function renderTemplate(template, context){
+  var source = String(template == null ? '' : template);
+  var data = context && typeof context === 'object' ? context : {};
+  if (Handlebars && typeof Handlebars.compile === 'function') {
+    try { return Handlebars.compile(source)(data); } catch (e) {}
+  }
+  return source.replace(/\{\{\s*([\w.$-]+)\s*\}\}/g, function(match, key){
+    var value = key.split('.').reduce(function(cur, part){
+      return cur == null ? undefined : cur[part];
+    }, data);
+    return value == null ? '' : String(value);
+  });
+}
+export function parseTemplate(template){ return String(template == null ? '' : template); }
+`
+
+const CHATS_SOURCE =
+  MODULE_HEADER +
+  String.raw`const __ctx = () => (globalThis.SillyTavern && globalThis.SillyTavern.getContext)
+  ? globalThis.SillyTavern.getContext()
+  : {};
+const __state = __host();
+
+export const chat = Array.isArray(__state.chat) ? __state.chat : [];
+export const chat_metadata = (__state.chatMetadata && typeof __state.chatMetadata === 'object') ? __state.chatMetadata : {};
+
+export function getCurrentChatId(){ return String(__host().chatId || ''); }
+export function getChat(){ return Promise.resolve(chat); }
+export function saveChat(){
+  var args = Array.prototype.slice.call(arguments);
+  var context = __ctx();
+  return context && typeof context.saveChat === 'function'
+    ? Promise.resolve(context.saveChat.apply(context, args))
+    : Promise.resolve();
+}
+export function saveMetadata(){
+  var context = __ctx();
+  return context && typeof context.saveMetadata === 'function'
+    ? Promise.resolve(context.saveMetadata())
+    : Promise.resolve();
+}
+export function renameChat(){ return Promise.resolve(); }
+export function deleteChat(){ return Promise.resolve(); }
+export function exportChat(){ return Promise.resolve([]); }
+export function importChat(){ return Promise.resolve(); }
+export function getChatHistory(){ return Promise.resolve([]); }
+`
+
+const CHARACTERS_SOURCE =
+  MODULE_HEADER +
+  String.raw`const __state = __host();
+export const characters = Array.isArray(__state.characters) ? __state.characters : [];
+export const this_chid = 0;
+export function getCharacters(){ return characters; }
+export function getCharacter(id){ return characters[Number(id) || 0] || null; }
+export function getCurrentCharacterId(){ return String(__state.characterName || ''); }
+export function getCurrentCharacterName(){ return String(__state.characterName || ''); }
+export function getCharacterCardFields(){ return {}; }
+`
+
+const GROUPS_SOURCE =
+  MODULE_HEADER +
+  String.raw`export const groups = [];
+export const selected_group = null;
+export function getGroups(){ return groups; }
+export function getGroupById(){ return null; }
+export function generateGroupWrapper(){ return Promise.resolve(''); }
+export function isGroupChat(){ return false; }
+`
+
+const MACROS_SOURCE =
+  MODULE_HEADER +
+  String.raw`export function substituteParams(value){
+  var fn = globalThis.substituteParams;
+  if (typeof fn === 'function') {
+    try { return fn.apply(null, arguments); } catch (e) {}
+  }
+  return String(value == null ? '' : value);
+}
+export function evaluateMacros(value){ return substituteParams(value); }
+export function registerMacro(){ return false; }
+export function unregisterMacro(){ return false; }
+export function getMacroRegistry(){ return {}; }
+`
+
+const VARIABLES_SOURCE =
+  MODULE_HEADER +
+  String.raw`function __helper(){ return globalThis.TavernHelper || globalThis.tavernHelper || {}; }
+export function getVariables(option){
+  var api = __helper();
+  return api.getVariables ? api.getVariables(option) : {};
+}
+export function setVariables(value, option){
+  var api = __helper();
+  return api.setVariables ? api.setVariables(value, option) : value;
+}
+export function updateVariablesWith(updater, option){
+  var api = __helper();
+  return api.updateVariablesWith ? api.updateVariablesWith(updater, option) : {};
+}
+export function insertOrAssignVariables(value, option){
+  var api = __helper();
+  return api.insertOrAssignVariables ? api.insertOrAssignVariables(value, option) : {};
+}
+export function getGlobalVariables(){
+  var api = __helper();
+  return api.getGlobalVariables ? api.getGlobalVariables() : {};
+}
+export function getChatVariable(key){
+  var api = __helper();
+  return api.getChatVariable ? api.getChatVariable(key) : undefined;
+}
+export function setChatVariable(key, value){
+  var api = __helper();
+  return api.setChatVariable ? api.setChatVariable(key, value) : undefined;
+}
+`
+
+const PRESET_MANAGER_SOURCE =
+  MODULE_HEADER +
+  String.raw`export function getPresetManager(){ return null; }
+export function getPresetNames(){ return []; }
+export function getCurrentPresetName(){ return ''; }
+export function getCurrentPresetAPI(){ return 'openai'; }
+export function savePreset(){ return Promise.resolve(); }
+export function deletePreset(){ return Promise.resolve(); }
+`
+
+const UTILS_SOURCE =
+  MODULE_HEADER +
+  String.raw`export const isMobile = { any: false, phone: false, tablet: false, android: false, iOS: false };
+export function escapeRegex(value){
+  return String(value == null ? '' : value).replace(/[.*+?^\${}()|[\]\\\\]/g, '\\\\$&');
+}
+export function escapeHtml(value){
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+export function humanizedDateTime(date){
+  var d = date instanceof Date ? date : new Date();
+  return d.toLocaleString();
+}
+export function getCharaFilename(id){
+  var state = __host();
+  var chars = Array.isArray(state.characters) ? state.characters : [];
+  var char = chars[Number(id) || 0];
+  return String((char && (char.avatar || char.name)) || state.characterName || '').replace(/\.png$/i, '');
+}
+export function debounce(fn, wait){
+  var timer = null;
+  return function(){
+    var args = arguments;
+    var self = this;
+    clearTimeout(timer);
+    timer = setTimeout(function(){ fn.apply(self, args); }, Number(wait) || 0);
+  };
+}
+export function throttle(fn){ return fn; }
+export function onlyUnique(value, index, array){ return array.indexOf(value) === index; }
+export function uuidv4(){
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(ch){
+    var r = Math.random() * 16 | 0;
+    var v = ch === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+export function stringFormat(format){
+  var args = Array.prototype.slice.call(arguments, 1);
+  return String(format == null ? '' : format).replace(/\{(\d+)\}/g, function(match, index){
+    return args[Number(index)] === undefined ? match : args[Number(index)];
+  });
+}
+export function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve, Number(ms) || 0); }); }
+export function waitUntilCondition(condition, interval, timeout){
+  var step = Number(interval) || 100;
+  var limit = Number(timeout) || 10000;
+  var start = Date.now();
+  return new Promise(function(resolve, reject){
+    (function check(){
+      var value;
+      try { value = condition(); } catch (e) { reject(e); return; }
+      if (value) { resolve(value); return; }
+      if (Date.now() - start > limit) { reject(new Error('waitUntilCondition timeout')); return; }
+      setTimeout(check, step);
+    })();
+  });
+}
+export function getFileExtension(name){
+  var match = String(name == null ? '' : name).match(/\.([a-z0-9]+)$/i);
+  return match ? match[1].toLowerCase() : '';
+}
+export function isValidUrl(value){
+  try { return !!new URL(String(value)); } catch (e) { return false; }
+}
+export function sanitizeFilename(name){
+  return String(name == null ? '' : name).replace(/[\\\/:*?"<>|]/g, '_');
+}
+`
+
+const EXTENSIONS_SHARED_SOURCE =
+  MODULE_HEADER +
+  String.raw`const __extensions = (__host().extensions && typeof __host().extensions === 'object')
+  ? __host().extensions
+  : {};
+export const extension_settings = (__extensions.settings && typeof __extensions.settings === 'object')
+  ? __extensions.settings
+  : {};
+export const extensionNames = Array.isArray(__extensions.names) ? __extensions.names : [];
+export const extension_prompts = (__extensions.prompts && typeof __extensions.prompts === 'object')
+  ? __extensions.prompts
+  : {};
+export function getContext(){
+  return { extensionSettings: extension_settings, extensionPrompts: extension_prompts };
+}
+export default extension_settings;
 `
 
 const NATIVE_MODULES: ReadonlyArray<readonly [string, string]> = [
@@ -812,6 +1060,16 @@ const NATIVE_MODULES: ReadonlyArray<readonly [string, string]> = [
   ['lib.js', LIB_SOURCE],
   ['scripts/authors-note.js', AUTHORS_NOTE_SOURCE],
   ['scripts/openai.js', OPENAI_SOURCE],
+  ['scripts/events.js', EVENTS_SOURCE],
+  ['scripts/templates.js', TEMPLATES_SOURCE],
+  ['scripts/chats.js', CHATS_SOURCE],
+  ['scripts/characters.js', CHARACTERS_SOURCE],
+  ['scripts/group-chats.js', GROUPS_SOURCE],
+  ['scripts/macros.js', MACROS_SOURCE],
+  ['scripts/variables.js', VARIABLES_SOURCE],
+  ['scripts/preset-manager.js', PRESET_MANAGER_SOURCE],
+  ['scripts/utils.js', UTILS_SOURCE],
+  ['scripts/extensions/shared.js', EXTENSIONS_SHARED_SOURCE],
 ]
 
 /** 已仿真的 ST 模块路径（相对站点根）。 */

@@ -78,7 +78,7 @@ describe('ST 原生模块 import map', () => {
     for (const path of ST_NATIVE_MODULE_PATHS) {
       expect(entries[`null/${path}`]).toMatch(/^data:text\/javascript,/)
     }
-    expect(ST_NATIVE_MODULE_PATHS).toHaveLength(10)
+    expect(ST_NATIVE_MODULE_PATHS).toHaveLength(20)
     for (const specifier of [
       'flyai-chevrotain',
       'flyai-moment',
@@ -101,6 +101,14 @@ describe('ST 原生模块 import map', () => {
     expect(source).toContain('export const seedrandom =')
     expect(source).toContain('export const droll =')
     expect(source).toContain('export const chevrotain = __chevrotain')
+  })
+
+  it('所有原生模块（除 lib 依赖链）都能作为 ES module 求值', async () => {
+    for (const path of ST_NATIVE_MODULE_PATHS) {
+      if (path === 'lib.js') continue
+      const mod = (await import(buildNativeModuleUrl(path))) as Record<string, unknown>
+      expect(mod && typeof mod).toBe('object')
+    }
   })
 
   it('moments/droll/seedrandom 依赖模块自带可用的导出', () => {

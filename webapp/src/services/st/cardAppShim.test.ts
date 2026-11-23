@@ -788,6 +788,41 @@ describe('buildCardAppShim', () => {
     expect(updated.name1).toBe('新玩家')
   })
 
+  it('P1 宿主接口：settings/extensions/tokenizers 返回 ST 形状', async () => {
+    const { sandbox } = makeSandbox('hi', null, null, {
+      actions: false,
+      write: false,
+      net: false,
+    })
+    const fetchFn = sandbox.fetch as (
+      url: string,
+      init?: { method?: string; body?: string }
+    ) => Promise<{ json: () => Promise<unknown> }>
+
+    const settings = (await (
+      await fetchFn('/api/settings/get', { method: 'POST', body: '{}' })
+    ).json()) as Record<string, unknown>
+    expect(settings.world_names).toEqual(expect.any(Array))
+    expect(settings.settings).toEqual(expect.any(Object))
+    expect(settings.power_user).toEqual(expect.any(Object))
+
+    const extensions = (await (
+      await fetchFn('/api/extensions/discover', { method: 'POST', body: '{}' })
+    ).json()) as Array<Record<string, unknown>>
+    expect(extensions.map((item) => item.name)).toEqual([
+      'JS-Slash-Runner',
+      'ST-Prompt-Template',
+    ])
+
+    const count = (await (
+      await fetchFn('/api/tokenizers/openai/count', {
+        method: 'POST',
+        body: JSON.stringify({ text: '你好世界' }),
+      })
+    ).json()) as { count?: number }
+    expect(count.count).toBe(2)
+  })
+
   it('世界书 HTTP：/api/worldinfo/get|edit 走本地副本，写入交给宿主确认', async () => {
     const { sandbox, posted, emitMessage } = makeSandbox(
       'hi',

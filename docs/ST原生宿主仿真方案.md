@@ -19,6 +19,25 @@
 
 已实测：沙箱 srcdoc 的 `location.origin` 是字符串 `"null"`，`baseURI` 继承父页面；用 import map 精确映射 `"null/script.js"` 等键可以成功加载 `data:` 模块。不需要改 CSP，也不需要后端静态路由。
 
+## 0.1 实现状态（2026-11-23）
+
+| 项目 | 状态 | 说明 |
+|---|---|---|
+| P0 快照 + 10 个 ST 模块 + import map | ✅ | `webapp/src/services/st/native/stNative.ts` |
+| `window.EjsTemplate` | ✅ | `native/ejsRuntime.ts`，复用 `ejs.ts` 编译器 |
+| `/api/backends/chat-completions/generate|status` | ✅ | 走宿主生成桥，`stream:true` 合成 SSE |
+| 宏解析器依赖（Chevrotain/moment/seedrandom/droll） | ✅ | 内置 11.2.0 / 2.30.1 / 3.0.5 / 0.2.1 |
+| 作者面板 lodash 全局 `_` | ✅ | 修复原生世界书扫描 `t.compact` 缺失 |
+| 原生快照补 `custom_model` / `custom_include_*` | ✅ | 修复 `provider/model unavailable` 与宏源错误 |
+| 真实卡运行时 `prepareFromHost` | ✅ | 无头 Chrome + 卡内 4MB 终端脚本，7 条消息请求体生成成功 |
+| P1：world-info 12 项设置 / 正则 API / tokenizer 近似 / tags | ✅ | 正则脚本来源仍为空数组，按卡需要再接 |
+| P1：settings / extensions / presets / tokenizers HTTP | ✅ | `/api/settings/get`、`/api/extensions/discover` 等 |
+| P2：events/templates/chats/characters/group-chats/macros/variables/preset-manager/utils/extensions-shared | ✅ | 只读子集，20 个模块路径 |
+| P2：删除 `DALPhoneRuntime` 覆盖 | ⏸ | 保留“原生宿主不可用时”的 gated 回退；实际路径已走原生 |
+| SSE 真流式 | ⏸ | 先返回完整文本再合成 SSE，卡内 `stream:false` 场景无影响 |
+
+验证方式：`npm test`（268 个用例）+ 临时探针页 + 真实 Chrome CDP。探针不入库。
+
 ## 1. 扫描结果
 
 ### 1.1 卡片对 ST 模块的动态 import

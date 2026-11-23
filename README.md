@@ -48,7 +48,7 @@ FlyAI 是一个**可自托管、数据本地优先**的 AI 角色扮演聊天平
 - **卡内消息桥**：`getChatMessages` / `createChatMessages` / `setChatMessages` / `deleteChatMessages` / `rotateChatMessages` 可读写当前会话；新楼层先落库再生成，`message.extra`（如小手机的 `dal_phone_source`）持久化为 `st_extra`，刷新后楼层身份不变。
 - **沙箱存储与存档身份**：`localStorage` / `sessionStorage` 由会话 `chat_metadata` 承载；补齐 `chat_metadata.integrity` 并提供进程内 IndexedDB 桩，供扩展日志、媒体库与存档识别使用。
 - **卡内运行时**：`context().chat` 稳定镜像、`saveChat` / `saveMetadata` 回写、`context.generate` 静默生成；约会大作战小手机等自带运行时的卡可直接发送消息。
-- **ST 原生宿主仿真（进行中）**：通过 import map 提供 `/script.js`、`world-info`、`power-user`、`extensions`、`regex`、`tokenizers`、`tags`、`lib`、`authors-note` 等模块与 `EjsTemplate`，让卡自带的原生运行时原样执行，逐步替代卡特定注入。
+- **ST 原生宿主仿真**：通过 import map 提供 `/script.js`、`world-info`、`power-user`、`extensions`、`regex`、`tokenizers`、`tags`、`lib`、`authors-note`、`openai` 及 events/templates/chats/characters/macros/utils 等 20 个模块与 `EjsTemplate`，内置 Chevrotain/moment/seedrandom/droll 宏依赖，并桥接 `chat-completions/generate|status`、settings/extensions/presets/tokenizers 接口。约会大作战原生的 `prepareFromHost` 已在真实 Chrome 中验证通过。
 - 对话压缩：AI 将历史归纳进设定，**先 diff 确认、后写入**，只写会话副本，不污染根卡。
 
 **🌐 工具与联网**

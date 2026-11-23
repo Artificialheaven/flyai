@@ -2687,6 +2687,58 @@ export const buildCardAppShim = (
         path.indexOf('/api/backends/chat-completions/bias') >= 0) {
       return Promise.resolve(jsonResponse({ ok: true }));
     }
+    // 设置 / 扩展 / 预设 / tokenizer 的只读宿主面（P1）。
+    if (path.indexOf('/api/settings/get') >= 0) {
+      var nativeState = window.__FLYAI_ST_NATIVE__ || {};
+      return Promise.resolve(jsonResponse({
+        settings: clone(nativeState.oaiSettings || {}),
+        power_user: clone(nativeState.powerUser || {}),
+        world_names: (nativeState.worldInfo && nativeState.worldInfo.names) || [],
+        preset_names: { openai: [] },
+        koboldai_settings: [],
+        koboldai_setting_names: []
+      }));
+    }
+    if (path.indexOf('/api/settings/save') >= 0) {
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    if (path.indexOf('/api/extensions/discover') >= 0) {
+      return Promise.resolve(jsonResponse([
+        { name: 'JS-Slash-Runner', type: 'local', enabled: true, version: '1.12.6' },
+        { name: 'ST-Prompt-Template', type: 'local', enabled: true, version: '1.0.0' }
+      ]));
+    }
+    if (path.indexOf('/api/extensions/version') >= 0) {
+      return Promise.resolve(jsonResponse({}));
+    }
+    if (path.indexOf('/api/extensions/') >= 0) {
+      return Promise.resolve(jsonResponse([]));
+    }
+    if (path.indexOf('/api/presets/') >= 0) {
+      return Promise.resolve(jsonResponse(path.indexOf('/default') >= 0 ? [] : { ok: true }));
+    }
+    if (path.indexOf('/api/tokenizers/') >= 0) {
+      var tokenText = '';
+      if (Array.isArray(data.messages)) {
+        tokenText = data.messages.map(function(item){
+          return String((item && item.content) || '');
+        }).join('\\n');
+      } else if (typeof data.text === 'string') {
+        tokenText = data.text;
+      }
+      if (path.indexOf('/encode') >= 0) {
+        return Promise.resolve(jsonResponse(
+          Array.from(tokenText).map(function(ch){ return ch.charCodeAt(0); })
+        ));
+      }
+      if (path.indexOf('/decode') >= 0) {
+        var tokenIds = Array.isArray(data.tokens) ? data.tokens : [];
+        return Promise.resolve(jsonResponse(tokenIds.map(function(id){
+          return String.fromCharCode(Number(id) || 0);
+        }).join('')));
+      }
+      return Promise.resolve(jsonResponse({ count: Math.ceil(tokenText.length / 2) }));
+    }
     if (path.indexOf('/api/chats/get') >= 0) {
       return Promise.resolve(jsonResponse(chatFileData()));
     }
