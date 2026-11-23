@@ -23,11 +23,58 @@ from .models import RoomMember, Session
 
 # 通过属性的 module+name 判断，避免循环导入
 
+# 酒馆助手脚本可达十几 MB，只应在角色库里存一份；会话副本落盘/下发时剥离，
+# 读取时再从库主卡补回。否则单个会话 JSON 能到 30MB+，多请求并发直接 OOM。
+_HEAVY_EXT_KEYS = ("tavern_helper", "TavernHelper")
+
+
+def strip_heavy_extensions(data: Optional[dict]) -> Optional[dict]:
+    """返回去掉 tavern_helper 的角色 dict 副本（不改原对象）。"""
+    if not isinstance(data, dict):
+        return data
+    extensions = data.get("extensions")
+    if not isinstance(extensions, dict):
+        return data
+    if not any(key in extensions for key in _HEAVY_EXT_KEYS):
+        return data
+    trimmed = {k: v for k, v in extensions.items() if k not in _HEAVY_EXT_KEYS}
+    out = dict(data)
+    out["extensions"] = trimmed
+    return out
+
+
+def _restore_heavy_extensions(char: Character, card_id: Optional[str], lore) -> None:
+    """会话副本剥离过的酒馆助手脚本，从库主卡补回（共享只读引用，不再深拷贝）。"""
+    if lore is None or not card_id:
+        return
+    root = lore.get_character(card_id)
+    if root is None or not isinstance(root.extensions, dict):
+        return
+    missing = [
+        key for key in _HEAVY_EXT_KEYS
+        if key not in (char.extensions or {}) and key in root.extensions
+    ]
+    if not missing:
+        return
+    extensions = dict(char.extensions or {})
+    for key in missing:
+        extensions[key] = root.extensions[key]
+    char.extensions = extensions
+
 
 def effective_character(session: Session, lore) -> Optional[Character]:
     """当前会话实际使用的角色：override 优先，否则库引用。"""
     if session.character_override:
-        return Character.from_dict(session.character_override)
+        char = Character.from_dict(session.character_override)
+        card_id = session.character_id
+        if not card_id:
+            # 旧会话顶层可能没同步，退到唯一 AI 座位的绑定卡
+            for member in session.members or []:
+                if not member.is_user and member.character_id:
+                    card_id = member.character_id
+                    break
+        _restore_heavy_extensions(char, card_id, lore)
+        return char
     if session.character_id:
         return lore.get_character(session.character_id)
     return None
@@ -67,7 +114,7 @@ def fork_character(session: Session, lore) -> Character:
     if base is None:
         raise ValueError("当前会话没有绑定角色，无法派生副本")
     copy = Character.from_dict(base.to_dict())
-    session.character_override = copy.to_dict()
+    set_character_override(session, copy)
     return copy
 
 
@@ -81,7 +128,7 @@ def fork_world(session: Session, lore) -> World:
 
 
 def set_character_override(session: Session, char: Character) -> None:
-    session.character_override = char.to_dict()
+    session.character_override = strip_heavy_extensions(char.to_dict())
 
 
 def set_world_override(session: Session, world: World) -> None:
@@ -106,7 +153,9 @@ def member_character(member, lore) -> Optional[Character]:
     if member is None:
         return None
     if member.override:
-        return Character.from_dict(member.override)
+        char = Character.from_dict(member.override)
+        _restore_heavy_extensions(char, member.character_id, lore)
+        return char
     if member.character_id:
         return lore.get_character(member.character_id)
     return None

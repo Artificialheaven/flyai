@@ -112,6 +112,7 @@ export const en = {
   cardAppReadOnly: 'Read-only',
   cardAppReadOnlyHint: 'Interactive cards are read-only: changes made inside the card are not saved to session variables.',
   cardAppVariablesTooLarge: 'Variable data is too large; the card shows an empty state.',
+  cardSyncProgress: 'Syncing card data…',
   cardAppErrorBadge: 'Script errors: {count}',
   cardAppInteractive: 'Interactive',
   cardAppInteractiveHint: 'The card can act after you confirm each request; the root card stays read-only.',

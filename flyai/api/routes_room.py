@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from ..ids import InvalidName, check_safe_name
 from ..models_access import visible_providers
 from ..preset.apply import active_preset_regex_scripts
-from ..sessions.resolve import member_character
+from ..sessions.resolve import member_character, strip_heavy_extensions
 from ..user import ADMIN_UID
 from .routes_session import _session_dict
 
@@ -304,7 +304,7 @@ def update_member(rid: str, mid: str, body: MemberUpdate, request: Request):
     if body.attributes is not None:
         m.attributes = body.attributes
     if body.override is not None:
-        m.override = body.override
+        m.override = strip_heavy_extensions(body.override)
     if body.character_id is not None:
         # 设/改用户扮演的自设：校验角色存在；空串表示清除
         if body.character_id and not sc.lore.get_character(body.character_id):

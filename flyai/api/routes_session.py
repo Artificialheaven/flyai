@@ -32,6 +32,7 @@ from ..sessions.resolve import (
     room_base_signatures,
     set_character_override,
     set_world_override,
+    strip_heavy_extensions,
     user_seat,
 )
 
@@ -339,8 +340,8 @@ def session_fork(sid: str, request: Request):
             if base is None:
                 raise ValueError("当前会话没有绑定角色，无法派生副本")
             copy = Character.from_dict(base.to_dict())
-            m.override = copy.to_dict()
-            s.character_override = copy.to_dict()
+            m.override = strip_heavy_extensions(copy.to_dict())
+            s.character_override = strip_heavy_extensions(copy.to_dict())
         else:
             copy = fork_character(s, sc.lore)
     except ValueError as exc:
@@ -357,9 +358,19 @@ def session_set_character(sid: str, body: CharacterBody, request: Request):
     from ..lore.models import Character
 
     char = Character.from_dict(body.character or {})
+    # 响应里剥离了酒馆助手脚本（体积过大，只经 st.author 下发）；
+    # 编辑器回存时不带这段，这里从现有副本补回，避免丢失卡内脚本。
+    prev = getattr(s, "character_override", None)
+    prev_ext = prev.get("extensions") if isinstance(prev, dict) else None
+    prev_ext = prev_ext if isinstance(prev_ext, dict) else {}
+    incoming = char.extensions if isinstance(char.extensions, dict) else {}
+    for key in ("tavern_helper", "TavernHelper"):
+        if key not in incoming and key in prev_ext:
+            incoming[key] = copy.deepcopy(prev_ext[key])
+    char.extensions = incoming
     m = _single_ai_seat(s)
     if m is not None:
-        m.override = char.to_dict()
+        m.override = strip_heavy_extensions(char.to_dict())
     set_character_override(s, char)
     sc.store.save(s)
     eff = effective_character(s, sc.lore)
@@ -592,6 +603,8 @@ def st_write_mvu(sid: str, body: StMvuBody, request: Request):
 
 class StWorldBody(BaseModel):
     entries: List[Dict] = []
+    # 卡内运行时不需要回显整份条目表（大卡可达数 MB），可只回结果
+    compact: bool = False
 
 
 @router.post("/sessions/{sid}/st/world")
@@ -641,6 +654,8 @@ def st_write_world(sid: str, body: StWorldBody, request: Request):
     s.world_override = override
     # 不能用 save_merged：world_override 在 MERGED_FIELDS 里，回填会把本次写入抹掉
     sc.store.save(s)
+    if body.compact:
+        return {"ok": True, "scoped": True}
     return {"entries": entries, "scoped": True}
 
 
@@ -933,6 +948,8 @@ async def author_generate(sid: str, body: AuthorGenerateBody, request: Request):
 
 class StCharacterBody(BaseModel):
     fields: Dict = {}
+    # 角色副本可能带十几 MB 的 extensions；卡内运行时不需要回显整卡
+    compact: bool = False
 
 
 @router.post("/sessions/{sid}/st/character")
@@ -976,11 +993,14 @@ def st_write_character(sid: str, body: StCharacterBody, request: Request):
         ]
     data.update(patch)
     char = Character.from_dict(data)
-    m.override = char.to_dict()
+    # 酒馆助手脚本只存库主卡一份；会话副本剥离，读取时再补回
+    m.override = strip_heavy_extensions(char.to_dict())
     # 顶层仅作镜像（导出/effective_character 与座位保持一致）
     s.character_override = copy.deepcopy(m.override)
     # 不能用 save_merged：character_override 在 MERGED_FIELDS 里，回填会抹掉镜像
     sc.store.save(s)
+    if body.compact:
+        return {"ok": True, "scoped": True}
     return {"character": char.to_dict(), "scoped": True}
 
 
@@ -1640,6 +1660,27 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
     }
 
 
+def _strip_heavy_extensions(char_dict):
+    """响应里去掉只经 st.author 下发一次的酒馆助手脚本，避免重复十几 MB。"""
+    if not isinstance(char_dict, dict) or not isinstance(char_dict.get("extensions"), dict):
+        return char_dict
+    extensions = dict(char_dict["extensions"])
+    if "tavern_helper" not in extensions and "TavernHelper" not in extensions:
+        return char_dict
+    extensions.pop("tavern_helper", None)
+    extensions.pop("TavernHelper", None)
+    out = dict(char_dict)
+    out["extensions"] = extensions
+    return out
+
+
+def _member_dict_for_client(m):
+    d = m.to_dict()
+    if isinstance(d.get("override"), dict):
+        d["override"] = _strip_heavy_extensions(d["override"])
+    return d
+
+
 def _session_dict(s, with_messages: bool = False, lore=None,
                   user_settings=None, cfg=None, level: int = 0,
                   is_admin: bool = False, preset_scripts=None):
@@ -1654,7 +1695,7 @@ def _session_dict(s, with_messages: bool = False, lore=None,
         "updated_at": s.updated_at,
         "attributes": s.attributes,
         "scoped": is_character_scoped(s),
-        "members": [m.to_dict() for m in s.members],
+        "members": [_member_dict_for_client(m) for m in s.members],
         "threads": [t.to_dict() for t in s.threads],
         "token_usage": s.token_usage or {},
         "mode": getattr(s, "mode", "normal") or "normal",
@@ -1670,14 +1711,7 @@ def _session_dict(s, with_messages: bool = False, lore=None,
             char = effective_character(s, lore)
             world = effective_world(s, lore)
             user_char = member_character(user_seat(s), lore)
-            char_dict = char.to_dict() if char else None
-            # tavern_helper 脚本体积大且只应由 st.author 下发一次；
-            # 角色对象里去掉正文，避免同一份脚本在响应里重复出现。
-            if char_dict is not None and isinstance(char_dict.get("extensions"), dict):
-                extensions = dict(char_dict["extensions"])
-                extensions.pop("tavern_helper", None)
-                extensions.pop("TavernHelper", None)
-                char_dict["extensions"] = extensions
+            char_dict = _strip_heavy_extensions(char.to_dict() if char else None)
             d["character"] = char_dict
             d["world"] = world.to_dict() if world else None
             # 展示侧宏展开 {{user}} 用；与提示词侧回退值保持一致

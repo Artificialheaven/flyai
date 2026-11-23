@@ -14,6 +14,7 @@ from ..config import PROJECT_ROOT
 from ..ids import safe_child
 from ..schemas import Message
 from .models import RoomMember, Session, Thread, bootstrap_room
+from .resolve import strip_heavy_extensions
 from .store import SessionStore
 from .versions import heal_thread
 
@@ -112,6 +113,14 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
     )
 
 
+def _member_dict(m: RoomMember) -> Dict:
+    data = m.to_dict()
+    if isinstance(data.get("override"), dict):
+        # 酒馆助手脚本只存库主卡一份；会话副本落盘时剥离（读取时补回）
+        data["override"] = strip_heavy_extensions(data["override"])
+    return data
+
+
 def session_to_dict(session: Session) -> Dict:
     """会话完整序列化（存档点快照同样使用此结构）。"""
     return {
@@ -124,9 +133,9 @@ def session_to_dict(session: Session) -> Dict:
         "updated_at": session.updated_at,
         "messages": [m.to_dict() for m in session.messages],
         "attributes": session.attributes,
-        "character_override": session.character_override,
+        "character_override": strip_heavy_extensions(session.character_override),
         "world_override": session.world_override,
-        "members": [m.to_dict() for m in session.members],
+        "members": [_member_dict(m) for m in session.members],
         "threads": [t.to_dict() for t in session.threads],
         "pinned": session.pinned,
         "token_usage": session.token_usage or {},

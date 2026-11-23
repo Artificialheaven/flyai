@@ -2028,7 +2028,15 @@ export const buildCardAppShim = (
       var out = {};
       for (var i = 0; i < slots.length; i += 1) {
         var slot = slots[i] || {};
-        if (slot.title && slot.uid != null) out[String(slot.title)] = slot;
+        if (slot.uid == null) continue;
+        if (slot.title) out[String(slot.title)] = slot;
+        // 约会大作战的 manifest 用 path 声明槽位；酒馆世界书按文件名识别，
+        // 两种写法都要能对上，否则角色书里的标题匹配不到 uid。
+        if (typeof slot.path === 'string') {
+          var base = slot.path.split('/').pop() || '';
+          if (base.slice(-3) === '.md') base = base.slice(0, -3);
+          if (base && !out[base]) out[base] = slot;
+        }
       }
       return out;
     } catch (e) {
@@ -2036,26 +2044,58 @@ export const buildCardAppShim = (
     }
   }
   function worldbookFromCharacter(){
-    var table = CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
+    return buildWorldbookFromRows(CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
       ? CHARACTER_FIELDS.table
-      : [];
-    if (!table.length) return { entries: {} };
+      : []);
+  }
+  function buildWorldbookFromRows(table){
     var named = characterWorldSlots();
     var entries = {};
+    // 先按 manifest 预置槽位：即使角色书里暂时没有对应条目，卡的 readSlots
+    // 也能读到完整 uid 列表，不会因为缺少槽位直接失败。
+    for (var key in named) {
+      if (!Object.prototype.hasOwnProperty.call(named, key)) continue;
+      var pre = named[key];
+      if (!pre || pre.uid == null) continue;
+      var preUid = Number(pre.uid);
+      if (!isFinite(preUid) || entries[preUid]) continue;
+      entries[preUid] = {
+        uid: preUid,
+        comment: String(pre.title || key),
+        key: [],
+        content: '',
+        constant: !!pre.constant,
+        disable: false,
+        position: 0,
+        depth: 4,
+        order: 100,
+        probability: 100
+      };
+    }
     for (var i = 0; i < table.length; i += 1) {
       var item = table[i] || {};
       var title = String(item.title == null ? '' : item.title);
       var slot = named[title];
-      var uid = slot ? Number(slot.uid) : i + 1;
-      if (!isFinite(uid) || uid < 0) uid = i + 1;
+      var content = String(item.content == null ? '' : item.content);
+      var keys = Array.isArray(item.keys) ? item.keys.slice() : [];
+      if (slot && slot.uid != null && entries[Number(slot.uid)]) {
+        var target = entries[Number(slot.uid)];
+        target.content = content;
+        target.key = keys;
+        target.depth = Number(item.depth == null ? 4 : item.depth);
+        target.order = Number(item.insert_order == null ? 100 : item.insert_order);
+        continue;
+      }
+      // 非槽位条目放进高段 uid，避免占用 manifest 预留的编号
+      var uid = 100000 + i;
       while (entries[uid]) uid += 1;
       entries[uid] = {
         uid: uid,
         comment: title || String(uid),
-        key: Array.isArray(item.keys) ? item.keys.slice() : [],
-        content: String(item.content == null ? '' : item.content),
-        constant: slot ? !!slot.constant : !!item.pinned,
-        disable: false,
+        key: keys,
+        content: content,
+        constant: !!item.pinned,
+        disable: item.enabled === false,
         position: 0,
         depth: Number(item.depth == null ? 4 : item.depth),
         order: Number(item.insert_order == null ? 100 : item.insert_order),
@@ -2068,13 +2108,20 @@ export const buildCardAppShim = (
     var key = String(name || primaryWorldName());
     var book = WORLDBOOKS[key];
     var hasEntries = book && book.entries && Object.keys(book.entries).length > 0;
-    if (!book || (!hasEntries && key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table)) {
-      book = key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table
-        ? worldbookFromCharacter()
-        : (book || { entries: {} });
+    if (hasEntries) return book;
+    if (key === primaryWorldName()) {
+      // 宿主副本优先：会话世界书副本（写回目标）比角色卡原始 table 新，
+      // 重载/重建 iframe 后应读到刚写进去的内容。
+      if (Array.isArray(WORLD_ENTRIES) && WORLD_ENTRIES.length) {
+        book = buildWorldbookFromRows(WORLD_ENTRIES);
+      } else if (CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)) {
+        book = worldbookFromCharacter();
+      } else {
+        book = book || { entries: {} };
+      }
       WORLDBOOKS[key] = book;
     }
-    return book;
+    return book || { entries: {} };
   }
   function worldbookEntries(data){
     return STCORE.worldbookHostEntries(data);

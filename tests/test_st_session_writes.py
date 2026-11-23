@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from flyai.agent.runs import ChatRunManager
 from flyai.api.routes_session import (
     AuthorStateBody,
+    CharacterBody,
     StCharacterBody,
     StChatMetadataBody,
     StMessageCreate,
@@ -21,6 +22,7 @@ from flyai.api.routes_session import (
     StMvuBody,
     StWorldBody,
     author_state,
+    session_set_character,
     st_get_chat_metadata,
     st_patch_messages,
     st_set_chat_metadata,
@@ -29,6 +31,7 @@ from flyai.api.routes_session import (
     st_write_world,
 )
 from flyai.lore.models import Character, LoreEntry, World
+from flyai.sessions.resolve import effective_character
 from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore
 from flyai.sessions.models import RoomMember, Session, Thread
@@ -310,6 +313,17 @@ def test_world_write_replaces_existing_override(tmp_path):
     assert lore._worlds["w1"].table[0].title == "原始"
 
 
+def test_world_write_compact_skips_echo(tmp_path):
+    request, _lore, store, s = _world_env(tmp_path)
+    out = st_write_world(
+        s.id,
+        StWorldBody(entries=[{"title": "一", "content": "1"}], compact=True),
+        request,
+    )
+    assert out == {"ok": True, "scoped": True}
+    assert store.get(s.id).world_override["table"][0]["title"] == "一"
+
+
 def test_world_write_without_binding_is_400(tmp_path):
     _state, _sc, request, _lore, store = _env(tmp_path)
     s, _m, _t = _dm(store)
@@ -360,6 +374,42 @@ def test_character_write_whitelist_and_root_untouched(tmp_path):
     assert seat.override["avatar"] == "a.png"
     assert seat.override["parent_id"] == "root"
     assert lore._chars["c1"].to_dict() == before
+
+
+def test_character_write_compact_skips_echo(tmp_path):
+    char = Character(id="c1", name="原名", extensions={"big": "x" * 1000})
+    _state, _sc, request, _lore, store = _env(tmp_path, chars=[char])
+    s, _m, _t = _dm(store, char)
+
+    out = st_write_character(
+        s.id, StCharacterBody(fields={"intro": "新"}, compact=True), request)
+    assert out == {"ok": True, "scoped": True}
+    s2 = store.get(s.id)
+    seat = [x for x in s2.members if not x.is_user][0]
+    assert seat.override["intro"] == "新"
+
+
+def test_character_override_put_keeps_stripped_tavern_helper(tmp_path):
+    """响应剥离了 tavern_helper；编辑器回存时服务端要补回，不能丢卡内脚本。"""
+    ext = {"tavern_helper": {"scripts": [{"id": "s1", "content": "x"}]}, "world": "w"}
+    char = Character(id="c1", name="原名", extensions=copy.deepcopy(ext))
+    _state, _sc, request, _lore, store = _env(tmp_path, chars=[char])
+    s, m, _t = _dm(store, char)
+    m.override = char.to_dict()
+    s.character_override = copy.deepcopy(m.override)
+    store.save(s)
+
+    payload = char.to_dict()
+    payload["extensions"] = {"world": "w"}  # 客户端拿到的剥壳版本
+    payload["name"] = "新名"
+    session_set_character(s.id, CharacterBody(character=payload), request)
+
+    s2 = store.get(s.id)
+    assert s2.character_override["name"] == "新名"
+    # 落盘副本不带十几 MB 的脚本，读取时从库主卡补回
+    assert "tavern_helper" not in s2.character_override["extensions"]
+    eff = effective_character(s2, _lore)
+    assert eff.extensions["tavern_helper"]["scripts"][0]["id"] == "s1"
 
 
 def test_character_write_normalizes_table(tmp_path):

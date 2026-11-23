@@ -110,6 +110,10 @@ import {
   IconTrashOutline16,
 } from '../base/icons.js'
 import { CardActionDialog, type CardConfirmRequest } from '../messages/CardActionDialog.js'
+import {
+  beginCardActivity,
+  endCardActivity,
+} from '../../services/st/cardActivity.js'
 import styles from './CardAppFrame.module.css'
 
 const MIN_HEIGHT = 120
@@ -494,26 +498,29 @@ export const CardAppFrame = memo(function CardAppFrame({
           }
           return { ok: true }
         }
-        if (intent.kind === 'vars') {
-          await writeSessionMvu(
-            target.sessionId,
-            intent.mode === 'patch'
-              ? { mode: 'patch', ops: intent.ops, thread_id: target.threadId }
-              : { mode: 'replace', stat_data: intent.stat_data, thread_id: target.threadId }
-          )
-        } else if (intent.kind === 'world') {
-          // 没有绑定独立世界书时，酒馆的「主世界书」实际是角色卡内嵌书，
-          // 写回落到角色副本的 table，避免 world-not-bound 直接失败。
-          const worldbook = target.writeContext?.worldbook
-          if (!worldbook || !worldbook.name) {
-            await writeSessionCharacter(target.sessionId, { table: intent.entries })
-          } else {
+        // 大卡片的世界书/变量写入可能要几秒：头部下沿显示非阻塞进度条
+        beginCardActivity(t('cardSyncProgress'))
+        try {
+          if (intent.kind === 'vars') {
+            await writeSessionMvu(
+              target.sessionId,
+              intent.mode === 'patch'
+                ? { mode: 'patch', ops: intent.ops, thread_id: target.threadId }
+                : { mode: 'replace', stat_data: intent.stat_data, thread_id: target.threadId }
+            )
+          } else if (intent.kind === 'world') {
+            // 统一写会话世界书副本：后端在未绑定时会从角色卡内嵌书派生一份，
+            // 不再把整张 table（大卡可达数十 MB）塞进角色副本。
             await writeSessionWorld(target.sessionId, intent.entries)
+          } else {
+            await writeSessionCharacter(target.sessionId, intent.fields)
           }
-        } else {
-          await writeSessionCharacter(target.sessionId, intent.fields)
+          // 不再在每个写入意图后整包重载会话：大卡会话可达数十 MB，
+          // 同步 GET 会卡住卡片的连续写入（开场写 2 个槽位就要两次），
+          // 卡内读侧以自身缓存为准，界面在下次正常刷新/生成时对齐。
+        } finally {
+          endCardActivity()
         }
-        await reloadSession(target.sessionId)
         return { ok: true }
       } catch (err) {
         const status = err instanceof FlyApiError ? err.status : 0
@@ -591,6 +598,7 @@ export const CardAppFrame = memo(function CardAppFrame({
         reply({ ok: true, result: { updated: [], created: [] } })
         return
       }
+      beginCardActivity(t('cardSyncProgress'))
       try {
         const result = await request<{
           updated?: string[]
@@ -630,9 +638,11 @@ export const CardAppFrame = memo(function CardAppFrame({
           ok: false,
           error: status === 403 || status === 409 ? CARD_CODE_UNAVAILABLE : CARD_CODE_ACTION_FAILED,
         })
+      } finally {
+        endCardActivity()
       }
     },
-    [postToCard]
+    [postToCard, t]
   )
 
   /**

@@ -9,34 +9,87 @@ import {
 } from './client.js'
 import { downloadBlob } from '../native.js'
 import { invalidateCatalog, loadCatalog } from './catalogCache.js'
-import type { AttributeDef, Character, World } from './types.js'
+import { readLoreDetail, writeLoreDetail } from './loreDetailCache.js'
+import type {
+  AttributeDef,
+  Character,
+  CharacterSummary,
+  World,
+  WorldSummary,
+} from './types.js'
 
 /** 角色卡 / 世界观：登录态（Bearer）由 request 统一注入。 */
 
-export const listCharacters = (options?: { force?: boolean }): Promise<Character[]> =>
+/** 写接口会带回文件 md5：顺手把整卡写进本地缓存，下次打开直接命中 */
+type WithDigest<T> = T & { md5?: string }
+
+const rememberCharacter = (character: WithDigest<Character> | null | undefined) => {
+  if (character && character.id && character.md5) {
+    void writeLoreDetail('character', character.id, character.md5, character)
+  }
+}
+
+const rememberWorld = (world: WithDigest<World> | null | undefined) => {
+  if (world && world.id && world.md5) {
+    void writeLoreDetail('world', world.id, world.md5, world)
+  }
+}
+
+/**
+ * 内容库列表：只取轻量摘要（不含 table/extensions 等大字段）。
+ * 15MB 级的酒馆卡走全量 to_dict 会把列表接口拖到几十秒，编辑器再按 id 拉详情。
+ */
+export const listCharacters = (options?: { force?: boolean }): Promise<CharacterSummary[]> =>
   loadCatalog(
     'characters',
     async () => {
-      const data = await request<{ characters: Character[] }>('/api/characters')
+      const data = await request<{ characters: CharacterSummary[] }>(
+        '/api/characters?summary=1'
+      )
       return data.characters ?? []
     },
     options
   )
 
+/**
+ * 单张角色卡完整数据（编辑器 / 副本操作前按需拉取）。
+ * 传入列表里的 md5 时先查本地整卡缓存：一致就不再下载大 JSON。
+ */
+export const getCharacter = async (cid: string, md5?: string): Promise<Character> => {
+  if (md5) {
+    const cached = await readLoreDetail<Character>('character', cid, md5)
+    if (cached) {
+      return cached
+    }
+  }
+  const character = await request<Character>(
+    `/api/characters/${encodeURIComponent(cid)}`
+  )
+  if (md5) {
+    void writeLoreDetail('character', cid, md5, character)
+  }
+  return character
+}
+
 export const createCharacter = async (body: Partial<Character>): Promise<Character> => {
-  const character = await request<Character>('/api/characters', {
+  const character = await request<WithDigest<Character>>('/api/characters', {
     method: 'POST',
     body: JSON.stringify(body),
   })
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
 
 export const updateCharacter = async (cid: string, body: Partial<Character>): Promise<Character> => {
-  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}`, {
-    method: 'PUT',
-    body: JSON.stringify(body),
-  })
+  const character = await request<WithDigest<Character>>(
+    `/api/characters/${encodeURIComponent(cid)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }
+  )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -50,9 +103,11 @@ export const deleteCharacter = async (cid: string): Promise<void> => {
 
 /** 把可见（含共享）卡复制为自己的独立根角色卡 */
 export const forkCharacter = async (cid: string): Promise<Character> => {
-  const character = await request<Character>(`/api/characters/${encodeURIComponent(cid)}/fork`, {
-    method: 'POST',
-  })
+  const character = await request<WithDigest<Character>>(
+    `/api/characters/${encodeURIComponent(cid)}/fork`,
+    { method: 'POST' }
+  )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -71,27 +126,47 @@ export const unpublishCharacter = async (cid: string): Promise<void> => {
   invalidateCatalog('characters')
 }
 
-export const listWorlds = (options?: { force?: boolean }): Promise<World[]> =>
+export const listWorlds = (options?: { force?: boolean }): Promise<WorldSummary[]> =>
   loadCatalog(
     'worlds',
     async () => {
-      const data = await request<{ worlds: World[] }>('/api/worlds')
+      const data = await request<{ worlds: WorldSummary[] }>('/api/worlds?summary=1')
       return data.worlds ?? []
     },
     options
   )
 
+/** 单个世界观完整数据（编辑器 / 导出前按需拉取）；md5 命中本地缓存时走本地。 */
+export const getWorld = async (wid: string, md5?: string): Promise<World> => {
+  if (md5) {
+    const cached = await readLoreDetail<World>('world', wid, md5)
+    if (cached) {
+      return cached
+    }
+  }
+  const world = await request<World>(`/api/worlds/${encodeURIComponent(wid)}`)
+  if (md5) {
+    void writeLoreDetail('world', wid, md5, world)
+  }
+  return world
+}
+
 export const createWorld = async (body: Partial<World>): Promise<World> => {
-  const world = await request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })
+  const world = await request<WithDigest<World>>('/api/worlds', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }
 
 export const updateWorld = async (wid: string, body: Partial<World>): Promise<World> => {
-  const world = await request<World>(`/api/worlds/${encodeURIComponent(wid)}`, {
+  const world = await request<WithDigest<World>>(`/api/worlds/${encodeURIComponent(wid)}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }
@@ -112,14 +187,16 @@ const fetchBlob = async (path: string): Promise<Blob> => {
 const safeName = (name: string) =>
   (name || 'card').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 60) || 'card'
 
-export const exportCharacter = async (character: Character): Promise<void> => {
+type Exportable = { id: string; name?: string; alias?: string }
+
+export const exportCharacter = async (character: Exportable): Promise<void> => {
   const blob = await fetchBlob(`/api/characters/${encodeURIComponent(character.id)}/export`)
-  await downloadBlob(blob, `${safeName(character.name || character.alias)}.json`)
+  await downloadBlob(blob, `${safeName(character.name || character.alias || '')}.json`)
 }
 
-export const exportWorld = async (world: World): Promise<void> => {
+export const exportWorld = async (world: Exportable): Promise<void> => {
   const blob = await fetchBlob(`/api/worlds/${encodeURIComponent(world.id)}/export`)
-  await downloadBlob(blob, `${safeName(world.name)}.json`)
+  await downloadBlob(blob, `${safeName(world.name || '')}.json`)
 }
 
 const uploadFile = <T>(
@@ -137,11 +214,10 @@ export const importCharacterCard = async (
   file: File,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<Character> => {
-  const character = await uploadFile<Character>(
-    '/api/characters/import-card',
-    file,
-    onProgress
-  )
+  const character = await uploadFile<
+    WithDigest<Character> & { character?: WithDigest<Character> }
+  >('/api/characters/import-card', file, onProgress)
+  rememberCharacter(character.character ?? character)
   invalidateCatalog('characters')
   return character
 }
@@ -170,11 +246,12 @@ export const importCharacterJson = async (
       ? envelope.data
       : parsed
   const type = typeof envelope.type === 'string' && envelope.type ? envelope.type : 'character'
-  const character = await uploadRequest<Character>(
+  const character = await uploadRequest<WithDigest<Character>>(
     '/api/characters/import',
     JSON.stringify({ type, data }),
     { contentType: 'application/json', onProgress }
   )
+  rememberCharacter(character)
   invalidateCatalog('characters')
   return character
 }
@@ -183,11 +260,12 @@ export const importWorldbook = async (
   file: File,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<{ world: World; stats: Record<string, unknown> }> => {
-  const result = await uploadFile<{ world: World; stats: Record<string, unknown> }>(
-    '/api/worlds/import-worldbook',
-    file,
-    onProgress
-  )
+  const result = await uploadFile<{
+    world: World
+    stats: Record<string, unknown>
+    md5?: string
+  }>('/api/worlds/import-worldbook', file, onProgress)
+  rememberWorld({ ...result.world, md5: result.md5 })
   invalidateCatalog('worlds')
   return result
 }
@@ -207,10 +285,12 @@ export const importWorldJson = async (
     parsed && typeof parsed === 'object' && 'data' in parsed
       ? (parsed as { data: Partial<World> }).data
       : (parsed as Partial<World>)
-  const world = await uploadRequest<World>('/api/worlds', JSON.stringify(data), {
-    contentType: 'application/json',
-    onProgress,
-  })
+  const world = await uploadRequest<WithDigest<World>>(
+    '/api/worlds',
+    JSON.stringify(data),
+    { contentType: 'application/json', onProgress }
+  )
+  rememberWorld(world)
   invalidateCatalog('worlds')
   return world
 }

@@ -33,19 +33,20 @@ export const writeSessionMvu = (
 export const writeSessionWorld = (
   sessionId: string,
   entries: unknown[]
-): Promise<{ entries: unknown[]; scoped: boolean }> =>
+): Promise<{ entries?: unknown[]; scoped: boolean }> =>
   request(`/api/sessions/${encodeURIComponent(sessionId)}/st/world`, {
     method: 'POST',
-    body: JSON.stringify({ entries }),
+    // compact：大卡条目表可达数 MB，卡内运行时不需要回显
+    body: JSON.stringify({ entries, compact: true }),
   })
 
 export const writeSessionCharacter = (
   sessionId: string,
   fields: Record<string, unknown>
-): Promise<{ character: Character; scoped: boolean }> =>
+): Promise<{ character?: Character; scoped: boolean }> =>
   request(`/api/sessions/${encodeURIComponent(sessionId)}/st/character`, {
     method: 'POST',
-    body: JSON.stringify({ fields }),
+    body: JSON.stringify({ fields, compact: true }),
   })
 
 export type NetProxyPayload = {

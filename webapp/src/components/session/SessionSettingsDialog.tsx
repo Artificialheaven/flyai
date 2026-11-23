@@ -11,7 +11,7 @@ import {
   saveSessionCharacter,
 } from '../../services/flyai/rooms.js'
 import { getSession as fetchSessionDetail } from '../../services/flyai/sessions.js'
-import type { Character, World } from '../../services/flyai/types.js'
+import type { Character, CharacterSummary, WorldSummary } from '../../services/flyai/types.js'
 import { downloadBlob } from '../../services/native.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
@@ -33,8 +33,8 @@ export const SessionSettingsDialog = ({
 }) => {
   const t = useTranslate()
   const session = useChatStore((state) => state.sessionCache[sessionId])
-  const [characters, setCharacters] = useState<Character[]>([])
-  const [worlds, setWorlds] = useState<World[]>([])
+  const [characters, setCharacters] = useState<CharacterSummary[]>([])
+  const [worlds, setWorlds] = useState<WorldSummary[]>([])
   const [scopedChar, setScopedChar] = useState<Character | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')

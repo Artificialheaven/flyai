@@ -111,6 +111,9 @@ def test_import_materializes_embedded_avatar(tmp_path):
 
     assert out["name"] == "新卡"
     assert out["author"] == "admin"  # 服务端强制
+    # 导入响应带整卡 md5：前端上传后可直接写本地缓存
+    assert len(out["md5"]) == 32
+    assert out["md5"] == sc.lore.character_digest(out["id"])
     assert out["public"] is False
     assert "avatar_image" not in out
     avatar = out["avatar"]
