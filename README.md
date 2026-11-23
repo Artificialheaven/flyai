@@ -19,14 +19,15 @@
 <p align="center">
   <a href="docs/使用教程.md"><b>📖 使用教程</b></a> ·
   <a href="docs/酒馆卡兼容矩阵.md">🃏 酒馆卡兼容矩阵</a> ·
-  <a href="docs/酒馆EJS提示词模板兼容方案.md">🧩 EJS 模板方案</a>
+  <a href="docs/酒馆EJS提示词模板兼容方案.md">🧩 EJS 模板方案</a> ·
+  <a href="docs/ST原生宿主仿真方案.md">🛠 ST 原生宿主方案</a>
 </p>
 
 ---
 
 FlyAI 是一个**可自托管、数据本地优先**的 AI 角色扮演聊天平台。后端是单进程 FastAPI 服务，前端为 React 18 + TypeScript 单页应用（Rspack 构建），对话记录、角色卡、素材与配置全部保存在本机；同一套前端也可以通过 Capacitor 打包成 Android 应用。
 
-项目同时兼容大量 SillyTavern（酒馆）生态格式：角色卡、世界书、OpenAI 预设、正则脚本、TavernHelper 作者脚本与 EJS 提示词模板。
+项目同时兼容大量 SillyTavern（酒馆）生态格式：角色卡、世界书、OpenAI 预设、正则脚本、TavernHelper 作者脚本与 EJS 提示词模板。酒馆兼容层由共享 ES5 核心、两个沙箱运行时（消息卡片 / 作者面板）与宿主桥组成，并正在补齐 ST 原生宿主接口，让小手机、终端等自带运行时的卡也能原样工作。
 
 ## 主要能力
 
@@ -43,6 +44,11 @@ FlyAI 是一个**可自托管、数据本地优先**的 AI 角色扮演聊天平
 - **卡片沙箱**：卡内整页 HTML+JS 在独立 iframe 中运行；卡内图片与网络请求可经服务端受控代理（`st_image` / `st_net`），带 SSRF 防护与限流。
 - **TavernHelper 作者脚本**：角色卡内的脚本树在沙箱 iframe 中执行，服务端只负责抽取、限额与下发，绝不执行卡内 JS。
 - **EJS 提示词模板（方案 B）**：客户端执行 EJS，服务端负责权限、原文哈希、ops 校验与原子落盘；输出侧执行需单独授权。
+- **共享兼容核心**：`compat/stCore.js` 统一消息、变量、世界书、事件与存储语义，消息卡片与作者面板两个运行时共用，避免 API 分叉。
+- **卡内消息桥**：`getChatMessages` / `createChatMessages` / `setChatMessages` / `deleteChatMessages` / `rotateChatMessages` 可读写当前会话；新楼层先落库再生成，`message.extra`（如小手机的 `dal_phone_source`）持久化为 `st_extra`，刷新后楼层身份不变。
+- **沙箱存储与存档身份**：`localStorage` / `sessionStorage` 由会话 `chat_metadata` 承载；补齐 `chat_metadata.integrity` 并提供进程内 IndexedDB 桩，供扩展日志、媒体库与存档识别使用。
+- **卡内运行时**：`context().chat` 稳定镜像、`saveChat` / `saveMetadata` 回写、`context.generate` 静默生成；约会大作战小手机等自带运行时的卡可直接发送消息。
+- **ST 原生宿主仿真（进行中）**：通过 import map 提供 `/script.js`、`world-info`、`power-user`、`extensions`、`regex`、`tokenizers`、`tags`、`lib`、`authors-note` 等模块与 `EjsTemplate`，让卡自带的原生运行时原样执行，逐步替代卡特定注入。
 - 对话压缩：AI 将历史归纳进设定，**先 diff 确认、后写入**，只写会话副本，不污染根卡。
 
 **🌐 工具与联网**
@@ -97,7 +103,7 @@ flyai/
 │   ├── proactor/           # 心情状态机与主动行为
 │   ├── mcp_client/         # 自研 stdlib MCP 客户端
 │   ├── sandbox/            # AI 文件沙箱
-│   ├── st/                 # 酒馆卡兼容（MVU / 正则 / 作者脚本 / 面板）
+│   ├── st/                 # 酒馆卡兼容（MVU / 正则 / 作者脚本 / 面板 / ST 原生宿主仿真）
 │   ├── template/           # EJS 提示词模板（方案 B）
 │   ├── providers/          # OpenAI 兼容 / Anthropic 适配
 │   ├── tools/              # 工具注册表与内置工具
@@ -207,7 +213,8 @@ npm run build:release # 需本地 keystore.properties 与签名密钥
 ## 安全说明
 
 - 仓库中**不包含**任何真实 API Key、管理员密码或签名密钥；`config/config.json`、`mobile/android/`、`*.jks` 均被忽略。
-- 服务端不执行角色卡内的 JavaScript：卡内应用与作者脚本运行在独立沙箱 iframe 中。
+- 服务端不执行角色卡内的 JavaScript：卡内应用与作者脚本运行在独立沙箱 iframe 中；iframe 为 opaque origin，读不到登录态，也不注入 Bearer token。
+- 卡内页面 CSP 默认 `connect-src 'none'`；网络请求必须经宿主桥与管理员策略（`st_image` / `st_net`）放行。
 - 联网工具与卡内网络代理均带 SSRF 防护（内网 / 本机地址拦截、DNS 重绑定与重定向逐跳校验）。
 - 工具、模型与语音能力支持按用户等级 0–255 门控；管理员权限最高。
 
@@ -216,6 +223,9 @@ npm run build:release # 需本地 keystore.properties 与签名密钥
 - [使用教程](docs/使用教程.md)
 - [酒馆卡兼容矩阵](docs/酒馆卡兼容矩阵.md)
 - [酒馆 EJS 提示词模板兼容方案](docs/酒馆EJS提示词模板兼容方案.md)
+- [ST 原生宿主仿真方案](docs/ST原生宿主仿真方案.md)
+- [SillyTavern 服务端接口清单](docs/SillyTavern服务端接口清单.md)
+- [酒馆助手全量 API 语义对照](docs/酒馆助手全量API语义对照.md)
 - [卡内只读数据桥方案](docs/卡内只读数据桥方案.md)
 - [Tide 能力移植技术书](docs/Tide能力移植技术书.md)
 - [APK 前端热更新方案书](docs/APK前端热更新方案书.md)
