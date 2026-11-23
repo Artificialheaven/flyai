@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { assetUrl } from '../../services/flyai/client.js'
 import { listCharacters } from '../../services/flyai/lore.js'
-import type { Character, RoomMember } from '../../services/flyai/types.js'
+import type { CharacterSummary, RoomMember } from '../../services/flyai/types.js'
 import {
   addRoomMember,
   publishRoomMember,
@@ -34,7 +34,7 @@ export const RoomMembersDialog = ({
 }) => {
   const t = useTranslate()
   const session = useChatStore((state) => state.sessionCache[sessionId])
-  const [characters, setCharacters] = useState<Character[]>([])
+  const [characters, setCharacters] = useState<CharacterSummary[]>([])
   const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState('')
   const [editing, setEditing] = useState('')

@@ -266,6 +266,33 @@ class Character:
             "assets": copy.deepcopy(list(self.assets or [])),
         }
 
+    def summary(self) -> Dict[str, Any]:
+        """内容库列表用的轻量结构：不含 table/extensions/assets 等大字段。"""
+        from .opening import opening_entries
+
+        openings = []
+        for entry in opening_entries(self):
+            title = (entry.title or "").strip()
+            text = " ".join((entry.content or "").split())
+            if title:
+                openings.append({"title": title, "preview": text[:40]})
+        return {
+            "id": self.id,
+            "name": self.name,
+            "avatar": self.avatar,
+            "intro": self.intro,
+            "alias": self.alias,
+            "author": self.author,
+            "public": self.public,
+            "parent_id": self.parent_id,
+            "voice": self.voice,
+            "alternate_greetings": [
+                str(g) for g in (self.alternate_greetings or []) if str(g).strip()
+            ],
+            "openings": openings,
+            "table_size": len(self.table),
+        }
+
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Character":
         return cls(
@@ -329,6 +356,16 @@ class World:
             "table": [e.to_dict() for e in self.table],
             "prompt_format": self.prompt_format,
             "prompt_tools": self.prompt_tools,
+        }
+
+    def summary(self) -> Dict[str, Any]:
+        """内容库列表用的轻量结构：不含逐条 table。"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "avatar": self.avatar,
+            "content": self.content,
+            "entry_count": len(self.table),
         }
 
     @classmethod

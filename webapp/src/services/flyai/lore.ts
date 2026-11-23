@@ -9,19 +9,35 @@ import {
 } from './client.js'
 import { downloadBlob } from '../native.js'
 import { invalidateCatalog, loadCatalog } from './catalogCache.js'
-import type { AttributeDef, Character, World } from './types.js'
+import type {
+  AttributeDef,
+  Character,
+  CharacterSummary,
+  World,
+  WorldSummary,
+} from './types.js'
 
 /** 角色卡 / 世界观：登录态（Bearer）由 request 统一注入。 */
 
-export const listCharacters = (options?: { force?: boolean }): Promise<Character[]> =>
+/**
+ * 内容库列表：只取轻量摘要（不含 table/extensions 等大字段）。
+ * 15MB 级的酒馆卡走全量 to_dict 会把列表接口拖到几十秒，编辑器再按 id 拉详情。
+ */
+export const listCharacters = (options?: { force?: boolean }): Promise<CharacterSummary[]> =>
   loadCatalog(
     'characters',
     async () => {
-      const data = await request<{ characters: Character[] }>('/api/characters')
+      const data = await request<{ characters: CharacterSummary[] }>(
+        '/api/characters?summary=1'
+      )
       return data.characters ?? []
     },
     options
   )
+
+/** 单张角色卡完整数据（编辑器 / 副本操作前按需拉取） */
+export const getCharacter = (cid: string): Promise<Character> =>
+  request<Character>(`/api/characters/${encodeURIComponent(cid)}`)
 
 export const createCharacter = async (body: Partial<Character>): Promise<Character> => {
   const character = await request<Character>('/api/characters', {
@@ -71,15 +87,19 @@ export const unpublishCharacter = async (cid: string): Promise<void> => {
   invalidateCatalog('characters')
 }
 
-export const listWorlds = (options?: { force?: boolean }): Promise<World[]> =>
+export const listWorlds = (options?: { force?: boolean }): Promise<WorldSummary[]> =>
   loadCatalog(
     'worlds',
     async () => {
-      const data = await request<{ worlds: World[] }>('/api/worlds')
+      const data = await request<{ worlds: WorldSummary[] }>('/api/worlds?summary=1')
       return data.worlds ?? []
     },
     options
   )
+
+/** 单个世界观完整数据（编辑器 / 导出前按需拉取） */
+export const getWorld = (wid: string): Promise<World> =>
+  request<World>(`/api/worlds/${encodeURIComponent(wid)}`)
 
 export const createWorld = async (body: Partial<World>): Promise<World> => {
   const world = await request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })
@@ -112,14 +132,16 @@ const fetchBlob = async (path: string): Promise<Blob> => {
 const safeName = (name: string) =>
   (name || 'card').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 60) || 'card'
 
-export const exportCharacter = async (character: Character): Promise<void> => {
+type Exportable = { id: string; name?: string; alias?: string }
+
+export const exportCharacter = async (character: Exportable): Promise<void> => {
   const blob = await fetchBlob(`/api/characters/${encodeURIComponent(character.id)}/export`)
-  await downloadBlob(blob, `${safeName(character.name || character.alias)}.json`)
+  await downloadBlob(blob, `${safeName(character.name || character.alias || '')}.json`)
 }
 
-export const exportWorld = async (world: World): Promise<void> => {
+export const exportWorld = async (world: Exportable): Promise<void> => {
   const blob = await fetchBlob(`/api/worlds/${encodeURIComponent(world.id)}/export`)
-  await downloadBlob(blob, `${safeName(world.name)}.json`)
+  await downloadBlob(blob, `${safeName(world.name || '')}.json`)
 }
 
 const uploadFile = <T>(

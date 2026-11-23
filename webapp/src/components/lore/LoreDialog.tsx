@@ -11,6 +11,8 @@ import {
   exportCharacter,
   exportWorld,
   forkCharacter,
+  getCharacter,
+  getWorld,
   importCharacterCard,
   importCharacterJson,
   importWorldJson,
@@ -33,10 +35,15 @@ import {
   type PresetCatalog,
 } from '../../services/flyai/presets.js'
 import { peekCatalog, subscribeCatalog } from '../../services/flyai/catalogCache.js'
-import type { Character, Preset, World } from '../../services/flyai/types.js'
+import type {
+  Character,
+  CharacterSummary,
+  Preset,
+  World,
+  WorldSummary,
+} from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
 import { regexScriptSide } from '../../services/st/regex.js'
-import { openingOptions } from '../room/openingEntries.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
@@ -60,8 +67,8 @@ import styles from './Lore.module.css'
 type View = { kind: 'list' } | { kind: 'character'; initial: Character | null } | { kind: 'world'; initial: World | null }
 
 type ConfirmTarget =
-  | { kind: 'character'; item: Character }
-  | { kind: 'world'; item: World }
+  | { kind: 'character'; item: CharacterSummary }
+  | { kind: 'world'; item: WorldSummary }
   | { kind: 'preset'; item: Preset }
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -82,12 +89,12 @@ const LoreContent = () => {
   const [view, setView] = useState<View>({ kind: 'list' })
   // 首帧直接用上次成功加载的目录，后台再刷新；三项都有缓存时不显示骨架
   const [initial] = useState(() => ({
-    characters: peekCatalog<Character[]>('characters'),
-    worlds: peekCatalog<World[]>('worlds'),
+    characters: peekCatalog<CharacterSummary[]>('characters'),
+    worlds: peekCatalog<WorldSummary[]>('worlds'),
     presets: peekCatalog<PresetCatalog>('presets'),
   }))
-  const [characters, setCharacters] = useState<Character[]>(initial.characters ?? [])
-  const [worlds, setWorlds] = useState<World[]>(initial.worlds ?? [])
+  const [characters, setCharacters] = useState<CharacterSummary[]>(initial.characters ?? [])
+  const [worlds, setWorlds] = useState<WorldSummary[]>(initial.worlds ?? [])
   const [presets, setPresets] = useState<Preset[]>(initial.presets?.presets ?? [])
   const [activePresetId, setActivePresetId] = useState(initial.presets?.activeId ?? '')
   const [loading, setLoading] = useState(
@@ -145,8 +152,8 @@ const LoreContent = () => {
 
   // 对话框开着时，别处（或后台刷新）更新目录也能同步到列表
   useEffect(() => {
-    const offCharacters = subscribeCatalog<Character[]>('characters', setCharacters)
-    const offWorlds = subscribeCatalog<World[]>('worlds', setWorlds)
+    const offCharacters = subscribeCatalog<CharacterSummary[]>('characters', setCharacters)
+    const offWorlds = subscribeCatalog<WorldSummary[]>('worlds', setWorlds)
     const offPresets = subscribeCatalog<PresetCatalog>('presets', (data) => {
       setPresets(data.presets)
       setActivePresetId(data.activeId)
@@ -164,7 +171,7 @@ const LoreContent = () => {
     setQuery('')
   }
 
-  const isShared = (character: Character) =>
+  const isShared = (character: { public?: boolean; author?: string }) =>
     Boolean(character.public && character.author !== uid)
 
   const filteredChars = useMemo(() => {
@@ -230,12 +237,12 @@ const LoreContent = () => {
     }
   }
 
-  const startChat = (character: Character) => {
+  const startChat = (character: CharacterSummary) => {
     // 有备选开场白或可选开局设定：转到新建房间弹窗（预选该卡）让用户挑；
-    // 都没有则保持一键直达。
+    // 都没有则保持一键直达。摘要里的 openings 已由后端按同一规则筛好。
     if (
       (character.alternate_greetings ?? []).some((greeting) => greeting.trim()) ||
-      openingOptions(character.table).length > 0
+      (character.openings ?? []).length > 0
     ) {
       closeLore()
       openNewRoom([character.id])
@@ -248,7 +255,20 @@ const LoreContent = () => {
     })
   }
 
-  const fork = (character: Character) =>
+  /** 编辑器需要整张卡：列表只缓存摘要，点开时再拉详情 */
+  const editCharacter = (character: CharacterSummary) =>
+    run(character.id, async () => {
+      const full = await getCharacter(character.id)
+      setView({ kind: 'character', initial: full })
+    })
+
+  const editWorld = (world: WorldSummary) =>
+    run(world.id, async () => {
+      const full = await getWorld(world.id)
+      setView({ kind: 'world', initial: full })
+    })
+
+  const fork = (character: CharacterSummary) =>
     run(character.id, async () => {
       const copy = await forkCharacter(character.id)
       await load()
@@ -256,7 +276,7 @@ const LoreContent = () => {
       showToast(t('loreForked'))
     })
 
-  const publish = (character: Character) =>
+  const publish = (character: CharacterSummary) =>
     run(character.id, async () => {
       if (character.public) {
         await unpublishCharacter(character.id)
@@ -267,12 +287,12 @@ const LoreContent = () => {
       showToast(character.public ? t('loreUnpublished') : t('lorePublished'))
     })
 
-  const exportChar = (character: Character) =>
+  const exportChar = (character: CharacterSummary) =>
     run(character.id, async () => {
       await exportCharacter(character)
     })
 
-  const exportWorldItem = (world: World) =>
+  const exportWorldItem = (world: WorldSummary) =>
     run(world.id, async () => {
       await exportWorld(world)
     })
@@ -444,7 +464,7 @@ const LoreContent = () => {
     setView({ kind: 'list' })
   }
 
-  const renderCharacterCard = (character: Character, shared: boolean) => (
+  const renderCharacterCard = (character: CharacterSummary, shared: boolean) => (
     <div className={styles.card} key={character.id}>
       {character.avatar ? (
         <img className={styles.avatar} src={assetUrl(character.avatar)} alt="" />
@@ -489,7 +509,8 @@ const LoreContent = () => {
             className={styles.iconAction}
             title={t('loreEdit')}
             aria-label={t('loreEdit')}
-            onClick={() => setView({ kind: 'character', initial: character })}
+            disabled={busyId === character.id}
+            onClick={() => void editCharacter(character)}
           >
             <IconEditOutline16 />
           </button>
@@ -529,7 +550,7 @@ const LoreContent = () => {
     </div>
   )
 
-  const renderWorldCard = (world: World) => (
+  const renderWorldCard = (world: WorldSummary) => (
     <div className={styles.card} key={world.id}>
       {world.avatar ? (
         <img className={styles.avatar} src={assetUrl(world.avatar)} alt="" />
@@ -541,7 +562,8 @@ const LoreContent = () => {
           <div className={styles.name}>{world.name || world.id}</div>
         </div>
         <div className={styles.sub}>
-          {subtitle(world.content) || t('loreEntryCount', { count: world.table?.length ?? 0 })}
+          {subtitle(world.content) ||
+            t('loreEntryCount', { count: world.entry_count ?? 0 })}
         </div>
       </div>
       <div className={styles.actions}>
@@ -550,7 +572,8 @@ const LoreContent = () => {
           className={styles.iconAction}
           title={t('loreEdit')}
           aria-label={t('loreEdit')}
-          onClick={() => setView({ kind: 'world', initial: world })}
+          disabled={busyId === world.id}
+          onClick={() => void editWorld(world)}
         >
           <IconEditOutline16 />
         </button>

@@ -168,8 +168,20 @@ def _max_card_bytes(request: Request) -> int:
 # ---- 角色 ----
 
 @router.get("/characters")
-def list_characters(request: Request):
-    return {"characters": [c.to_dict() for c in _state(request).lore.list_characters()]}
+def list_characters(request: Request, summary: bool = False):
+    chars = _state(request).lore.list_characters()
+    if summary:
+        return {"characters": [c.summary() for c in chars]}
+    return {"characters": [c.to_dict() for c in chars]}
+
+
+@router.get("/characters/{cid}")
+def get_character(cid: str, request: Request):
+    _safe_cid(cid)
+    c = _state(request).lore.get_character(cid)
+    if c is None:
+        raise HTTPException(404, "角色不存在")
+    return c.to_dict()
 
 
 @router.post("/characters")
@@ -349,8 +361,20 @@ def import_character(payload: LoreImportPayload, request: Request):
 # ---- 世界观 ----
 
 @router.get("/worlds")
-def list_worlds(request: Request):
-    return {"worlds": [w.to_dict() for w in _state(request).lore.list_worlds()]}
+def list_worlds(request: Request, summary: bool = False):
+    worlds = _state(request).lore.list_worlds()
+    if summary:
+        return {"worlds": [w.summary() for w in worlds]}
+    return {"worlds": [w.to_dict() for w in worlds]}
+
+
+@router.get("/worlds/{wid}")
+def get_world(wid: str, request: Request):
+    _safe_wid(wid)
+    w = _state(request).lore.get_world(wid)
+    if w is None:
+        raise HTTPException(404, "世界观不存在")
+    return w.to_dict()
 
 
 @router.post("/worlds")

@@ -248,6 +248,22 @@ export type World = {
   prompt_tools: string
 }
 
+/** 内容库列表用轻量角色卡（不含 table/extensions 等大字段） */
+export type CharacterOpening = { title: string; preview: string }
+export type CharacterSummary = Pick<
+  Character,
+  'id' | 'name' | 'avatar' | 'intro' | 'alias' | 'author' | 'public' | 'parent_id' | 'voice'
+> & {
+  alternate_greetings?: string[]
+  openings?: CharacterOpening[]
+  table_size?: number
+}
+
+/** 内容库列表用轻量世界观 */
+export type WorldSummary = Pick<World, 'id' | 'name' | 'avatar' | 'content'> & {
+  entry_count?: number
+}
+
 /** 预设 prompt 块（酒馆 prompt manager 概念）：main 并入系统提示、depth 插历史、tail 放在历史后 */
 export type PresetBlock = {
   name: string

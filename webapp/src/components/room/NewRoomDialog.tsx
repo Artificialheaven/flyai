@@ -4,7 +4,7 @@ import { useTranslate } from '../../i18n/index.js'
 import { assetUrl } from '../../services/flyai/client.js'
 import { useAuth } from '../../services/flyai/auth.js'
 import { listCharacters, listWorlds } from '../../services/flyai/lore.js'
-import type { Character, World } from '../../services/flyai/types.js'
+import type { CharacterSummary, WorldSummary } from '../../services/flyai/types.js'
 import { startRoomChat } from '../../services/chat/store.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
@@ -12,7 +12,6 @@ import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { IconCheckedOutline14 } from '../base/icons.js'
 import { closeNewRoom, useNewRoomDialog } from './newRoomState.js'
-import { openingOptions } from './openingEntries.js'
 import styles from './NewRoomDialog.module.css'
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -26,8 +25,8 @@ export const NewRoomDialog = () => {
 const NewRoomContent = () => {
   const t = useTranslate()
   const uid = useAuth((state) => state.user?.id ?? '')
-  const [characters, setCharacters] = useState<Character[]>([])
-  const [worlds, setWorlds] = useState<World[]>([])
+  const [characters, setCharacters] = useState<CharacterSummary[]>([])
+  const [worlds, setWorlds] = useState<WorldSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -104,11 +103,8 @@ const NewRoomContent = () => {
       .filter((item) => item.text)
   }, [singleCharacter])
 
-  // 开局设定候选（「开局*」「序章*」世界书条目）；多角色时后端会忽略
-  const openings = useMemo(
-    () => openingOptions(singleCharacter?.table),
-    [singleCharacter]
-  )
+  // 开局设定候选（「开局*」「序章*」世界书条目）；列表接口已按同一规则筛好
+  const openings = useMemo(() => singleCharacter?.openings ?? [], [singleCharacter])
 
   useEffect(() => {
     setGreetingIndex('0')
