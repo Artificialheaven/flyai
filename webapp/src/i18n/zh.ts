@@ -107,6 +107,7 @@ export const zh = {
   cardAppReadOnly: '只读',
   cardAppReadOnlyHint: '互动卡片为只读：卡内修改不会保存到会话变量。',
   cardAppVariablesTooLarge: '当前变量数据过大，卡片只显示空状态。',
+  cardSyncProgress: '正在同步卡片数据…',
   cardAppErrorBadge: '脚本错误 {count}',
   cardAppInteractive: '可交互',
   cardAppInteractiveHint: '卡片可在你逐次确认后发起动作；根卡始终只读。',

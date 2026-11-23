@@ -110,6 +110,7 @@ import {
   IconTrashOutline16,
 } from '../base/icons.js'
 import { CardActionDialog, type CardConfirmRequest } from '../messages/CardActionDialog.js'
+import { CardBusyBar } from '../base/CardBusyBar.js'
 import styles from './CardAppFrame.module.css'
 
 const MIN_HEIGHT = 120
@@ -252,6 +253,8 @@ export const CardAppFrame = memo(function CardAppFrame({
     count: 0,
     last: '',
   })
+  // 正在把卡内写入同步到会话副本的请求数；>0 时显示非阻塞进度条
+  const [busyOps, setBusyOps] = useState(0)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const hostRef = useRef<HTMLDivElement | null>(null)
   const cardHostRef = useRef<CardAppHost | undefined>(host)
@@ -494,26 +497,32 @@ export const CardAppFrame = memo(function CardAppFrame({
           }
           return { ok: true }
         }
-        if (intent.kind === 'vars') {
-          await writeSessionMvu(
-            target.sessionId,
-            intent.mode === 'patch'
-              ? { mode: 'patch', ops: intent.ops, thread_id: target.threadId }
-              : { mode: 'replace', stat_data: intent.stat_data, thread_id: target.threadId }
-          )
-        } else if (intent.kind === 'world') {
-          // 没有绑定独立世界书时，酒馆的「主世界书」实际是角色卡内嵌书，
-          // 写回落到角色副本的 table，避免 world-not-bound 直接失败。
-          const worldbook = target.writeContext?.worldbook
-          if (!worldbook || !worldbook.name) {
-            await writeSessionCharacter(target.sessionId, { table: intent.entries })
+        // 大卡片的世界书/变量写入 + 会话重载可能要几秒：显示非阻塞进度条
+        setBusyOps((count) => count + 1)
+        try {
+          if (intent.kind === 'vars') {
+            await writeSessionMvu(
+              target.sessionId,
+              intent.mode === 'patch'
+                ? { mode: 'patch', ops: intent.ops, thread_id: target.threadId }
+                : { mode: 'replace', stat_data: intent.stat_data, thread_id: target.threadId }
+            )
+          } else if (intent.kind === 'world') {
+            // 没有绑定独立世界书时，酒馆的「主世界书」实际是角色卡内嵌书，
+            // 写回落到角色副本的 table，避免 world-not-bound 直接失败。
+            const worldbook = target.writeContext?.worldbook
+            if (!worldbook || !worldbook.name) {
+              await writeSessionCharacter(target.sessionId, { table: intent.entries })
+            } else {
+              await writeSessionWorld(target.sessionId, intent.entries)
+            }
           } else {
-            await writeSessionWorld(target.sessionId, intent.entries)
+            await writeSessionCharacter(target.sessionId, intent.fields)
           }
-        } else {
-          await writeSessionCharacter(target.sessionId, intent.fields)
+          await reloadSession(target.sessionId)
+        } finally {
+          setBusyOps((count) => Math.max(0, count - 1))
         }
-        await reloadSession(target.sessionId)
         return { ok: true }
       } catch (err) {
         const status = err instanceof FlyApiError ? err.status : 0
@@ -591,6 +600,7 @@ export const CardAppFrame = memo(function CardAppFrame({
         reply({ ok: true, result: { updated: [], created: [] } })
         return
       }
+      setBusyOps((count) => count + 1)
       try {
         const result = await request<{
           updated?: string[]
@@ -630,6 +640,8 @@ export const CardAppFrame = memo(function CardAppFrame({
           ok: false,
           error: status === 403 || status === 409 ? CARD_CODE_UNAVAILABLE : CARD_CODE_ACTION_FAILED,
         })
+      } finally {
+        setBusyOps((count) => Math.max(0, count - 1))
       }
     },
     [postToCard]
@@ -1054,6 +1066,7 @@ export const CardAppFrame = memo(function CardAppFrame({
         fullscreen && styles.fullscreen
       )}
     >
+      {busyOps > 0 ? <CardBusyBar label={t('cardSyncProgress')} /> : null}
       {showToolbar && !chromeless ? (
         <div className={styles.toolbar}>
           <span className={styles.labelRow}>

@@ -1,0 +1,41 @@
+.bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 3px;
+  overflow: hidden;
+  pointer-events: none;
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.fill {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #6366f1, transparent);
+  animation: slide 1.1s ease-in-out infinite;
+}
+
+.label {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(79, 70, 229, 0.85);
+  white-space: nowrap;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}

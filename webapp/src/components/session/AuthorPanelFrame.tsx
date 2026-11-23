@@ -5,7 +5,8 @@
  * 消息文本与变量快照。高度通过 postMessage 自适应。
  */
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslate } from '../../i18n/index.js'
 import type { CardWriteContext, StAuthorPayload } from '../../services/flyai/types.js'
 import {
   writeSessionCharacter,
@@ -47,6 +48,7 @@ import {
   CardActionDialog,
   type CardConfirmRequest,
 } from '../messages/CardActionDialog.js'
+import { CardBusyBar } from '../base/CardBusyBar.js'
 
 const MIN_HEIGHT = 160
 const MAX_HEIGHT = 2400
@@ -97,9 +99,17 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   /** 当前会话是否正在生成；用于向卡内派发 GENERATION_* 事件 */
   streaming?: boolean
 }) {
+  const t = useTranslate()
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const [height, setHeight] = useState(INITIAL_HEIGHT)
   const [confirmRequest, setConfirmRequest] = useState<CardConfirmRequest | null>(null)
+  // 卡内写入世界书/变量/角色字段的并发计数；>0 时显示非阻塞进度条
+  const [busyOps, setBusyOps] = useState(0)
+  const beginBusy = useCallback(() => setBusyOps((count) => count + 1), [])
+  const endBusy = useCallback(
+    () => setBusyOps((count) => Math.max(0, count - 1)),
+    []
+  )
   const confirmResolve = useRef<((ok: boolean) => void) | null>(null)
   // 消息/变量变化不重建 iframe：作者脚本的标签页、主题与滚动位置要保留。
   const initialMessages = useRef(messages)
@@ -320,6 +330,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
       failAll('read-only')
       return
     }
+    beginBusy()
     void writeSessionMvu(sessionId, {
       mode: 'replace',
       stat_data: stat,
@@ -335,6 +346,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
       .catch((error) => {
         failAll(error instanceof Error ? error.message : String(error))
       })
+      .finally(endBusy)
   }
 
   const queueWrite = (id: string, stat: Record<string, unknown>) => {
@@ -413,6 +425,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
           postMessagesResult(id, { ok: true, result: { updated: [], created: [] } })
           return
         }
+        beginBusy()
         void request<{
           updated?: string[]
           created?: Array<{ id?: string; message_id?: number; role?: string }>
@@ -432,6 +445,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
               error: error instanceof Error ? error.message : String(error),
             })
           })
+          .finally(endBusy)
         return
       }
       if (data.type === AUTHOR_MSG_GENERATE_MAIN && sessionId) {
@@ -477,19 +491,25 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         return
       }
       if (data.type === AUTHOR_MSG_WRITE_WORLD && canWrite && sessionId && Array.isArray((data as { entries?: unknown }).entries)) {
+        beginBusy()
         void writeSessionWorld(
           sessionId,
           (data as { entries: unknown[] }).entries
-        ).catch(() => {})
+        )
+          .catch(() => {})
+          .finally(endBusy)
         return
       }
       if (data.type === AUTHOR_MSG_WRITE_CHARACTER && canWrite && sessionId) {
         const fields = (data as { fields?: unknown }).fields
         if (fields && typeof fields === 'object') {
+          beginBusy()
           void writeSessionCharacter(
             sessionId,
             fields as Record<string, unknown>
-          ).catch(() => {})
+          )
+            .catch(() => {})
+            .finally(endBusy)
         }
         return
       }
@@ -580,20 +600,23 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
 
   return (
     <>
-    <iframe
-      ref={iframeRef}
-      title="酒馆助手脚本面板"
-      sandbox="allow-scripts allow-modals allow-forms"
-      srcDoc={doc}
-      onLoad={pushContext}
-      style={{
-        width: '100%',
-        height,
-        border: 'none',
-        display: 'block',
-        background: 'transparent',
-      }}
-    />
+    <div style={{ position: 'relative' }}>
+      {busyOps > 0 ? <CardBusyBar label={t('cardSyncProgress')} /> : null}
+      <iframe
+        ref={iframeRef}
+        title="酒馆助手脚本面板"
+        sandbox="allow-scripts allow-modals allow-forms"
+        srcDoc={doc}
+        onLoad={pushContext}
+        style={{
+          width: '100%',
+          height,
+          border: 'none',
+          display: 'block',
+          background: 'transparent',
+        }}
+      />
+    </div>
     {confirmRequest ? (
       <CardActionDialog
         request={confirmRequest}
