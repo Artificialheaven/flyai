@@ -208,7 +208,7 @@ def get_session(sid: str, request: Request):
         changed = bool(template_output.mark_pending_output(s, True)) or changed
     if changed:
         sc.store.save(s)
-    return _session_dict(
+    payload = _session_dict(
         s, with_messages=True, lore=sc.lore,
         user_settings=getattr(sc, "user_settings", None),
         cfg=getattr(request.app.state.flyai, "config", None),
@@ -216,6 +216,14 @@ def get_session(sid: str, request: Request):
         is_admin=sc.uid == ADMIN_UID,
         preset_scripts=active_preset_regex_scripts(sc),
     )
+    # 条件请求：会话文件（可能刚被 MVU/模板标记重写）的 mtime+size 作为弱 ETag。
+    # 命中时返回 304，省掉整个 JSON body 的传输与下发（压缩在前者之后）。
+    stat = sc.store.stat(sid) or {}
+    etag = 'W/"sess-%s-%s"' % (stat.get("mtime_ns", 0), stat.get("size", 0))
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(payload, headers=headers)
 
 
 @router.delete("/sessions/{sid}")

@@ -1,4 +1,4 @@
-import { request } from './client.js'
+import { apiUrl, authHeaders, readDetail, FlyApiError, request } from './client.js'
 import type { MessageImage, SessionDetail, SessionSummary } from './types.js'
 
 export type SessionPatch = {
@@ -61,6 +61,41 @@ export const clearSession = async (sid: string): Promise<void> => {
 /** 完整房间：members/threads/messages 都在这里，列表项拿不到 */
 export const getSession = async (sid: string): Promise<SessionDetail> =>
   request<SessionDetail>(`/api/sessions/${encodeURIComponent(sid)}`)
+
+/**
+ * 条件拉取会话：带上一次的 ETag，304 时返回 null（调用方保留现有状态）。
+ * 稳态下（会话没变）打开/刷新只传几百字节的 304 响应，而不是整个 JSON。
+ */
+const sessionEtags = new Map<string, string>()
+
+export const getSessionConditional = async (
+  sid: string,
+  force = false
+): Promise<SessionDetail | null> => {
+  const etag = force ? '' : sessionEtags.get(sid) || ''
+  const res = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sid)}`), {
+    headers: {
+      ...authHeaders(),
+      ...(etag ? { 'If-None-Match': etag } : {}),
+    },
+  })
+  if (res.status === 304) {
+    return null
+  }
+  if (!res.ok) {
+    throw new FlyApiError(res.status, await readDetail(res))
+  }
+  const detail = (await res.json()) as SessionDetail
+  const next = res.headers.get('ETag')
+  if (next) sessionEtags.set(sid, next)
+  else sessionEtags.delete(sid)
+  return detail
+}
+
+/** 删除/切换分支后让下一次拉取强制走全量 */
+export const invalidateSessionCache = (sid: string): void => {
+  sessionEtags.delete(sid)
+}
 
 export type RecallResult = {
   ok: boolean

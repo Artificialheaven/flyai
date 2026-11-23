@@ -10,7 +10,7 @@ import styles from './CardSyncBar.module.css'
 const CREEP_MS = 6000
 
 export const CardSyncBar = () => {
-  const { active, startedAt, label } = useCardActivity()
+  const { active, startedAt, label, percent: realPercent, attempt } = useCardActivity()
   const [percent, setPercent] = useState(0)
   const [visible, setVisible] = useState(false)
   const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -22,6 +22,11 @@ export const CardSyncBar = () => {
         doneTimer.current = null
       }
       setVisible(true)
+      // 有真实上传进度时直接采用；否则按时长推进到 95% 等待完成
+      if (realPercent > 0) {
+        setPercent(realPercent)
+        return undefined
+      }
       const tick = () => {
         const elapsed = Date.now() - startedAt
         setPercent(Math.min(95, (elapsed / CREEP_MS) * 95))
@@ -42,7 +47,7 @@ export const CardSyncBar = () => {
     return undefined
     // visible 只作为“正在显示”的状态位，不参与重启判断
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, startedAt])
+  }, [active, startedAt, realPercent])
 
   useEffect(
     () => () => {
@@ -72,7 +77,8 @@ export const CardSyncBar = () => {
       </div>
       {label ? (
         <span className={styles.label}>
-          {label} {Math.round(percent)}%
+          {label}
+          {attempt > 0 ? `（重试 ${attempt}/3）` : ''} {Math.round(percent)}%
         </span>
       ) : null}
     </div>

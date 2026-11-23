@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .models import Session
 
@@ -53,6 +53,13 @@ class SessionStore(ABC):
     @abstractmethod
     def delete(self, sid: str) -> None:
         raise NotImplementedError
+
+    def stat(self, sid: str) -> Optional[Dict[str, int]]:
+        """会话文件指纹（mtime_ns/size），用于条件请求 ETag。
+
+        基类默认不支持（返回 None）；JsonSessionStore 覆盖实现。
+        """
+        return None
 
     @abstractmethod
     def clear(self, sid: str) -> None:

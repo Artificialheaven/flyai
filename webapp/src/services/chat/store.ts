@@ -26,6 +26,7 @@ import {
   deleteMessage as recallRemoteMessage,
   deleteSession as deleteRemoteSession,
   getSession as fetchSession,
+  getSessionConditional,
   listSessions,
   patchSession,
   searchSessions,
@@ -828,7 +829,11 @@ const applySession = (session: Session) => {
  */
 const refreshSession = async (id: string, epoch: number, force = false) => {
   try {
-    const detail = await fetchSession(id)
+    // 非强制刷新先走条件请求：会话没变时服务端回 304，整个大 JSON 不下载
+    const detail = await getSessionConditional(id, force)
+    if (!detail) {
+      return
+    }
     if (epoch !== historyEpoch || deletingSessions.has(id) || getStreamController(id)) {
       return
     }

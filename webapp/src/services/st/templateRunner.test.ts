@@ -98,18 +98,19 @@ describe('模板沙箱 runner', () => {
     expect(result.errors).toEqual([])
   })
 
-  it('输出侧禁止注入类 API', async () => {
+  it('输出侧注入类 API 不生效但不中断渲染', async () => {
     const posted = await withSandbox((send) => {
       send({
         __flyaiTemplateRequest: 1,
         id: 'req2',
-        cells: [{ id: 'c1', text: '<% injectPrompt("x") %>' }],
+        cells: [{ id: 'c1', text: '<%= injectPrompt("x") %>ok' }],
         context: { messageId: 'm1', scopes: {}, escapeOutput: true },
       })
     })
     const result = posted[0] as Record<string, any>
-    expect(result.cells.c1).toBe('')
-    expect(result.errors[0].message).toContain('不允许')
+    // 上游语义：输出侧注入无效，不应让模板报错（否则整条消息渲染失败）
+    expect(result.cells.c1).toBe('falseok')
+    expect(result.errors).toEqual([])
   })
 
   it('手机主线摘要通过 globalThis.DALPhoneMainline 注入', async () => {

@@ -5,7 +5,7 @@
  * 活动 run、字段白名单与网络策略。
  */
 
-import { request } from './client.js'
+import { request, requestWithProgress } from './client.js'
 import {
   readCachedNetProxy,
   writeCachedNetProxy,
@@ -32,12 +32,15 @@ export const writeSessionMvu = (
 
 export const writeSessionWorld = (
   sessionId: string,
-  entries: unknown[]
+  entries: unknown[],
+  onProgress?: (percent: number, attempt: number) => void
 ): Promise<{ entries?: unknown[]; scoped: boolean }> =>
-  request(`/api/sessions/${encodeURIComponent(sessionId)}/st/world`, {
+  requestWithProgress(`/api/sessions/${encodeURIComponent(sessionId)}/st/world`, {
     method: 'POST',
     // compact：大卡条目表可达数 MB，卡内运行时不需要回显
     body: JSON.stringify({ entries, compact: true }),
+    retries: 3,
+    onProgress,
   })
 
 export const writeSessionCharacter = (

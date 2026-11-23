@@ -251,9 +251,11 @@ class PromptTemplateBridge:
 
         errors = result.get("errors")
         if isinstance(errors, list) and errors:
+            # 上游语义：模板异常只影响该单元格，不能让整轮生成失败。
+            # 这里记录告警并继续使用已成功渲染的单元格（失败单元格回退原文）。
             first = errors[0] if isinstance(errors[0], dict) else {}
             detail = _truncate(first.get("message") if isinstance(first, dict) else "", 200)
-            raise TemplatePromptError("模板渲染失败：%s" % (detail or "未知错误"))
+            logger.warning("EJS 模板单元格渲染失败（已降级继续）：%s", detail or "未知错误")
 
         if str(result.get("context_version") or "") != version:
             raise TemplatePromptError("模板变量已变化，请重试")
@@ -274,7 +276,10 @@ class PromptTemplateBridge:
         for cell in cells:
             value = returned.get(cell["id"])
             if not isinstance(value, str):
-                raise TemplatePromptError("模板单元格缺失结果")
+                # 客户端异常/超时导致单元格缺失：降级为空串继续本轮生成，
+                # 而不是整轮失败（与上游“模板错误不阻断生成”一致）。
+                logger.warning("EJS 单元格 %s 缺少渲染结果，已降级为空串", cell.get("id"))
+                value = ""
             # EJS 输出常含 {{char}}/{{random}} 等宏：执行后统一展开
             if macro_render is not None:
                 try:

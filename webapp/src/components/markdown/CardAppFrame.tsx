@@ -113,6 +113,8 @@ import { CardActionDialog, type CardConfirmRequest } from '../messages/CardActio
 import {
   beginCardActivity,
   endCardActivity,
+  setCardActivityAttempt,
+  setCardActivityProgress,
 } from '../../services/st/cardActivity.js'
 import styles from './CardAppFrame.module.css'
 
@@ -511,7 +513,10 @@ export const CardAppFrame = memo(function CardAppFrame({
           } else if (intent.kind === 'world') {
             // 统一写会话世界书副本：后端在未绑定时会从角色卡内嵌书派生一份，
             // 不再把整张 table（大卡可达数十 MB）塞进角色副本。
-            await writeSessionWorld(target.sessionId, intent.entries)
+            await writeSessionWorld(target.sessionId, intent.entries, (percent, attempt) => {
+              setCardActivityProgress(percent)
+              if (attempt > 1) setCardActivityAttempt(attempt)
+            })
           } else {
             await writeSessionCharacter(target.sessionId, intent.fields)
           }

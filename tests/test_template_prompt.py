@@ -184,7 +184,7 @@ def test_context_version_mismatch_aborts(tmp_path):
         _run(scenario())
 
 
-def test_client_errors_abort(tmp_path):
+def test_client_errors_degrade_not_abort(tmp_path):
     session = _session()
     run = ChatRun("r1", "u1", "s1")
     bridge = _bridge(tmp_path, session, run)
@@ -197,9 +197,9 @@ def test_client_errors_abort(tmp_path):
         _commit(run, payload, {}, errors=[{"message": "沙箱超时"}])
         return await task
 
-    with pytest.raises(TemplatePromptError) as exc:
-        _run(scenario())
-    assert "沙箱超时" in str(exc.value)
+    # 上游语义：单元格异常只降级该单元格，不能中止整轮生成
+    out = _run(scenario())
+    assert isinstance(out, list) and out
 
 
 def test_non_system_messages_are_stripped_not_executed(tmp_path):

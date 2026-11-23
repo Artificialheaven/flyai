@@ -881,10 +881,13 @@ const buildShim = ({
       var item = list[i];
       if (item.once) off(key, item.fn);
       // 同步调用：卡内监听器常依赖“emit 后立刻可读”；
-      // 返回 Promise 供 eventEmitAndWait 等待异步处理器。
-      try { results.push(item.fn.apply(null, args)); } catch (e) { try { console.error(e); } catch (ignore) {} }
+      // 返回 Promise（all）供 eventEmitAndWait 等到异步处理器 resolve。
+      try {
+        var out = item.fn.apply(null, args);
+        results.push(Promise.resolve(out).catch(function(e){ try { console.error(e); } catch (ignore) {} }));
+      } catch (e) { try { console.error(e); } catch (ignore) {} }
     }
-    return Promise.resolve(results);
+    return Promise.all(results);
   }
   function eventReturn(event, handler){
     on(event, handler, false, false);
@@ -1140,37 +1143,55 @@ const buildShim = ({
   }
   window.getAllVariables = function(){ return clone(chatStat()); };
   window.getVariables = function(option){ return currentVariables(option); };
-  window.replaceVariables = function(value, option){ return writeVariables(value, option); };
+  window.replaceVariables = function(value, option){
+    writeVariables(value, option);
+    return Promise.resolve(value && typeof value === 'object' ? clone(value) : {});
+  };
   window.updateVariablesWith = function(updater, option){
     var current = currentVariables(option);
-    var next = typeof updater === 'function' ? updater(clone(current)) : current;
-    writeVariables(next, option);
-    return next;
+    if (typeof updater !== 'function') return Promise.resolve(current);
+    var out;
+    try { out = updater(clone(current)); } catch (e) { return Promise.reject(e); }
+    // 上游 updater 可以是 async；返回 undefined（原地修改、没 return）时
+    // 绝不能当成 {} 写入，否则会整份清空变量。
+    if (out && typeof out.then === 'function') {
+      return out.then(function(next){
+        if (next === undefined) return current;
+        writeVariables(next, option);
+        return next;
+      });
+    }
+    if (out === undefined) return Promise.resolve(current);
+    writeVariables(out, option);
+    return Promise.resolve(out);
   };
   window.insertOrAssignVariables = function(value, option){
     var current = currentVariables(option);
     var patch = normalizeMvu(value).stat_data;
     var next = STCORE.merge(current, patch, true);
     writeVariables(next, option);
-    return next;
+    return Promise.resolve(clone(next));
   };
   window.insertVariables = function(value, option){
     var current = currentVariables(option);
     var patch = normalizeMvu(value).stat_data;
     var next = STCORE.mergeKeep(current, patch);
     writeVariables(next, option);
-    return next;
+    return Promise.resolve(clone(next));
   };
   window.deleteVariable = function(key, option){
     var current = currentVariables(option);
     var deleted = STCORE.deletePath(current, key);
     if (deleted) writeVariables(current, option);
-    return { variables: clone(current), delete_occurred: deleted };
+    return Promise.resolve({ variables: clone(current), delete_occurred: deleted });
   };
   window.getChatVariable = function(key){ return chatStat()[String(key)]; };
-  window.setChatVariable = function(key, value){ window.insertOrAssignVariables({ [String(key)]: value }, { type: 'chat' }); return true; };
+  window.setChatVariable = function(key, value){
+    window.insertOrAssignVariables({ [String(key)]: value }, { type: 'chat' });
+    return Promise.resolve(true);
+  };
   window.getGlobalVariables = function(){ return {}; };
-  window.setGlobalVariable = function(){ return false; };
+  window.setGlobalVariable = function(){ return Promise.resolve(false); };
   window.setVariables = window.replaceVariables;
 
   // ── 世界书本地副本 ─────────────────────────────────────────────
@@ -1427,17 +1448,17 @@ const buildShim = ({
   }
   window.getWorldbookNames = function(){
     var names = [];
-    if (primaryWorldName()) names.push(primaryWorldName());
+    if (WORLD.charWorldName) names.push(WORLD.charWorldName);
     if (WORLD.name && names.indexOf(WORLD.name) < 0) names.push(WORLD.name);
     return names;
   };
   window.getCharWorldbookNames = function(){
-    return { primary: WORLD.charWorldName || WORLD.name || null, additional: [] };
+    return { primary: WORLD.charWorldName || null, additional: [] };
   };
   window.getGlobalWorldbookNames = function(){ return []; };
-  window.getChatWorldbookName = function(){
-    return primaryWorldName() || null;
-  };
+  // 上游语义：未给聊天绑定世界书时返回 null。这里不能用“角色书/角色名”
+  // 兜底，否则卡里的存在性判断会永远为真。
+  window.getChatWorldbookName = function(){ return WORLD.name || null; };
   window.getWorldbook = function(name){ return clone(STCORE.worldbookEntryList(worldbookOf(name))); };
   window.updateWorldbookWith = function(name, updater){
     var current = STCORE.worldbookEntryList(worldbookOf(name));

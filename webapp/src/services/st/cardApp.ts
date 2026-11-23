@@ -536,7 +536,7 @@ export const buildCardAppShim = (
 ): string => {
   const state = sanitizeCardAppVariables(variables)
   const chatSeed = (Array.isArray(chat?.messages) ? chat.messages : [])
-    .slice(0, MAX_CARD_CHAT_MESSAGES)
+    .slice(-MAX_CARD_CHAT_MESSAGES)
     .map((item, index) => ({
       message_id: index,
       id: String(item.id ?? ''),
@@ -1423,11 +1423,10 @@ export const buildCardAppShim = (
   }
   // SillyTavern 的这些接口是同步的（返回数组/对象），卡片会直接 names.includes(...)、
   // [...names] 使用；这里必须同样同步返回，不能包 Promise。
-  window.getWorldbookNames = function(){
-    return CAP_WRITE ? worldbookNames() : [];
-  };
+  // 世界书读接口不受写权限门控：上游读永远可用，默认未开卡内写回的用户
+  // 也必须能读到角色卡/挂载世界书（否则大量卡会误判“不支持世界书”降级）。
+  window.getWorldbookNames = function(){ return worldbookNames(); };
   window.getCharWorldbookNames = function(){
-    if (!CAP_WRITE) return { primary: null, additional: [] };
     // 卡常要求存在一个主世界书才肯写档；没有显式绑定时用稳定名称兜底
     return { primary: primaryWorldName(), additional: [] };
   };
@@ -1436,9 +1435,17 @@ export const buildCardAppShim = (
     return WORLD_NAME || CHAR_WORLD_NAME || null;
   };
   window.getWorldbook = function(name){
-    // 无视卡片传入的书名：直接返回角色卡世界书 + 挂载世界书的合并视图
-    if (!CAP_WRITE) return [];
-    return worldEntriesArray();
+    var wanted = name == null ? '' : String(name);
+    if (!wanted) return worldEntriesArray();
+    // 角色书与挂载书同名（同一本）时返回合并视图，保留 uid 占位与副本优先级
+    if (wanted === WORLD_NAME && wanted === CHAR_WORLD_NAME) return worldEntriesArray();
+    if (wanted === CHAR_WORLD_NAME) {
+      return STCORE.worldbookEntryList({ entries: charWorldEntries() });
+    }
+    if (wanted === WORLD_NAME) {
+      return STCORE.worldbookEntryList({ entries: WORLD_ENTRIES });
+    }
+    return [];
   };
   window.updateWorldbookWith = CAP_WRITE
     ? function(name, updater){ return updateWorld(name, updater); }

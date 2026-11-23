@@ -514,7 +514,8 @@ describe('buildCardAppShim', () => {
     const replaceWorldbook = sandbox.replaceWorldbook as () => Promise<unknown>
     expect(Array.isArray(getWorldbookNames())).toBe(true)
     expect(getWorldbookNames().includes('x')).toBe(false)
-    expect(getCharWorldbookNames()).toEqual({ primary: null, additional: [] })
+    // 上游读接口不受写权限门控：未绑定世界书时只有一个稳定兜底主名
+    expect(getCharWorldbookNames()).toEqual({ primary: 'FlyAI', additional: [] })
     expect(getGlobalWorldbookNames()).toEqual([])
     expect(getWorldbook('x')).toEqual([])
     await expect(updateWorldbookWith()).resolves.toBeUndefined()
@@ -1213,13 +1214,14 @@ describe('L4 授权能力', () => {
       primary: '卡内书',
       additional: [],
     })
-    // 卡期望的书名与两份书都不匹配时仍然返回全部条目；A 在两份书中重复只保留一份
-    // 会话世界书副本在前：卡刚写回的启用状态/内容不会被角色卡原始 table 盖住
+    // 语义修复：getWorldbook(name) 按书名返回对应世界书；未知书名返回空表。
+    // 只有书名与两份书都不匹配时不再回退“合并视图”（避免多书卡串书）。
     const getWorldbook = sandbox.getWorldbook as (name: string) => unknown[]
     const titles = (name: string) =>
       getWorldbook(name).map((entry) => (entry as { title?: string }).title)
-    expect(titles('卡片期望的名字')).toEqual(['B', 'A', 'C'])
-    expect(titles('卡内书')).toEqual(['B', 'A', 'C'])
+    expect(titles('卡片期望的名字')).toEqual([])
+    expect(titles('挂载书')).toEqual(['B', 'A'])
+    expect(titles('卡内书')).toEqual(['A', 'C'])
   })
 
   it('write：按卡内剧情清单（OWNED_PLOT_UIDS/entryComment）还原世界书 uid', async () => {

@@ -83,16 +83,6 @@ const sandboxMain = () => {
     return cur
   }
 
-  const setPath = (root: any, path: string[], value: unknown): void => {
-    if (!path.length) return
-    let cur = root
-    for (const part of path.slice(0, -1)) {
-      if (!cur[part] || typeof cur[part] !== 'object') cur[part] = {}
-      cur = cur[part]
-    }
-    cur[path[path.length - 1]] = value
-  }
-
   const unsetPath = (root: any, path: string[]): void => {
     if (!path.length) return
     let cur = root
@@ -218,7 +208,26 @@ const sandboxMain = () => {
     }
 
     const readOnly = () => {
-      throw new Error('输出侧模板不允许调用注入/激活类 API')
+      // 输出侧：注入/激活没有意义，上游也只是不生效，不应中断渲染。
+      // 提示词侧目前还没有宿主注入通道，返回 false 并告警（不 throw）。
+      try { console.warn('[ejs] 注入/激活类 API 在当前侧不生效') } catch (ignore) {}
+      return false
+    }
+
+    const worldbook = Array.isArray((context as any).worldbook)
+      ? ((context as any).worldbook as any[])
+      : []
+    const preset = (context as any).preset || {}
+
+    const getwi = (nameOrUid: unknown) => {
+      if (!worldbook.length) return {}
+      const key = String(nameOrUid ?? '')
+      for (const entry of worldbook) {
+        if (!entry || typeof entry !== 'object') continue
+        if (String((entry as any).comment ?? '') === key || String((entry as any).title ?? '') === key) return clone(entry)
+        if ((entry as any).uid != null && String((entry as any).uid) === key) return clone(entry)
+      }
+      return {}
     }
 
     const char = context.char || {}
@@ -247,8 +256,13 @@ const sandboxMain = () => {
       getchar: () => clone(char),
       getuser: () => clone(user),
       getgroup: () => clone(group),
-      getwi: () => null,
-      getpreset: () => null,
+      getwi,
+      getpreset: (name?: unknown) => {
+        if (!preset || typeof preset !== 'object') return {}
+        if (name == null) return clone(preset)
+        const key = String(name)
+        return (preset as any)[key] === undefined ? {} : clone((preset as any)[key])
+      },
       getChatMessage: (index: unknown) => {
         const idx = Number(index)
         return Number.isInteger(idx) && idx >= 0 && idx < chat.length ? clone(chat[idx]) : null
@@ -267,6 +281,96 @@ const sandboxMain = () => {
     }
 
     const escapeRaw = (value: unknown): string => String(value ?? '')
+    // 上游模板自带 lodash/faker；不注入会让 `_.get(...)` 直接 ReferenceError。
+    // 这里提供常用子集（不是完整实现，覆盖模板里的读取/遍历场景）。
+    const setPath = (obj: any, path: unknown, value: unknown): any => {
+      const parts = Array.isArray(path) ? path.map(String) : String(path ?? '').split('.')
+      let cur = obj
+      for (let i = 0; i < parts.length - 1; i += 1) {
+        const k = parts[i]
+        if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {}
+        cur = cur[k]
+      }
+      cur[parts[parts.length - 1]] = value
+      return obj
+    }
+    const lodashShim: any = {
+      get: (obj: any, path: unknown, def?: unknown) => {
+        const parts = Array.isArray(path) ? path.map(String) : String(path ?? '').split('.')
+        let cur = obj
+        for (const k of parts) {
+          if (cur == null) return def
+          cur = cur[k]
+        }
+        return cur === undefined ? def : cur
+      },
+      set: setPath,
+      has: (obj: any, path: unknown) => {
+        const parts = Array.isArray(path) ? path.map(String) : String(path ?? '').split('.')
+        let cur = obj
+        for (const k of parts) {
+          if (cur == null || !(k in Object(cur))) return false
+          cur = cur[k]
+        }
+        return true
+      },
+      clone: (value: unknown) => clone(value),
+      cloneDeep: (value: unknown) => clone(value),
+      isEmpty: (value: any) => {
+        if (value == null) return true
+        if (Array.isArray(value) || typeof value === 'string') return value.length === 0
+        if (typeof value === 'object') return Object.keys(value).length === 0
+        return false
+      },
+      isArray: Array.isArray,
+      isObject: (value: any) => value != null && typeof value === 'object' && !Array.isArray(value),
+      keys: (value: any) => (value && typeof value === 'object' ? Object.keys(value) : []),
+      values: (value: any) => (value && typeof value === 'object' ? Object.values(value) : []),
+      map: (list: any, fn: any) => (Array.isArray(list) ? list.map(fn) : []),
+      filter: (list: any, fn: any) => (Array.isArray(list) ? list.filter(fn) : []),
+      find: (list: any, fn: any) => (Array.isArray(list) ? list.find(fn) : undefined),
+      forEach: (list: any, fn: any) => { if (Array.isArray(list)) list.forEach(fn) },
+      merge: (target: any, ...sources: any[]) => {
+        for (const src of sources) {
+          if (!src || typeof src !== 'object') continue
+          for (const k of Object.keys(src)) {
+            const v = src[k]
+            if (v && typeof v === 'object' && !Array.isArray(v)) {
+              target[k] = lodashShim.merge(target[k] && typeof target[k] === 'object' ? target[k] : {}, v)
+            } else {
+              target[k] = Array.isArray(v) ? v.slice() : v
+            }
+          }
+        }
+        return target
+      },
+    }
+    const fakerShim: any = {
+      person: {
+        firstName: () => '林',
+        lastName: () => '小雨',
+        fullName: () => '林小雨',
+      },
+      name: {
+        firstName: () => '林',
+        lastName: () => '小雨',
+        fullName: () => '林小雨',
+      },
+      location: { city: () => '滨莲市', streetAddress: () => '中央区 1 号' },
+      lorem: { word: () => '风', words: () => '风 雨 夜', sentence: () => '夜色渐深。' },
+      number: { int: (opts?: any) => {
+        const min = Number(opts && opts.min) || 0
+        const max = Number(opts && opts.max)
+        const top = Number.isFinite(max) && max > min ? max : min + 100
+        return Math.floor(min + Math.random() * (top - min))
+      } },
+      string: { uuid: () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0
+        return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+      }) },
+      random: { arrayElement: (list: any[]) => (Array.isArray(list) && list.length ? list[Math.floor(Math.random() * list.length)] : undefined) },
+    }
+
     const runner = runtime.render
     for (const cell of cells) {
       const id = String(cell?.id || '')
@@ -276,6 +380,9 @@ const sandboxMain = () => {
         ctx.user = user
         ctx.group = group
         ctx.chat = chat
+        ctx._ = lodashShim
+        ctx.lodash = lodashShim
+        ctx.faker = fakerShim
         Object.defineProperty(ctx, 'variables', { get: merged, enumerable: true })
         if (context.escapeOutput === false) ctx.__escape = escapeRaw
         const output = await runner(String(cell?.text || ''), ctx)

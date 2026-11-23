@@ -79,9 +79,55 @@ def migrate_actor_ids(session: Session) -> bool:
     return changed
 
 
+_LIGHT_DROP_KEYS = ("tavern_helper", "TavernHelper", "regex_scripts")
+
+
+def _dedupe_card_dict(data: Optional[Dict]) -> Optional[Dict]:
+    """落盘去重：`extensions.regex_scripts` 与顶层 `regex_scripts` 完全相等时只留顶层。
+
+    酒馆 CCv3 卡导入时两份内容相同，一张卡常因此多占近 1MB。读取时由
+    `_restore_card_dict` 补回，内存对象形状保持不变（导出/提示词不受影响）。
+    """
+    if not isinstance(data, dict):
+        return data
+    ext = data.get("extensions")
+    if not isinstance(ext, dict):
+        return data
+    scripts = data.get("regex_scripts")
+    if not isinstance(scripts, list) or not scripts:
+        return data
+    if ext.get("regex_scripts") != scripts:
+        return data
+    out = dict(data)
+    out["extensions"] = {k: v for k, v in ext.items() if k != "regex_scripts"}
+    return out
+
+
+def _restore_card_dict(data: Optional[Dict]) -> Optional[Dict]:
+    """读时补回落盘时去掉的 `extensions.regex_scripts`（共享只读引用）。"""
+    if not isinstance(data, dict):
+        return data
+    ext = data.get("extensions")
+    if not isinstance(ext, dict):
+        return data
+    scripts = ext.get("regex_scripts")
+    if scripts and not data.get("regex_scripts"):
+        out = dict(data)
+        out["regex_scripts"] = scripts
+        return out
+    return data
+
+
+def _ai_overrides(session: Session) -> List[Dict]:
+    return [
+        m.override for m in (session.members or [])
+        if not getattr(m, "is_user", False) and isinstance(m.override, dict)
+    ]
+
+
 def session_from_dict(data: Dict, sid: str = "") -> Session:
     """从完整快照还原会话（存档点恢复同样使用）。"""
-    return Session(
+    session = Session(
         id=data.get("id", sid),
         title=data.get("title", "新会话"),
         provider_id=data.get("provider_id", ""),
@@ -111,18 +157,42 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         mvu=data.get("mvu", {}) or {},
         template_vars=data.get("template_vars", {}) or {},
     )
+    # 新格式：单 AI 会话顶层 override 不落盘，只由成员的副本承载；读时重建，
+    # 业务代码仍看到原来的内存形状（同一对象引用，写路径都是整体赋值）。
+    for member in session.members:
+        member.override = _restore_card_dict(member.override)
+    if session.character_override:
+        session.character_override = _restore_card_dict(session.character_override)
+    else:
+        overrides = _ai_overrides(session)
+        if len(overrides) == 1:
+            session.character_override = overrides[0]
+    return session
 
 
 def _member_dict(m: RoomMember) -> Dict:
     data = m.to_dict()
     if isinstance(data.get("override"), dict):
         # 酒馆助手脚本只存库主卡一份；会话副本落盘时剥离（读取时补回）
-        data["override"] = strip_heavy_extensions(data["override"])
+        data["override"] = _dedupe_card_dict(
+            strip_heavy_extensions(data["override"])
+        )
     return data
 
 
 def session_to_dict(session: Session) -> Dict:
     """会话完整序列化（存档点快照同样使用此结构）。"""
+    character_override = strip_heavy_extensions(session.character_override)
+    character_override = _dedupe_card_dict(character_override)
+    # 单 AI 会话：成员副本与顶层镜像完全一致时只落一份（members[].override）。
+    # 群聊各座位卡不同，保留顶层原样（通常本来就为空）。
+    overrides = _ai_overrides(session)
+    if (
+        character_override is not None
+        and len(overrides) == 1
+        and _dedupe_card_dict(strip_heavy_extensions(overrides[0])) == character_override
+    ):
+        character_override = None
     return {
         "id": session.id,
         "title": session.title,
@@ -133,7 +203,7 @@ def session_to_dict(session: Session) -> Dict:
         "updated_at": session.updated_at,
         "messages": [m.to_dict() for m in session.messages],
         "attributes": session.attributes,
-        "character_override": strip_heavy_extensions(session.character_override),
+        "character_override": character_override,
         "world_override": session.world_override,
         "members": [_member_dict(m) for m in session.members],
         "threads": [t.to_dict() for t in session.threads],
@@ -296,6 +366,13 @@ class JsonSessionStore(SessionStore):
         p = self._path(sid)
         p.unlink(missing_ok=True)
         self._forget(p)
+
+    def stat(self, sid: str) -> Optional[Dict[str, int]]:
+        try:
+            st = self._path(sid).stat()
+        except OSError:
+            return None
+        return {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
 
     def _forget(self, path: Path) -> None:
         with self._summary_lock:

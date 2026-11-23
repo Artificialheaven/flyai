@@ -64,6 +64,9 @@
   ST.messageData = function (raw) {
     if (!raw || typeof raw !== 'object') return {};
     if (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) return raw.data;
+    // 卡内镜像把楼层变量放在 variables（{stat_data} 信封），与 authors 侧的
+    // statData 是同一份数据；两种字段名都要认，否则 getChatMessages().data 恒为 {}。
+    if (raw.variables && typeof raw.variables === 'object' && !Array.isArray(raw.variables)) return raw.variables;
     if (raw.statData && typeof raw.statData === 'object') return { stat_data: raw.statData };
     return {};
   };

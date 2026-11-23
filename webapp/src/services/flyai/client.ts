@@ -96,32 +96,137 @@ type RequestOptions = Omit<RequestInit, 'headers'> & {
  * 统一请求入口：拼接 apiBase、注入令牌、解析 FastAPI 错误体。
  * 401 一律清登录态并回到登录页；204 无 body 返回 undefined。
  */
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, ms))
+
+/** 网络抖动/网关错误可安全重试；写请求只在显式调用 requestWithProgress 时重试 */
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
+
 export const request = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
   const { silent401 = false, formData = false, headers, body, ...init } = options
-  const res = await fetch(apiUrl(path), {
-    ...init,
-    headers: {
-      ...(body !== undefined && !formData ? { 'Content-Type': 'application/json' } : {}),
-      ...authHeaders(),
-      ...headers,
-    },
-    body,
-  })
-
-  if (!res.ok) {
-    if (res.status === 401 && !silent401) {
-      useAuth.getState().handleSessionExpired()
+  const method = (init.method || 'GET').toUpperCase()
+  const attempts = method === 'GET' || method === 'HEAD' ? 3 : 1
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let res: Response
+    try {
+      res = await fetch(apiUrl(path), {
+        ...init,
+        headers: {
+          ...(body !== undefined && !formData ? { 'Content-Type': 'application/json' } : {}),
+          ...authHeaders(),
+          ...headers,
+        },
+        body,
+      })
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        await sleep(200 * attempt)
+        continue
+      }
+      throw error
     }
-    throw new FlyApiError(
-      res.status,
-      await readDetail(res),
-      parseRetryAfter(res)
-    )
+
+    if (!res.ok) {
+      if (res.status === 401 && !silent401) {
+        useAuth.getState().handleSessionExpired()
+      }
+      if (RETRYABLE_STATUS.has(res.status) && attempt < attempts) {
+        lastError = new FlyApiError(res.status, await readDetail(res), parseRetryAfter(res))
+        await sleep(250 * attempt)
+        continue
+      }
+      throw new FlyApiError(
+        res.status,
+        await readDetail(res),
+        parseRetryAfter(res)
+      )
+    }
+    if (res.status === 204) {
+      return undefined as T
+    }
+    return (await res.json()) as T
   }
-  if (res.status === 204) {
-    return undefined as T
+  throw lastError instanceof Error ? lastError : new Error('请求失败')
+}
+
+/**
+ * 带真实上传进度的写请求：XHR 的 upload 事件给出已发送字节数，
+ * 大世界书写回因此能显示真进度而不是假动画；失败按指数退避自动重试。
+ */
+export const requestWithProgress = <T>(
+  path: string,
+  options: {
+    method: string
+    body: string
+    headers?: Record<string, string>
+    retries?: number
+    onProgress?: (percent: number, attempt: number) => void
   }
-  return (await res.json()) as T
+): Promise<T> => {
+  const attempts = Math.max(1, Math.min(5, options.retries ?? 3))
+  const send = (attempt: number): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open(options.method, apiUrl(path), true)
+      xhr.setRequestHeader('Content-Type', 'application/json')
+      const auth = authHeaders()
+      for (const key of Object.keys(auth)) {
+        xhr.setRequestHeader(key, auth[key])
+      }
+      for (const key of Object.keys(options.headers || {})) {
+        xhr.setRequestHeader(key, (options.headers || {})[key])
+      }
+      xhr.upload.onprogress = (event) => {
+        if (!options.onProgress) return
+        // 发送完成只代表开始等服务器处理，留 6% 给服务端应用/落盘
+        const percent = event.lengthComputable && event.total > 0
+          ? Math.min(94, Math.round((event.loaded / event.total) * 94))
+          : 0
+        options.onProgress(percent, attempt)
+      }
+      xhr.upload.onload = () => options.onProgress?.(95, attempt)
+      xhr.onerror = () => reject(new FlyApiError(0, '网络错误'))
+      xhr.onabort = () => reject(new FlyApiError(0, '请求已取消'))
+      xhr.onload = () => {
+        if (xhr.status === 401) {
+          useAuth.getState().handleSessionExpired()
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          let detail = `请求失败（HTTP ${xhr.status}）`
+          try {
+            const data = xhr.responseText ? JSON.parse(xhr.responseText) : null
+            if (data) detail = detailOf(data, xhr.status)
+          } catch {
+            // 非 JSON 响应体走兜底文案
+          }
+          reject(new FlyApiError(xhr.status, detail))
+          return
+        }
+        try {
+          resolve(xhr.responseText ? (JSON.parse(xhr.responseText) as T) : (undefined as T))
+        } catch {
+          reject(new FlyApiError(xhr.status, '响应不是合法 JSON'))
+        }
+      }
+      xhr.send(options.body)
+    })
+
+  const run = async (attempt: number): Promise<T> => {
+    try {
+      return await send(attempt)
+    } catch (error) {
+      const status = error instanceof FlyApiError ? error.status : 0
+      const retryable = status === 0 || RETRYABLE_STATUS.has(status)
+      if (attempt < attempts && retryable) {
+        await sleep(400 * attempt)
+        return run(attempt + 1)
+      }
+      throw error
+    }
+  }
+  return run(1)
 }
 
 export type UploadProgress = {
