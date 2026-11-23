@@ -52,6 +52,9 @@ describe('ST 原生快照', () => {
     expect(native.worldInfo.charWorldName).toBe('十香')
     expect(native.extensions.names).toContain('third-party/ST-EJS')
     expect(native.tags.tagMap['tohka.png']).toEqual(['精灵'])
+    // 卡内 getChatCompletionModel 对 custom 源读 custom_model。
+    expect(native.oaiSettings.custom_model).toBe('flyai')
+    expect(native.oaiSettings.custom_include_body).toBe('')
   })
 
   it('补齐 getContext 的 main_api/tagMap，不影响原有写入 API', () => {
@@ -76,17 +79,38 @@ describe('ST 原生模块 import map', () => {
       expect(entries[`null/${path}`]).toMatch(/^data:text\/javascript,/)
     }
     expect(ST_NATIVE_MODULE_PATHS).toHaveLength(10)
+    for (const specifier of [
+      'flyai-chevrotain',
+      'flyai-moment',
+      'flyai-seedrandom',
+      'flyai-droll',
+    ]) {
+      expect(entries[specifier]).toMatch(/^data:text\/javascript,/)
+    }
   })
 
-  it('lib.js 内联真实 Chevrotain 供原生宏解析器使用', () => {
+  it('lib.js 引入宏引擎依赖并按要求导出', () => {
     const source = decodeURIComponent(
       buildNativeModuleUrl('lib.js').slice('data:text/javascript,'.length)
     )
-    expect(source).toContain('const __chevrotain={')
-    expect(source).toContain('CstParser:')
-    expect(source).toContain('Lexer:')
-    expect(source).toContain('createToken:')
+    expect(source).toContain("import __moment from 'flyai-moment'")
+    expect(source).toContain("import __seedrandom from 'flyai-seedrandom'")
+    expect(source).toContain("import * as __drollModule from 'flyai-droll'")
+    expect(source).toContain("import * as __chevrotain from 'flyai-chevrotain'")
+    expect(source).toContain('export const moment =')
+    expect(source).toContain('export const seedrandom =')
+    expect(source).toContain('export const droll =')
     expect(source).toContain('export const chevrotain = __chevrotain')
+  })
+
+  it('moments/droll/seedrandom 依赖模块自带可用的导出', () => {
+    const entries = buildNativeImportMapEntries()
+    const read = (key: string): string =>
+      decodeURIComponent((entries[key] ?? '').slice('data:text/javascript,'.length))
+    expect(read('flyai-moment')).toContain('export default globalThis.moment')
+    expect(read('flyai-seedrandom')).toContain(' as default')
+    expect(read('flyai-droll')).toContain(' as validate')
+    expect(read('flyai-droll')).toContain(' as roll')
   })
 
   it('script.js 模块从快照读状态并实现预算函数', () => {

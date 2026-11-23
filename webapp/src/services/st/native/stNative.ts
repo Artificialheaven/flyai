@@ -13,40 +13,23 @@
  * 下是 `undefined`，会以具体属性名在卡内报错，便于 P1 按卡补齐。
  */
 
-import CHEVROTAIN_SOURCE from '../vendor/chevrotain-11.0.3.min.js?raw'
+import CHEVROTAIN_SOURCE from '../vendor/chevrotain-11.2.0.min.js?raw'
+import DROLL_SOURCE from '../vendor/droll-0.2.1.esm.js?raw'
+import MOMENT_SOURCE from '../vendor/moment-2.30.1.min.js?raw'
+import SEEDRANDOM_SOURCE from '../vendor/seedrandom-3.0.5.esm.js?raw'
 
 export const ST_NATIVE_SNAPSHOT_GLOBAL = '__FLYAI_ST_NATIVE__'
 
-/**
- * 把 Chevrotain 的 ESM 导出子句改写成同模块内的命名空间对象。
- *
- * 卡内原生宏引擎要求 `lib.js` 导出真实的 `chevrotain`。若 lib 模块再静态
- * import 一个大体积 `data:` 模块，Chrome 在沙箱 srcdoc 里动态 import lib 时
- * 会一直挂起（静态 import 正常），所以把 Chevrotain 直接拼进 lib 模块，
- * 只保留一层模块解析。导出子句 `export{a as A,...}` 在这里变成
- * `const __chevrotain={A:a,...}`。
- */
-const inlineChevrotain = (): string => {
-  const start = CHEVROTAIN_SOURCE.lastIndexOf('export{')
-  const end = start < 0 ? -1 : CHEVROTAIN_SOURCE.indexOf('}', start)
-  if (start < 0 || end < 0) {
-    throw new Error('chevrotain bundle: missing export clause')
-  }
-  const clause = CHEVROTAIN_SOURCE.slice(start + 'export{'.length, end)
-  const entries = clause
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map((entry) => {
-      const [local, exported] = entry.split(/\s+as\s+/)
-      const name = (exported ?? local).trim()
-      return `${name}:${local.trim()}`
-    })
-  return (
-    CHEVROTAIN_SOURCE.slice(0, start) +
-    `const __chevrotain={${entries.join(',')}};` +
-    CHEVROTAIN_SOURCE.slice(end + 1)
-  )
+/** 卡内宏/模板引擎按裸 specifier 读取的宿主依赖。 */
+const DEP_MODULES: Record<string, string> = {
+  'flyai-chevrotain': CHEVROTAIN_SOURCE,
+  // moment 是 UMD：在 ESM 里 `this` 为 undefined，需要显式绑定 globalThis。
+  'flyai-moment':
+    '(function(){\n' +
+    MOMENT_SOURCE +
+    '\n}).call(globalThis);\nexport default globalThis.moment;',
+  'flyai-seedrandom': SEEDRANDOM_SOURCE,
+  'flyai-droll': DROLL_SOURCE,
 }
 
 const DATA_URL_PREFIX = 'data:text/javascript,'
@@ -378,8 +361,10 @@ export function searchCharByName() {
 
 // ── lib.js ───────────────────────────────────────────────────────────────
 const LIB_SOURCE =
-  inlineChevrotain() +
-  '\n' +
+  "import __moment from 'flyai-moment';\n" +
+  "import __seedrandom from 'flyai-seedrandom';\n" +
+  "import * as __drollModule from 'flyai-droll';\n" +
+  "import * as __chevrotain from 'flyai-chevrotain';\n" +
   MODULE_HEADER +
   String.raw`function minimalLodash() {
   const isObject = (v) => v != null && typeof v === 'object';
@@ -452,6 +437,185 @@ const LIB_SOURCE =
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
     template: (text) => () => String(text == null ? '' : text),
     isEqual: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+    compact: (v) => (Array.isArray(v) ? v.filter(Boolean) : []),
+    concat: (v, ...rest) => [].concat(v == null ? [] : v, ...rest),
+    sum: (v) => (Array.isArray(v) ? v.reduce((sum, item) => sum + (Number(item) || 0), 0) : 0),
+    max: (v) => (Array.isArray(v) && v.length ? Math.max.apply(null, v) : undefined),
+    min: (v) => (Array.isArray(v) && v.length ? Math.min.apply(null, v) : undefined),
+    random: (lower, upper) => {
+      const lo = upper === undefined ? 0 : Number(lower);
+      const hi = upper === undefined ? Number(lower) : Number(upper);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return 0;
+      return Math.floor(Math.random() * (hi - lo + 1)) + lo;
+    },
+    escapeRegExp: (v) => String(v == null ? '' : v).replace(/[.*+?^{}$()|[\]\\]/g, '\\$&'),
+    set: (obj, path, value) => {
+      const keys = Array.isArray(path) ? path : String(path == null ? '' : path).split('.');
+      let cur = obj;
+      keys.forEach((key, index) => {
+        if (index === keys.length - 1) cur[key] = value;
+        else {
+          if (!isObject(cur[key]) || Array.isArray(cur[key])) cur[key] = {};
+          cur = cur[key];
+        }
+      });
+      return obj;
+    },
+    unset: (obj, path) => {
+      const keys = Array.isArray(path) ? path : String(path == null ? '' : path).split('.');
+      let cur = obj;
+      for (let i = 0; i < keys.length - 1; i += 1) {
+        if (!isObject(cur)) return true;
+        cur = cur[keys[i]];
+      }
+      if (isObject(cur)) delete cur[keys[keys.length - 1]];
+      return true;
+    },
+    mergeWith: (target, source, customizer) => {
+      if (!isObject(target) || !isObject(source)) return target;
+      for (const key of Object.keys(source)) {
+        const next = typeof customizer === 'function'
+          ? customizer(target[key], source[key], key, target, source)
+          : undefined;
+        if (next !== undefined) target[key] = next;
+        else if (isObject(source[key]) && isObject(target[key])
+          && !Array.isArray(source[key]) && !Array.isArray(target[key])) {
+          lodash.mergeWith(target[key], source[key], customizer);
+        } else {
+          target[key] = clone(source[key]);
+        }
+      }
+      return target;
+    },
+    entries: (obj) => Object.entries(obj || {}),
+    values: (obj) => Object.values(obj || {}),
+    keys: (obj) => Object.keys(obj || {}),
+    assign: (target, ...sources) => Object.assign(target || {}, ...sources),
+    defaults: (target, ...sources) => {
+      const out = target || {};
+      for (const source of sources) {
+        if (!isObject(source)) continue;
+        for (const key of Object.keys(source)) {
+          if (out[key] === undefined) out[key] = source[key];
+        }
+      }
+      return out;
+    },
+    mapValues: (obj, fn) => {
+      const out = {};
+      for (const key of Object.keys(obj || {})) out[key] = fn(obj[key], key, obj);
+      return out;
+    },
+    groupBy: (list, fn) => {
+      const out = {};
+      for (const item of (Array.isArray(list) ? list : [])) {
+        const key = typeof fn === 'function' ? fn(item) : item[fn];
+        if (!out[key]) out[key] = [];
+        out[key].push(item);
+      }
+      return out;
+    },
+    keyBy: (list, fn) => {
+      const out = {};
+      for (const item of (Array.isArray(list) ? list : [])) {
+        out[typeof fn === 'function' ? fn(item) : item[fn]] = item;
+      }
+      return out;
+    },
+    sortBy: (list, fn) => (Array.isArray(list) ? list.slice() : []).sort((a, b) => {
+      const av = typeof fn === 'function' ? fn(a) : a[fn];
+      const bv = typeof fn === 'function' ? fn(b) : b[fn];
+      return av === bv ? 0 : (av > bv ? 1 : -1);
+    }),
+    uniqBy: (list, fn) => {
+      const seen = new Set();
+      const out = [];
+      for (const item of (Array.isArray(list) ? list : [])) {
+        const key = typeof fn === 'function' ? fn(item) : item[fn];
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+      }
+      return out;
+    },
+    difference: (list, other) => {
+      const blocked = new Set(Array.isArray(other) ? other : []);
+      return (Array.isArray(list) ? list : []).filter((item) => !blocked.has(item));
+    },
+    intersection: (list, other) => {
+      const allowed = new Set(Array.isArray(other) ? other : []);
+      return (Array.isArray(list) ? list : []).filter((item) => allowed.has(item));
+    },
+    head: (v) => (Array.isArray(v) ? v[0] : undefined),
+    last: (v) => (Array.isArray(v) ? v[v.length - 1] : undefined),
+    take: (v, n) => (Array.isArray(v) ? v.slice(0, n) : []),
+    drop: (v, n) => (Array.isArray(v) ? v.slice(n) : []),
+    chunk: (v, size) => {
+      const list = Array.isArray(v) ? v : [];
+      const width = Math.max(1, Number(size) || 1);
+      const out = [];
+      for (let i = 0; i < list.length; i += width) out.push(list.slice(i, i + width));
+      return out;
+    },
+    range: (start, end, step) => {
+      const out = [];
+      const from = end === undefined ? 0 : Number(start);
+      const to = end === undefined ? Number(start) : Number(end);
+      const by = Number(step) || 1;
+      for (let value = from; (by > 0 ? value < to : value > to); value += by) out.push(value);
+      return out;
+    },
+    times: (n, fn) => Array.from({ length: Math.max(0, Number(n) || 0) }, (_v, i) => (typeof fn === 'function' ? fn(i) : undefined)),
+    clamp: (value, lower, upper) => Math.min(Math.max(Number(value), lower), upper === undefined ? lower : upper),
+    round: (value, precision) => {
+      const factor = Math.pow(10, Number(precision) || 0);
+      return Math.round(Number(value) * factor) / factor;
+    },
+    toNumber: (v) => Number(v),
+    isInteger: Number.isInteger,
+    isFinite: (v) => Number.isFinite(v),
+    isNaN: (v) => Number.isNaN(v),
+    isNull: (v) => v === null,
+    isUndefined: (v) => v === undefined,
+    trim: (v) => String(v == null ? '' : v).trim(),
+    trimStart: (v) => String(v == null ? '' : v).trimStart(),
+    trimEnd: (v) => String(v == null ? '' : v).trimEnd(),
+    upperFirst: (v) => { const s = String(v == null ? '' : v); return s.charAt(0).toUpperCase() + s.slice(1); },
+    capitalize: (v) => {
+      const s = String(v == null ? '' : v).toLowerCase();
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    },
+    truncate: (v, options) => {
+      const s = String(v == null ? '' : v);
+      const opts = options || {};
+      const length = Number(opts.length) || 30;
+      const omission = opts.omission == null ? '...' : String(opts.omission);
+      return s.length > length ? s.slice(0, Math.max(0, length - omission.length)) + omission : s;
+    },
+    repeat: (v, n) => String(v == null ? '' : v).repeat(Math.max(0, Number(n) || 0)),
+    toArray: (v) => (Array.isArray(v) ? v.slice() : (isObject(v) ? Object.values(v) : String(v == null ? '' : v).split(''))),
+    noop: () => undefined,
+    identity: (v) => v,
+    constant: (v) => () => v,
+    negate: (fn) => function () { return !fn.apply(this, arguments); },
+    debounce: (fn) => {
+      let timer = null;
+      return function () {
+        const args = arguments;
+        const self = this;
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(self, args), 0);
+      };
+    },
+    throttle: (fn) => fn,
+    once: (fn) => {
+      let called = false;
+      let value;
+      return function () {
+        if (!called) { called = true; value = fn.apply(this, arguments); }
+        return value;
+      };
+    },
   };
   return lodash;
 }
@@ -535,7 +699,7 @@ function parseYaml(text) {
   return parseBlock(nextMeaningful() ? (nextMeaningful().length - nextMeaningful().trimStart().length) : 0);
 }
 
-const lodash = globalThis._ || minimalLodash();
+const lodash = globalThis._ || globalThis.__lodashVendor || minimalLodash();
 const yaml = globalThis.jsyaml || globalThis.YAML || {
   parse: parseYaml,
   stringify: (value, replacer, space) => JSON.stringify(value, replacer, space),
@@ -559,13 +723,21 @@ export {
   DOMPurify,
   Handlebars,
 };
-export const moment = globalThis.moment || null;
+// 原生宏引擎的 requireDependency 按名字读 lib 模块命名空间：
+// moment 必须是函数；droll 提供 validate/roll。
+export const moment = typeof __moment === 'function' ? __moment : null;
+export const seedrandom = typeof __seedrandom === 'function' ? __seedrandom : null;
+export const droll = {
+  validate: __drollModule.validate,
+  roll: __drollModule.roll,
+  parse: __drollModule.parse,
+};
+// 卡内原生宏引擎要求真实 Chevrotain（Lexer/CstParser/createToken）。
+export const chevrotain = __chevrotain;
 export const showdown = globalThis.showdown || null;
 export const localforage = globalThis.localforage || null;
 export const Fuse = globalThis.Fuse || null;
 export const hljs = globalThis.hljs || null;
-// 卡内原生宏引擎要求真实 Chevrotain（Lexer/CstParser/createToken）。
-export const chevrotain = __chevrotain;
 export const sha256 = null;
 export const gzipSync = null;
 export const gzip = null;
@@ -666,6 +838,10 @@ export const buildNativeImportMapEntries = (): Record<string, string> => {
       entries[`${origin}/${path}`] = url
     }
   }
+  // lib.js 的静态依赖（宏解析器/模板库）。
+  for (const [specifier, source] of Object.entries(DEP_MODULES)) {
+    entries[specifier] = dataModule(source)
+  }
   return entries
 }
 
@@ -722,7 +898,12 @@ export const ST_NATIVE_SNAPSHOT_SOURCE = String.raw`(function(){
     oaiSettings: {
       chat_completion_source: 'custom',
       openai_model: 'flyai',
+      // getChatCompletionModel() 对 custom 源读 custom_model。
+      custom_model: 'flyai',
       custom_url: '',
+      custom_include_body: '',
+      custom_exclude_body: '',
+      custom_include_headers: '',
       streaming: false,
       temperature: 1,
       top_p: 1,

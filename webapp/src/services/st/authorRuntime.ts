@@ -2292,7 +2292,10 @@ ${chatMarkup(options.messages, options.html) || chineseFallback}
 <div id="extensionsMenu"></div>
 <div id="top-settings-holder"></div>
 <script>${JQUERY_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
-<script>${LODASH_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
+<script>(function(){${LODASH_SOURCE.replace(
+        /<\/script/gi,
+        '<\\/script'
+      )}\nif (typeof window._ === 'undefined') window._ = __lodashVendor;})();</script>
 <script>${ZOD_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
 <script>${escapeScriptBody(ST_CORE_SOURCE)}</script>
 <script>${shim}</script>

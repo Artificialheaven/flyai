@@ -128,6 +128,7 @@ describe('buildAuthorDoc', () => {
     expect(doc).toContain('window.tavern_events')
     expect(doc).toContain('registerMvuSchema')
     expect(doc).toContain('window.__YZDJ_STATE__')
+    expect(doc).toContain('window._ = __lodashVendor')
     expect(doc).toContain('Content-Security-Policy')
     expect(doc).toContain("connect-src 'none'")
     expect(doc).toContain('data:text/javascript')

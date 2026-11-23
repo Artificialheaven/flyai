@@ -10,7 +10,10 @@
 | `jquery-3.6.0.min.js` | 3.6.0 | `https://code.jquery.com/jquery-3.6.0.min.js` | MIT（文件头保留版权声明） |
 | `lodash-4.18.1.min.js` | 4.18.1 | npm `lodash-es`，经 `esbuild --bundle --format=iife --global-name=__lodashVendor --minify` 打成全局 | MIT（`lodash-LICENSE.txt`） |
 | `zod-4.6.7.min.js` | 4.6.7 | npm `zod`，经 `esbuild --bundle --format=iife --global-name=z --platform=browser --minify` 打成全局 | MIT（`zod-LICENSE.txt`） |
-| `chevrotain-11.0.3.min.js` | 11.0.3 | npm `chevrotain/lib/chevrotain.min.mjs` 原样复制（自包含 ESM），经 import map 提供给 `lib.js` 的 `chevrotain` 导出 | Apache-2.0（`chevrotain-LICENSE.txt`） |
+| `chevrotain-11.2.0.min.js` | 11.2.0 | npm `chevrotain/lib/chevrotain.min.mjs` 原样复制（自包含 ESM），经 import map 提供给 `lib.js` 的 `chevrotain` 导出 | Apache-2.0（`chevrotain-LICENSE.txt`） |
+| `moment-2.30.1.min.js` | 2.30.1 | npm `moment/min/moment.min.js`（UMD，注入时绑定 globalThis） | MIT（`moment-LICENSE.txt`） |
+| `seedrandom-3.0.5.esm.js` | 3.0.5 | jsDelivr `seedrandom@3.0.5/+esm`（自包含 ESM） | MIT（`seedrandom-LICENSE.txt`） |
+| `droll-0.2.1.esm.js` | 0.2.1 | jsDelivr `droll@0.2.1/+esm`（自包含 ESM，导出 validate/roll） | MIT（`droll-LICENSE.txt`） |
 
 酒馆助手脚本（`services/st/authorRuntime.ts`）会用到 MVU Zod 的全局 `z`；
 断网时卡内脚本无法从 CDN 加载 zod，这里内置一份。

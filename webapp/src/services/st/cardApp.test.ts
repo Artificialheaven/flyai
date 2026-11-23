@@ -223,7 +223,8 @@ describe('内置 lodash', () => {
 
   it('不引用 lodash 的卡片不额外注入', () => {
     const doc = buildCardAppDoc(APP, { message: '' })
-    expect(doc).not.toContain('__lodashVendor')
+    // 原生 lib 模块会引用该全局名，但不应注入 lodash bundle 本体。
+    expect(doc).not.toContain('window._ = __lodashVendor')
   })
 
   it('内置 bundle 可执行，`_.get` 能读 stat_data', () => {
