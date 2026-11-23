@@ -700,7 +700,20 @@ export const buildCardAppShim = (
   try { Object.defineProperty(window, 'sessionStorage', { value: persistentStorage('session'), configurable: true }); } catch (e) {}
   // 沙箱内原生 indexedDB.open 抛 SecurityError；扩展只要探测到 indexedDB 存在就
   // 启用日志/媒体库，随后整个手机流程卡死。换成进程内桩，刷新后由聊天文件回读。
-  try { if (STCORE.installIndexedDbShim) STCORE.installIndexedDbShim(window); } catch (e) {}
+  try {
+    if (STCORE.installIndexedDbShim) {
+      STCORE.installIndexedDbShim(window, {
+        load: function(){
+          return CHAT_METADATA && CHAT_METADATA.__flyai_idb__;
+        },
+        save: function(data){
+          if (!data || typeof data !== 'object') return;
+          CHAT_METADATA.__flyai_idb__ = data;
+          try { saveMetadata().catch(function(){}); } catch (e) {}
+        }
+      });
+    }
+  } catch (e) {}
   // 沙箱 iframe 是 opaque origin，navigator.locks.request 会抛
   // “Access to the Locks API is denied in this context”。卡片的开场建档
   // 会先探测 navigator.locks，再走锁内世界书写入；这里换成页面内串行桩，

@@ -1034,6 +1034,8 @@ export const en = {
   featuresStJsSandboxDesc:
     'Run full-page HTML+JS card apps in a sandboxed iframe without same-origin access (on for admins, off for regular users by default)',
   featuresStAuthorScripts: 'TavernHelper scripts',
+  featuresStMvuMaxKb: 'Variable write limit (KB)',
+  featuresStMvuMaxKbHint: 'Max size of a single chat-variable write, 64–4096; empty = 128',
   featuresStAuthorScriptsDesc:
     'Run card extensions.tavern_helper scripts through the TavernHelper compatibility runtime (on for admins, off for regular users by default)',
   featuresStExternalImages: 'External images',

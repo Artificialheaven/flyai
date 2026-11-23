@@ -505,10 +505,61 @@
   // 流程卡在 rejected promise 上。这里提供进程内实现（open/createObjectStore/
   // transaction/get/put/delete/clear 常用子集），数据只在当前 iframe 生命周期内
   // 有效；扩展刷新后会重新从聊天文件（chat_metadata.variables）回读权威状态。
-  ST.installIndexedDbShim = function (win) {
+  ST.installIndexedDbShim = function (win, options) {
     if (!win || !win.indexedDB) return false;
+    var persist = options && typeof options === 'object' ? options : null;
     var databases = {};
+    var loaded = false;
+    var saveTimer = null;
     var nextId = 0;
+    // 扩展（例如约会大作战手机）会把 journal 当成本机权威存储。进程内实现
+    // 刷新即丢，所以允许宿主提供 load/save：把库内容落到 chat_metadata。
+    // 首次 open 时才读，避免 shim 初始化早于会话状态初始化。
+    function ensureLoaded() {
+      if (loaded) return;
+      loaded = true;
+      if (!persist || typeof persist.load !== 'function') return;
+      try {
+        var data = persist.load();
+        if (data && typeof data === 'object') {
+          var parsed = JSON.parse(JSON.stringify(data));
+          for (var dbName in parsed) {
+            if (!Object.prototype.hasOwnProperty.call(parsed, dbName)) continue;
+            var raw = parsed[dbName] && typeof parsed[dbName] === 'object' ? parsed[dbName] : {};
+            var db = makeDatabase(String(dbName));
+            db.version = Number(raw.version) || 0;
+            var stores = raw.stores && typeof raw.stores === 'object' ? raw.stores : {};
+            for (var storeName in stores) {
+              if (!Object.prototype.hasOwnProperty.call(stores, storeName)) continue;
+              db.stores[String(storeName)] =
+                stores[storeName] && typeof stores[storeName] === 'object' ? stores[storeName] : {};
+            }
+            databases[String(dbName)] = db;
+          }
+        }
+      } catch (e) {}
+    }
+    function scheduleSave() {
+      if (!persist || typeof persist.save !== 'function') return;
+      if (saveTimer) return;
+      var flush = function () {
+        saveTimer = null;
+        try {
+          var text = JSON.stringify(databases, function (key, value) {
+            if (value && typeof value === 'object') {
+              if (typeof win.Blob === 'function' && value instanceof win.Blob) return undefined;
+              if (typeof win.ArrayBuffer === 'function' && value instanceof win.ArrayBuffer) {
+                return undefined;
+              }
+            }
+            return value;
+          });
+          if (text) persist.save(JSON.parse(text));
+        } catch (e) {}
+      };
+      if (typeof win.setTimeout === 'function') saveTimer = win.setTimeout(flush, 200);
+      else flush();
+    }
     function defer(fn) {
       if (typeof win.setTimeout === 'function') win.setTimeout(fn, 0);
       else fn();
@@ -570,6 +621,7 @@
           return op(function (req) {
             var k = key == null ? String(++nextId) : String(key);
             map[k] = cloneValue(value);
+            scheduleSave();
             succeed(req, k);
           });
         },
@@ -581,12 +633,14 @@
               return;
             }
             map[k] = cloneValue(value);
+            scheduleSave();
             succeed(req, k);
           });
         },
         delete: function (key) {
           return op(function (req) {
             delete map[String(key)];
+            scheduleSave();
             succeed(req, undefined);
           });
         },
@@ -595,6 +649,7 @@
             for (var k in map) {
               if (Object.prototype.hasOwnProperty.call(map, k)) delete map[k];
             }
+            scheduleSave();
             succeed(req, undefined);
           });
         }
@@ -668,6 +723,7 @@
     }
     var factory = {
       open: function (name, version) {
+        ensureLoaded();
         var req = newRequest();
         var dbName = String(name);
         var wanted = Number(version) || 1;
@@ -700,6 +756,7 @@
         var req = newRequest();
         defer(function () {
           delete databases[String(name)];
+          scheduleSave();
           succeed(req, undefined);
         });
         return req;

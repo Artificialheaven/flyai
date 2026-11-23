@@ -574,6 +574,9 @@ const mapMessage = (
         ? { templateRenderId: source.template_render_id }
         : {}),
       ...(source.origin === 'card' ? { origin: 'card' as const } : {}),
+      ...(source.st_extra && typeof source.st_extra === 'object'
+        ? { stExtra: source.st_extra }
+        : {}),
       // 自动回忆挂在本次发言的回复上，重画/刷新后保持同样的折叠组
       recall: source.recall?.length ? toRecallItems(source.recall) : undefined,
       // 后端支持续写：历史消息同样可作为前缀，能力限制交给 canContinueReply

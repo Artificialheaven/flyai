@@ -56,6 +56,7 @@ type FormState = {
   stCardActions: TriValue
   stCardWrite: TriValue
   stNetProxy: TriValue
+  stMvuMaxKb: string
   mvu: TriValue
   templatePrompt: TriValue
   templateOutput: TriValue
@@ -119,6 +120,7 @@ const toForm = (settings: Awaited<ReturnType<typeof getMySettings>>): FormState 
   stCardActions: tri(settings.st_card_actions_enabled),
   stCardWrite: tri(settings.st_card_write_enabled),
   stNetProxy: tri(settings.st_net_proxy_enabled),
+  stMvuMaxKb: optText(settings.st_mvu_max_kb),
   mvu: tri(settings.mvu_enabled),
   templatePrompt: tri(settings.template_enabled),
   templateOutput: tri(settings.template_output_enabled),
@@ -169,6 +171,7 @@ export const FeaturesPanel = () => {
       mes_example_chars: parseOptInt(form.mesExampleChars),
       pinned_chars: parseOptInt(form.pinnedChars),
       galgame_max_loops: parseOptInt(form.galgameLoops),
+      st_mvu_max_kb: parseOptInt(form.stMvuMaxKb),
       max_tokens: parseOptInt(form.maxTokens),
     } as const
     if (Object.values(ints).some((value) => value === undefined)) {
@@ -212,6 +215,7 @@ export const FeaturesPanel = () => {
       st_card_actions_enabled: triBool(form.stCardActions),
       st_card_write_enabled: triBool(form.stCardWrite),
       st_net_proxy_enabled: triBool(form.stNetProxy),
+      st_mvu_max_kb: optional(ints.st_mvu_max_kb),
       mvu_enabled: triBool(form.mvu),
       template_enabled: triBool(form.templatePrompt),
       template_output_enabled: triBool(form.templateOutput),
@@ -446,6 +450,13 @@ export const FeaturesPanel = () => {
               desc={t('featuresStAuthorScriptsDesc')}
               value={form.stAuthorScripts === 'inherit' ? null : form.stAuthorScripts === 'on'}
               onChange={(value) => patch({ stAuthorScripts: tri(value) })}
+            />
+            <NumberField
+              label={t('featuresStMvuMaxKb')}
+              placeholder={t('adminInherit')}
+              hint={t('featuresStMvuMaxKbHint')}
+              value={form.stMvuMaxKb}
+              onChange={(value) => patch({ stMvuMaxKb: value })}
             />
             <TriRow
               label={t('featuresStExternalImages')}

@@ -137,6 +137,8 @@ export type AssistantMessage = MessageBranch & {
   recall?: RecallItem[]
   /** 消息来源：卡片在宿主确认后发起的动作为 'card'，缺省为用户手动操作 */
   origin?: 'card'
+  /** 酒馆 message.extra（手机楼层锚点、开场标记等），刷新后由卡内读回 */
+  stExtra?: Record<string, unknown>
   /** EJS 模板原文（仅输出侧功能开启且含模板时存在） */
   rawContent?: string
   /** false=等待客户端渲染；true=已渲染；缺省=不含模板 */

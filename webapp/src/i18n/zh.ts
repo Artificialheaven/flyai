@@ -1018,6 +1018,8 @@ export const zh = {
   featuresStAuthorScripts: '酒馆助手脚本',
   featuresStAuthorScriptsDesc:
     '执行卡内 extensions.tavern_helper 脚本（酒馆助手兼容运行时；管理员默认开启，普通用户默认关闭）',
+  featuresStMvuMaxKb: '变量写回上限（KB）',
+  featuresStMvuMaxKbHint: '卡内 chat 变量单次写回上限，64–4096，留空为 128',
   featuresStExternalImages: '外链插图',
   featuresStExternalImagesDesc: '直接加载卡内声明的外部图片（默认关闭）',
   featuresStImageProxy: '服务端图片代理',

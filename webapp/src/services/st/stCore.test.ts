@@ -39,7 +39,13 @@ const loadCore = () => {
   const context = vm.createContext(sandbox)
   vm.runInContext(ST_CORE_SOURCE, context)
   return sandbox.__FLYAI_ST_CORE__ as {
-    installIndexedDbShim: (win: unknown) => boolean
+    installIndexedDbShim: (
+      win: unknown,
+      options?: {
+        load?: () => unknown
+        save?: (data: unknown) => void
+      }
+    ) => boolean
   }
 }
 
@@ -84,6 +90,52 @@ describe('installIndexedDbShim', () => {
       request.onerror = () => reject(request.error)
     })
     expect(stored).toEqual({ ops: [1] })
+  })
+
+  it('提供 load/save 时把 IndexedDB 内容交宿主持久化', async () => {
+    const ST = loadCore()
+    const saved: unknown[] = []
+    const win: Record<string, unknown> = {
+      indexedDB: {},
+      setTimeout: (fn: () => void) => setTimeout(fn, 0),
+    }
+    expect(
+      ST.installIndexedDbShim(win, {
+        load: () => ({
+          journals: {
+            name: 'journals',
+            version: 1,
+            stores: { ops: { room: { value: 1 } } },
+            onversionchange: null,
+          },
+        }),
+        save: (data) => saved.push(data),
+      })
+    ).toBe(true)
+    const db = await new Promise<IdbDb>((resolve, reject) => {
+      const request = (win.indexedDB as IdbFactory).open('journals', 1)
+      request.onsuccess = () => resolve(request.result as IdbDb)
+      request.onerror = () => reject(request.error)
+    })
+    const existing = await new Promise<unknown>((resolve) => {
+      const tx = db.transaction('ops', 'readonly')
+      const request = tx.objectStore('ops').get('room')
+      request.onsuccess = () => resolve(request.result)
+    })
+    expect(existing).toEqual({ value: 1 })
+
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction('ops', 'readwrite')
+      tx.objectStore('ops').put({ value: 2 }, 'room')
+      tx.oncomplete = () => resolve()
+    })
+    await tick()
+    await tick()
+    expect(saved.length).toBeGreaterThan(0)
+    const last = saved[saved.length - 1] as {
+      journals?: { stores?: { ops?: Record<string, unknown> } }
+    }
+    expect(last.journals?.stores?.ops?.room).toEqual({ value: 2 })
   })
 
   it('onupgradeneeded 先于 onsuccess，且缺失键返回 undefined', async () => {

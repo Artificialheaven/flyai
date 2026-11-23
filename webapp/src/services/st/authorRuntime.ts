@@ -138,6 +138,9 @@ export const authorRuntimeMessages = (
       text: text.slice(0, MAX_MESSAGE_CHARS),
       name: message.speakerName,
       statData: message.statData,
+      // 手机把楼层锚点写在 assistant 的 message.extra 里；丢了这个字段，
+      // 刷新后 journal 无法 adopt 聊天文件，会一直停在 needsRead。
+      extra: message.stExtra,
     })
   }
   return out.slice(-MAX_MESSAGES)
@@ -650,12 +653,9 @@ const buildShim = ({
         item.message = text;
         if (!item.extra || typeof item.extra !== 'object') item.extra = {};
         if (message.extra && typeof message.extra === 'object') {
-          for (var k in message.extra) {
-            if (Object.prototype.hasOwnProperty.call(message.extra, k) &&
-                item.extra[k] === undefined) {
-              item.extra[k] = clone(message.extra[k]);
-            }
-          }
+          // MESSAGES 是当前 iframe 的权威状态；setChatMessages 可能改写已有
+          // extra（手机的楼层锚点 messageId/replyId），不能只补缺失键。
+          item.extra = clone(message.extra);
         }
         if (!Array.isArray(item.swipe_info)) item.swipe_info = [];
         if (stat) item.variables = [{ stat_data: clone(stat) }];
@@ -704,7 +704,20 @@ const buildShim = ({
   try { Object.defineProperty(window, 'sessionStorage', { value: storage('session'), configurable: true }); } catch (e) {}
   // 沙箱内原生 indexedDB.open 抛 SecurityError；扩展只要探测到 indexedDB 存在就
   // 启用日志/媒体库，随后整个手机流程卡死。换成进程内桩，刷新后由聊天文件回读。
-  try { if (STCORE.installIndexedDbShim) STCORE.installIndexedDbShim(window); } catch (e) {}
+  try {
+    if (STCORE.installIndexedDbShim) {
+      STCORE.installIndexedDbShim(window, {
+        load: function(){
+          return CHAT_METADATA && CHAT_METADATA.__flyai_idb__;
+        },
+        save: function(data){
+          if (!data || typeof data !== 'object') return;
+          CHAT_METADATA.__flyai_idb__ = data;
+          try { saveMetadata().catch(function(){}); } catch (e) {}
+        }
+      });
+    }
+  } catch (e) {}
   // 沙箱 iframe 里 navigator.locks.request 会抛 SecurityError；换成页面内串行桩
   try {
     var lockChains = {};

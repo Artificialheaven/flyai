@@ -429,6 +429,19 @@ def session_character_export(sid: str, request: Request):
 _ST_MVU_MAX_BYTES = 128 * 1024
 _ST_MVU_MAX_DEPTH = 16
 _ST_MVU_MAX_OPS = 200
+
+
+def _st_mvu_max_bytes(sc) -> int:
+    """用户可调的单次 chat 变量写回上限（KB），默认 128，范围 64–4096。"""
+    kb = getattr(getattr(sc, "user_settings", None), "st_mvu_max_kb", None)
+    try:
+        kb = int(kb)
+    except (TypeError, ValueError):
+        kb = 0
+    if kb <= 0:
+        kb = 128
+    kb = max(64, min(4096, kb))
+    return kb * 1024
 _ST_MVU_MAX_PATH = 512
 _ST_MVU_OPS = frozenset({"add", "remove", "replace", "move", "copy", "test"})
 _ST_WORLD_MAX_ENTRIES = 500
@@ -530,11 +543,12 @@ def st_write_mvu(sid: str, body: StMvuBody, request: Request):
     if mode not in ("patch", "replace"):
         raise HTTPException(400, "mode 仅支持 patch/replace")
 
+    max_bytes = _st_mvu_max_bytes(sc)
     if mode == "replace":
         if not isinstance(body.stat_data, dict):
             raise HTTPException(400, "replace 需要 stat_data 对象")
-        if _json_size(body.stat_data) > _ST_MVU_MAX_BYTES:
-            raise HTTPException(413, "变量数据超过 128KB 上限")
+        if _json_size(body.stat_data) > max_bytes:
+            raise HTTPException(413, "变量数据超过 %dKB 上限" % (max_bytes // 1024))
         if _json_depth(body.stat_data, _ST_MVU_MAX_DEPTH) > _ST_MVU_MAX_DEPTH:
             raise HTTPException(400, "变量嵌套层级过深")
         new_state = copy.deepcopy(body.stat_data)
@@ -553,8 +567,8 @@ def st_write_mvu(sid: str, body: StMvuBody, request: Request):
             path = op.get("path")
             if not isinstance(path, str) or not path or len(path) > _ST_MVU_MAX_PATH:
                 raise HTTPException(400, "patch 路径非法")
-        if _json_size(ops) > _ST_MVU_MAX_BYTES:
-            raise HTTPException(413, "变量更新超过 128KB 上限")
+        if _json_size(ops) > max_bytes:
+            raise HTTPException(413, "变量更新超过 %dKB 上限" % (max_bytes // 1024))
         if _json_depth(ops, _ST_MVU_MAX_DEPTH) > _ST_MVU_MAX_DEPTH:
             raise HTTPException(400, "变量嵌套层级过深")
         base = (getattr(_st_last_assistant(t), "stat_data", None)

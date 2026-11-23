@@ -256,6 +256,8 @@ export type MySettings = {
   st_card_actions_enabled: boolean | null
   st_card_write_enabled: boolean | null
   st_net_proxy_enabled: boolean | null
+  /** 卡内 chat 变量单次写回上限（KB）；null=默认 128 */
+  st_mvu_max_kb: number | null
   /** EJS 模板个人开关（默认关；输出侧需管理员 allow_output_side） */
   template_enabled: boolean | null
   template_output_enabled: boolean | null

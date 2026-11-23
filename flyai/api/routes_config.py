@@ -679,6 +679,8 @@ class MySettingsPayload(BaseModel):
     st_card_actions_enabled: Optional[bool] = None
     st_card_write_enabled: Optional[bool] = None
     st_net_proxy_enabled: Optional[bool] = None
+    # 卡内 chat 变量单次写回上限（KB）；None=默认 128
+    st_mvu_max_kb: Optional[int] = None
     mvu_enabled: Optional[bool] = None
     # EJS 模板（方案 B）个人开关
     template_enabled: Optional[bool] = None
@@ -759,6 +761,8 @@ def put_my_settings(payload: MySettingsPayload, request: Request):
         setattr(us, key, None if v is None else bool(v))
     us.galgame_max_loops = _opt_int(
         payload.galgame_max_loops, "galgame_max_loops", 1, 100)
+    us.st_mvu_max_kb = _opt_int(
+        payload.st_mvu_max_kb, "st_mvu_max_kb", 64, 4096)
     us.self_memory_enabled = bool(payload.self_memory_enabled)
     us.real_time_enabled = bool(payload.real_time_enabled)
 

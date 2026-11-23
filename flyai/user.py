@@ -363,6 +363,8 @@ class UserSettings:
     st_card_write_enabled: Optional[bool] = None
     # 卡内网络请求经服务端受控代理（需管理员开启 st_net 且等级达标）
     st_net_proxy_enabled: Optional[bool] = None
+    # 卡内 chat 变量（MVU stat_data）单次写回上限，单位 KB；None=默认 128
+    st_mvu_max_kb: Optional[int] = None
     mvu_enabled: Optional[bool] = None
     # EJS 模板（方案 B）：提示词侧 / 输出侧个人开关，默认关闭
     template_enabled: Optional[bool] = None
@@ -398,6 +400,7 @@ class UserSettings:
         "st_card_actions_enabled": "b",
         "st_card_write_enabled": "b",
         "st_net_proxy_enabled": "b",
+        "st_mvu_max_kb": "i",
         "mvu_enabled": "b",
         "template_enabled": "b",
         "template_output_enabled": "b",
