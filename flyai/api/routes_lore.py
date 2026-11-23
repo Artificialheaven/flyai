@@ -169,9 +169,12 @@ def _max_card_bytes(request: Request) -> int:
 
 @router.get("/characters")
 def list_characters(request: Request, summary: bool = False):
-    chars = _state(request).lore.list_characters()
+    lore = _state(request).lore
+    chars = lore.list_characters()
     if summary:
-        return {"characters": [c.summary() for c in chars]}
+        return {
+            "characters": [c.summary(lore.character_digest(c.id)) for c in chars]
+        }
     return {"characters": [c.to_dict() for c in chars]}
 
 
@@ -362,9 +365,10 @@ def import_character(payload: LoreImportPayload, request: Request):
 
 @router.get("/worlds")
 def list_worlds(request: Request, summary: bool = False):
-    worlds = _state(request).lore.list_worlds()
+    lore = _state(request).lore
+    worlds = lore.list_worlds()
     if summary:
-        return {"worlds": [w.summary() for w in worlds]}
+        return {"worlds": [w.summary(lore.world_digest(w.id)) for w in worlds]}
     return {"worlds": [w.to_dict() for w in worlds]}
 
 

@@ -9,6 +9,7 @@ import {
 } from './client.js'
 import { downloadBlob } from '../native.js'
 import { invalidateCatalog, loadCatalog } from './catalogCache.js'
+import { readLoreDetail, writeLoreDetail } from './loreDetailCache.js'
 import type {
   AttributeDef,
   Character,
@@ -35,9 +36,25 @@ export const listCharacters = (options?: { force?: boolean }): Promise<Character
     options
   )
 
-/** 单张角色卡完整数据（编辑器 / 副本操作前按需拉取） */
-export const getCharacter = (cid: string): Promise<Character> =>
-  request<Character>(`/api/characters/${encodeURIComponent(cid)}`)
+/**
+ * 单张角色卡完整数据（编辑器 / 副本操作前按需拉取）。
+ * 传入列表里的 md5 时先查本地整卡缓存：一致就不再下载大 JSON。
+ */
+export const getCharacter = async (cid: string, md5?: string): Promise<Character> => {
+  if (md5) {
+    const cached = await readLoreDetail<Character>('character', cid, md5)
+    if (cached) {
+      return cached
+    }
+  }
+  const character = await request<Character>(
+    `/api/characters/${encodeURIComponent(cid)}`
+  )
+  if (md5) {
+    void writeLoreDetail('character', cid, md5, character)
+  }
+  return character
+}
 
 export const createCharacter = async (body: Partial<Character>): Promise<Character> => {
   const character = await request<Character>('/api/characters', {
@@ -97,9 +114,20 @@ export const listWorlds = (options?: { force?: boolean }): Promise<WorldSummary[
     options
   )
 
-/** 单个世界观完整数据（编辑器 / 导出前按需拉取） */
-export const getWorld = (wid: string): Promise<World> =>
-  request<World>(`/api/worlds/${encodeURIComponent(wid)}`)
+/** 单个世界观完整数据（编辑器 / 导出前按需拉取）；md5 命中本地缓存时走本地。 */
+export const getWorld = async (wid: string, md5?: string): Promise<World> => {
+  if (md5) {
+    const cached = await readLoreDetail<World>('world', wid, md5)
+    if (cached) {
+      return cached
+    }
+  }
+  const world = await request<World>(`/api/worlds/${encodeURIComponent(wid)}`)
+  if (md5) {
+    void writeLoreDetail('world', wid, md5, world)
+  }
+  return world
+}
 
 export const createWorld = async (body: Partial<World>): Promise<World> => {
   const world = await request<World>('/api/worlds', { method: 'POST', body: JSON.stringify(body) })

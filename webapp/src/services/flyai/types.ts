@@ -257,11 +257,15 @@ export type CharacterSummary = Pick<
   alternate_greetings?: string[]
   openings?: CharacterOpening[]
   table_size?: number
+  /** 整卡文件 md5：本地整卡缓存的校验令牌（旧后端不返回） */
+  md5?: string
 }
 
 /** 内容库列表用轻量世界观 */
 export type WorldSummary = Pick<World, 'id' | 'name' | 'avatar' | 'content'> & {
   entry_count?: number
+  /** 世界书文件 md5（旧后端不返回） */
+  md5?: string
 }
 
 /** 预设 prompt 块（酒馆 prompt manager 概念）：main 并入系统提示、depth 插历史、tail 放在历史后 */

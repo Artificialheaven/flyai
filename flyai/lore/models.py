@@ -266,8 +266,11 @@ class Character:
             "assets": copy.deepcopy(list(self.assets or [])),
         }
 
-    def summary(self) -> Dict[str, Any]:
-        """内容库列表用的轻量结构：不含 table/extensions/assets 等大字段。"""
+    def summary(self, md5: str = "") -> Dict[str, Any]:
+        """内容库列表用的轻量结构：不含 table/extensions/assets 等大字段。
+
+        md5 是整卡文件的摘要：前端用它判断本地缓存的整卡是否还有效。
+        """
         from .opening import opening_entries
 
         openings = []
@@ -291,6 +294,7 @@ class Character:
             ],
             "openings": openings,
             "table_size": len(self.table),
+            "md5": md5,
         }
 
     @classmethod
@@ -358,14 +362,15 @@ class World:
             "prompt_tools": self.prompt_tools,
         }
 
-    def summary(self) -> Dict[str, Any]:
-        """内容库列表用的轻量结构：不含逐条 table。"""
+    def summary(self, md5: str = "") -> Dict[str, Any]:
+        """内容库列表用的轻量结构：不含逐条 table；md5 同角色卡。"""
         return {
             "id": self.id,
             "name": self.name,
             "avatar": self.avatar,
             "content": self.content,
             "entry_count": len(self.table),
+            "md5": md5,
         }
 
     @classmethod

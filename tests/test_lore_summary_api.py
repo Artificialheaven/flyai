@@ -60,6 +60,9 @@ def test_character_list_summary_omits_heavy_fields(tmp_path):
     assert item["table_size"] == 2
     assert item["openings"] == [{"title": "开局1", "preview": "你醒在天台。"}]
     assert item["alternate_greetings"] == ["收到。"]
+    # 整卡 md5：前端用它判断本地缓存是否还有效
+    assert len(item["md5"]) == 32
+    assert item["md5"] == sc.lore.character_digest("c1")
 
 
 def test_character_list_without_summary_keeps_full_payload(tmp_path):
@@ -70,6 +73,20 @@ def test_character_list_without_summary_keeps_full_payload(tmp_path):
     full = body["characters"][0]
     assert len(full["table"]) == 2
     assert full["extensions"] == {"big": "x" * 100}
+
+
+def test_character_digest_tracks_file_changes(tmp_path):
+    sc, request = _env(tmp_path)
+    card = _card()
+    sc.lore.save_character(card)
+    first = list_characters(request, summary=True)["characters"][0]["md5"]
+    # 未改动时重复取摘要保持一致
+    assert list_characters(request, summary=True)["characters"][0]["md5"] == first
+
+    card.intro = "改过的简介"
+    sc.lore.save_character(card)
+    second = list_characters(request, summary=True)["characters"][0]["md5"]
+    assert second != first
 
 
 def test_character_detail_by_id(tmp_path):
@@ -96,6 +113,7 @@ def test_world_list_summary_and_detail(tmp_path):
     assert summary["entry_count"] == 2
     assert "table" not in summary
     assert summary["content"] == "总述"
+    assert len(summary["md5"]) == 32
 
     full = get_world("w1", request)
     assert len(full["table"]) == 2

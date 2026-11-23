@@ -255,16 +255,16 @@ const LoreContent = () => {
     })
   }
 
-  /** 编辑器需要整张卡：列表只缓存摘要，点开时再拉详情 */
+  /** 编辑器需要整张卡：列表只缓存摘要，点开时再拉详情（md5 命中本地缓存则不下载） */
   const editCharacter = (character: CharacterSummary) =>
     run(character.id, async () => {
-      const full = await getCharacter(character.id)
+      const full = await getCharacter(character.id, character.md5)
       setView({ kind: 'character', initial: full })
     })
 
   const editWorld = (world: WorldSummary) =>
     run(world.id, async () => {
-      const full = await getWorld(world.id)
+      const full = await getWorld(world.id, world.md5)
       setView({ kind: 'world', initial: full })
     })
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -32,6 +33,9 @@ class LoreStore:
         # 缓存对象视为只读；写路径落盘后必须 _forget 对应路径。
         self._cache_lock = threading.RLock()
         self._cache: Dict[str, Tuple[Tuple[int, int], object]] = {}
+        # 文件内容 md5 缓存：路径 -> (stamp, md5)。前端拿列表里的 md5 判断
+        # 本地整卡缓存是否还有效；文件未变时不重复读盘/哈希。
+        self._digests: Dict[str, Tuple[Tuple[int, int], str]] = {}
 
     # ---- 缓存 ----
 
@@ -66,6 +70,10 @@ class LoreStore:
                 k for k in self._cache if os.path.dirname(k) == dir_key and k not in live
             ]:
                 del self._cache[key]
+            for key in [
+                k for k in self._digests if os.path.dirname(k) == dir_key and k not in live
+            ]:
+                del self._digests[key]
         return out
 
     def _read_file(self, directory: Path, cid: str, from_dict: Callable):
@@ -95,6 +103,44 @@ class LoreStore:
     def _forget(self, path: Path) -> None:
         with self._cache_lock:
             self._cache.pop(str(path), None)
+            self._digests.pop(str(path), None)
+
+    def _file_digest(self, path: Path, stamp: Tuple[int, int]) -> str:
+        """文件内容 md5（按 stat 缓存；只有内容真的变了才重新读取）。"""
+        key = str(path)
+        with self._cache_lock:
+            cached = self._digests.get(key)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+        h = hashlib.md5()
+        try:
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return ""
+        digest = h.hexdigest()
+        with self._cache_lock:
+            self._digests[key] = (stamp, digest)
+        return digest
+
+    def _digest_in(self, directory: Optional[Path], cid: str) -> str:
+        if directory is None:
+            return ""
+        try:
+            p = safe_child(directory, f"{cid}.json")
+            st = p.stat()
+        except Exception:
+            return ""
+        return self._file_digest(p, (st.st_mtime_ns, st.st_size))
+
+    def character_digest(self, cid: str) -> str:
+        """内容库列表用：整卡文件 md5（自身优先，其次共享目录）。"""
+        digest = self._digest_in(self._char_dir, cid)
+        return digest or self._digest_in(self._shared_char_dir, cid)
+
+    def world_digest(self, wid: str) -> str:
+        return self._digest_in(self._world_dir, wid)
 
     # ---- 角色 ----
 
