@@ -171,6 +171,32 @@ describe('buildAuthorDoc', () => {
     expect(shim).toContain('new Proxy(jq')
   })
 
+  it('注入 TavernHelper / context 扩展 / locks / 静默生成桥', () => {
+    const doc = buildAuthorDoc({
+      html: '<div data-yzdj></div>',
+      author: AUTHOR,
+      messages: [{ role: 'assistant', text: 'hi' }],
+      sessionId: 'sid-1',
+      userName: '玩家甲',
+      canWrite: true,
+    })
+    expect(doc).toContain('window.TavernHelper')
+    expect(doc).toContain('getChatHistoryDetail')
+    expect(doc).toContain('replaceVariables')
+    expect(doc).toContain('injectPrompts')
+    expect(doc).toContain('chatId: CHAT_ID')
+    expect(doc).toContain('name1: USER_NAME')
+    expect(doc).toContain('getRequestHeaders')
+    expect(doc).toContain('loadWorldInfo')
+    expect(doc).toContain('saveWorldInfo')
+    expect(doc).toContain('navigator.locks')
+    expect(doc).toContain('DALPhoneMainline')
+    expect(doc).toContain('__flyaiGenerate')
+    expect(doc).toContain('/api/backends/chat-completions/generate')
+    expect(doc).toContain('sid-1')
+    expect(doc).toContain('玩家甲')
+  })
+
   it('把 MVU / mvu_zod 的 CDN import 映射到本地 shim', () => {
     const doc = buildAuthorDoc({
       html: '<div data-yzdj></div>',

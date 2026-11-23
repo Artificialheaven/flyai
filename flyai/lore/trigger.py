@@ -84,16 +84,154 @@ def fuzzy_hit(term: str, text: str) -> bool:
     return False
 
 
+def entry_enabled(entry: LoreEntry) -> bool:
+    """ST disable：False 的条目在任何注入路径都不生效。"""
+    return getattr(entry, "enabled", True) is not False
+
+
+def entry_constant(entry: LoreEntry) -> bool:
+    """常驻条目：pinned 或 ST constant。"""
+    return bool(getattr(entry, "pinned", False) or getattr(entry, "constant", False))
+
+
+def _key_hit(term: str, text: str, *, case_sensitive: bool = False,
+             whole_words: bool = False) -> bool:
+    term = (term or "").strip()
+    if not term:
+        return False
+    if case_sensitive:
+        if whole_words and term.isascii():
+            return re.search(
+                r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])",
+                text or "",
+            ) is not None
+        return term in (text or "")
+    if whole_words and term.isascii():
+        return re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])",
+            (text or "").lower(),
+        ) is not None
+    return fuzzy_hit(term, text)
+
+
+def _secondary_ok(entry: LoreEntry, text: str, render_key) -> bool:
+    if getattr(entry, "selective", True) is False:
+        return True
+    keys = [
+        render_key(str(k).strip()) for k in (getattr(entry, "secondary_keys", None) or [])
+        if str(k or "").strip()
+    ]
+    if not keys:
+        return True
+    case_sensitive = bool(getattr(entry, "case_sensitive", False))
+    whole_words = bool(getattr(entry, "match_whole_words", False))
+    hits = [
+        _key_hit(k, text, case_sensitive=case_sensitive, whole_words=whole_words)
+        for k in keys
+    ]
+    logic = (getattr(entry, "selective_logic", "") or "and_any").lower()
+    if logic == "and_all":
+        return all(hits)
+    if logic == "not_all":
+        return not all(hits)
+    if logic == "not_any":
+        return not any(hits)
+    return any(hits)
+
+
+def entry_matches(entry: LoreEntry, text: str, render_key=None) -> bool:
+    """ST selective 语义：主键命中，再按 selective_logic 判定次键。"""
+    render_key = render_key or (lambda value: value or "")
+    case_sensitive = bool(getattr(entry, "case_sensitive", False))
+    whole_words = bool(getattr(entry, "match_whole_words", False))
+    primary = entry_triggers(entry, render_key)
+    hit = any(
+        _key_hit(k, text, case_sensitive=case_sensitive, whole_words=whole_words)
+        for k in primary
+    )
+    if not hit:
+        return False
+    return _secondary_ok(entry, text, render_key)
+
+
+def _past_texts(text: str, scan_texts: Optional[List[str]],
+                window: Optional[int]) -> List[str]:
+    """取最近 window 条“当前消息之前”的历史文本，用于 sticky/cooldown。"""
+    if not scan_texts or not window or window <= 0:
+        return []
+    past = list(scan_texts)
+    if text:
+        last = past[-1] if past else ""
+        if last == text or (last and (text in last or last in text)):
+            past = past[:-1]
+    return past[-int(window):]
+
+
 def keyword_hits(tables: List[Tuple[str, List[LoreEntry]]],
-                 text: str, render_key=None) -> List[Tuple[str, LoreEntry]]:
-    """扫描各表非常驻条目的触发词，返回命中的 (kind, entry)，保持表内原序。"""
+                 text: str, render_key=None,
+                 scan_texts: Optional[List[str]] = None) -> List[Tuple[str, LoreEntry]]:
+    """扫描各表非常驻条目，返回命中的 (kind, entry)，保持表内原序。
+
+    - enabled=False 永不注入；
+    - constant/pinned 由常驻块处理，不重复；
+    - selective 只控制次键逻辑，主键仍按 keyword 扫描；
+    - 条目配了 scan_depth 时，在最近 N 条消息里扫描，否则只看当前文本。
+    """
     out: List[Tuple[str, LoreEntry]] = []
     for kind, table in tables:
         for e in table or []:
-            if getattr(e, "pinned", False):
+            if not entry_enabled(e):
+                continue
+            if entry_constant(e):
                 continue  # 常驻条目已由 _pinned_block 注入，不重复
-            if any(fuzzy_hit(k, text) for k in entry_triggers(e, render_key)):
+            # delay：会话至少 N 条消息后才允许激活
+            delay = getattr(e, "delay", None)
+            if delay and scan_texts is not None and len(scan_texts) < int(delay):
+                continue
+            haystack = text
+            depth = getattr(e, "scan_depth", None)
+            if depth and depth > 0 and scan_texts:
+                haystack = "\n".join(scan_texts[-int(depth):])
+            matched = entry_matches(e, haystack, render_key)
+            # sticky：命中后在接下来 N 条消息内继续保持激活
+            sticky = getattr(e, "sticky", None)
+            if not matched and sticky:
+                matched = any(
+                    entry_matches(e, item, render_key)
+                    for item in _past_texts(haystack, scan_texts, sticky)
+                )
+            # cooldown：最近 N 条消息内命中过，则本次不再激活
+            cooldown = getattr(e, "cooldown", None)
+            if matched and cooldown:
+                if any(
+                    entry_matches(e, item, render_key)
+                    for item in _past_texts(haystack, scan_texts, cooldown)
+                ):
+                    matched = False
+            if matched:
                 out.append((kind, e))
+    # 递归激活：已命中条目的正文再去触发其他条目（ST recursion）。
+    if out and len(out) < MAX_TRIGGER_ENTRIES:
+        hit_ids = {id(entry) for _k, entry in out}
+        pool = "\n".join(
+            (entry.content or "")
+            for _k, entry in out
+            if not getattr(entry, "exclude_recursion", False)
+        )
+        if pool.strip():
+            for kind, table in tables:
+                for e in table or []:
+                    if len(out) >= MAX_TRIGGER_ENTRIES:
+                        break
+                    if id(e) in hit_ids:
+                        continue
+                    if not entry_enabled(e) or entry_constant(e):
+                        continue
+                    if getattr(e, "prevent_recursion", False):
+                        continue
+                    if entry_matches(e, pool, render_key):
+                        out.append((kind, e))
+                        hit_ids.add(id(e))
     return out
 
 

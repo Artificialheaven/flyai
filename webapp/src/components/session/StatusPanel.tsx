@@ -91,6 +91,10 @@ export const statusPanelAvailable = (session: Session): boolean => {
   if ((st.panels?.length ?? 0) > 0) {
     return true
   }
+  // 作者脚本自己会挂载面板（悬浮球/全息终端），没有占位符也要给入口
+  if (st.author?.enabled !== false && (st.author?.scripts?.length ?? 0) > 0) {
+    return true
+  }
   return st.flags?.mvu !== false && !!st.mvu?.enabled && hasData(st.mvu.stat_data)
 }
 
@@ -118,6 +122,7 @@ const PanelBody = ({
   authorMessages,
   sessionId,
   threadId,
+  userName,
   canWrite = false,
   canAct = false,
   actionMessageId,
@@ -140,6 +145,8 @@ const PanelBody = ({
   sessionId?: string
   /** 私聊窗口 id；作者脚本写入变量时回传 */
   threadId?: string
+  /** 玩家名；作者脚本 context.name1 / 手机署名 */
+  userName?: string
   /** 作者脚本是否可写回会话副本（st_card_write） */
   canWrite?: boolean
   /** 作者脚本是否可发送/继续/重生成（st_card_actions） */
@@ -182,12 +189,22 @@ const PanelBody = ({
   }, [sessionId, netEnabled])
   const authorScripts = author?.enabled !== false ? author?.scripts ?? [] : []
   const hasAuthorScripts = authorScripts.length > 0
+  // 没有占位符面板时，作者脚本本身就是一个面板：脚本会自己往文档里挂载
+  // 悬浮球/全息终端。给它一个合成条目，让抽屉能渲染 AuthorPanelFrame。
+  const effectivePanels = useMemo<StPanel[]>(() => {
+    if (panels.length > 0) {
+      return panels
+    }
+    return hasAuthorScripts
+      ? [{ token: '', title: t('statusPanelTitle') } as StPanel]
+      : []
+  }, [panels, hasAuthorScripts, t])
   const rendered = useMemo(() => {
-    if (!htmlEnabled || panels.length === 0 || (!statData && !hasAuthorScripts)) {
+    if (!htmlEnabled || effectivePanels.length === 0 || (!statData && !hasAuthorScripts)) {
       return []
     }
     const variables = { stat_data: statData ?? {} }
-    return panels
+    return effectivePanels
       .map((panel) => {
         const html = renderPanel(
           panel.token, panelScripts, variables, macroNames
@@ -212,7 +229,7 @@ const PanelBody = ({
         }
       })
       .filter((item) => item.html.trim() || item.author)
-  }, [htmlEnabled, statData, hasAuthorScripts, panels, panelScripts, macroNames, t])
+  }, [htmlEnabled, statData, hasAuthorScripts, effectivePanels, panelScripts, macroNames, t])
   const rows = useMemo(() => (statData ? statDataRows(statData) : []), [statData])
 
   if (rendered.length > 0) {
@@ -230,10 +247,12 @@ const PanelBody = ({
                   author={{ ...author, scripts: authorScripts }}
                   messages={authorMessages ?? []}
                   variables={statData}
+                  chatMetadata={author?.chat_metadata}
                   character={author?.character ?? cardCharacter}
                   externalMedia={options.externalImages}
                   sessionId={sessionId}
                   threadId={threadId}
+                  userName={userName}
                   canWrite={canWrite}
                   canAct={canAct}
                   actionMessageId={actionMessageId}
@@ -340,6 +359,7 @@ export const StatusPanelContent = ({
       authorMessages={authorMessages}
       sessionId={session.id}
       threadId={session.threadId}
+      userName={session.userName}
       canWrite={st?.flags?.card_write === true}
       canAct={st?.flags?.card_actions === true}
       actionMessageId={lastAssistantId}
@@ -474,6 +494,8 @@ export const StatusPanelInline = ({
   sessionId?: string
   /** 私聊窗口 id；作者脚本写入变量时回传 */
   threadId?: string
+  /** 玩家名；作者脚本 context.name1 / 手机署名 */
+  userName?: string
   /** 作者脚本是否可写回会话副本（st_card_write） */
   canWrite?: boolean
   /** 作者脚本是否可发送/继续/重生成（st_card_actions） */

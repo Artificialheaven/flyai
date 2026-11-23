@@ -175,7 +175,9 @@
     "max_loops": 40
   },
   "lore": {
-    "max_card_mb": 50
+    "max_card_mb": 50,
+    "max_card_write_mb": 2,
+    "max_author_script_mb": 5
   },
   "sandbox": {
     "enabled": false,

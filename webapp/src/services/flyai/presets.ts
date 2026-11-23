@@ -1,4 +1,12 @@
-import { apiUrl, authHeaders, FlyApiError, readDetail, request } from './client.js'
+import {
+  apiUrl,
+  authHeaders,
+  FlyApiError,
+  readDetail,
+  request,
+  uploadRequest,
+  type UploadProgress,
+} from './client.js'
 import { downloadBlob } from '../native.js'
 import { invalidateCatalog, loadCatalog, updateCatalog } from './catalogCache.js'
 import type { Preset, PresetImportResult } from './types.js'
@@ -93,13 +101,14 @@ export const exportPreset = async (preset: Preset): Promise<void> => {
 }
 
 /** 酒馆 OpenAI 预设（.json/.txt，脏 JSON 容错）或 FlyAI 预设信封 */
-export const importPreset = async (file: File): Promise<PresetImportResult> => {
+export const importPreset = async (
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<PresetImportResult> => {
   const form = new FormData()
   form.append('file', file, file.name)
-  const result = await request<PresetImportResult>('/api/presets/import', {
-    method: 'POST',
-    body: form,
-    formData: true,
+  const result = await uploadRequest<PresetImportResult>('/api/presets/import', form, {
+    onProgress,
   })
   invalidateCatalog('presets')
   return result

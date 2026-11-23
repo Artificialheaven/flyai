@@ -18,8 +18,10 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 MAX_SCRIPTS = 32
-MAX_SCRIPT_CHARS = 512 * 1024
-MAX_TOTAL_CHARS = 2 * 1024 * 1024
+# 默认 5MB：整页面板脚本（约会大作战的全息终端）单文件约 4.3MB。
+# 管理面板可按 1–5MB 调整，最终以 lore.max_author_script_mb 为准。
+MAX_SCRIPT_CHARS = 5 * 1024 * 1024
+MAX_TOTAL_CHARS = 5 * 1024 * 1024
 MAX_DEPTH = 8
 MAX_NAME = 120
 MAX_ID = 120
@@ -61,14 +63,20 @@ def _walk(nodes: List[Any], depth: int = 0) -> List[Dict[str, Any]]:
     return out
 
 
-def collect_author_scripts(character: Any) -> Dict[str, Any]:
+def collect_author_scripts(
+    character: Any,
+    max_script_chars: int = MAX_SCRIPT_CHARS,
+    max_total_chars: int = MAX_TOTAL_CHARS,
+) -> Dict[str, Any]:
     """返回 ``{"scripts": [...], "truncated": bool}``。
 
     每个脚本保留前端执行所需的最小字段；``enabled`` 缺省按启用处理，
-    显式 ``false`` 的脚本不下发。
+    显式 ``false`` 的脚本不下发。限额可由管理面板配置（1–5MB）。
     """
     if character is None:
         return {"scripts": [], "truncated": False}
+    max_script_chars = max(1, int(max_script_chars))
+    max_total_chars = max(1, int(max_total_chars))
     extensions = getattr(character, "extensions", None)
     leaves = _walk(_script_tree(extensions))
     scripts: List[Dict[str, Any]] = []
@@ -83,10 +91,10 @@ def collect_author_scripts(character: Any) -> Dict[str, Any]:
         content = node.get("content")
         if not isinstance(content, str):
             continue
-        if len(content) > MAX_SCRIPT_CHARS:
+        if len(content) > max_script_chars:
             truncated = True
             continue
-        if total + len(content) > MAX_TOTAL_CHARS:
+        if total + len(content) > max_total_chars:
             truncated = True
             break
         total += len(content)

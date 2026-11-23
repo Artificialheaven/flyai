@@ -6,6 +6,7 @@ import {
   MAX_CARD_SEND_TEXT,
   MAX_CARD_VARS_OPS,
   MAX_CARD_VARS_PATH,
+  MAX_CARD_WORLD_BYTES,
   MAX_CARD_WORLD_ENTRIES,
   cardJsonSize,
   checkCardIntent,
@@ -150,7 +151,10 @@ describe('checkCardIntent：世界书与角色', () => {
       )
     ).toBe('action-failed')
     expect(
-      failCode({ kind: 'world', entries: [{ content: 'x'.repeat(2 * 1024 * 1024) }] }, WRITE_ONLY)
+      failCode(
+        { kind: 'world', entries: [{ content: 'x'.repeat(MAX_CARD_WORLD_BYTES) }] },
+        WRITE_ONLY
+      )
     ).toBe('action-failed')
   })
 

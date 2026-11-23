@@ -75,6 +75,8 @@ def test_parse_constant_depth_entry():
 def test_parse_disabled_constant_kept_dormant():
     e = tavern.parse_entry(_entry(constant=True, disable=True))
     assert e.pinned is False
+    assert e.constant is False
+    assert e.enabled is False
     assert e.position == "system"
 
 
@@ -83,14 +85,18 @@ def test_parse_keys_primary_and_secondary_logic0():
         key=["铁剑, 符文"], keysecondary=["铁剑铭文", "咒文"],
         selective=True, selectiveLogic=0,
     ))
-    assert e.keys == ["铁剑", "符文", "铁剑铭文", "咒文"]
+    assert e.keys == ["铁剑", "符文"]
+    assert e.secondary_keys == ["铁剑铭文", "咒文"]
+    assert e.selective_logic == "and_any"
 
 
-def test_parse_not_logic_ignores_secondary():
+def test_parse_not_logic_keeps_secondary():
     e = tavern.parse_entry(_entry(
         key=["铁剑"], keysecondary=["咒文"], selectiveLogic=2,
     ))
     assert e.keys == ["铁剑"]
+    assert e.secondary_keys == ["咒文"]
+    assert e.selective_logic == "not_any"
 
 
 def test_parse_probability_disabled():

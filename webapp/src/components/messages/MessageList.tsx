@@ -12,7 +12,7 @@ import type { MarkdownRenderOptions } from '../markdown/SanitizedHtml.js'
 import type { CardAppCapabilities, CardAppWriteContext } from '../../services/st/cardApp.js'
 import { authorRuntimeMessages } from '../../services/st/authorRuntime.js'
 import { mergeRegexScripts } from '../../services/st/regex.js'
-import { CardAppCharacterContext } from '../markdown/CardAppFrame.js'
+import { CardAppCharacterContext, CardAppChatContext } from '../markdown/CardAppFrame.js'
 import { MarkdownMacroNamesContext } from '../markdown/Markdown.js'
 import { AssistantMessage } from './AssistantMessage.js'
 import { ScrollToBottomContext } from './scrollContext.js'
@@ -246,6 +246,32 @@ export const MessageList = ({
     () => authorRuntimeMessages(messages),
     [messages]
   )
+  const cardChat = useMemo(
+    () => ({
+      chatId: session.id,
+      userName: session.userName ?? '',
+      characterName: session.characterName ?? '',
+      characterAvatar: session.characterAvatar ?? '',
+      messages: authorMessages.map((item) => ({
+        id: item.id,
+        role: item.role,
+        name: item.name,
+        text: item.text,
+        statData: item.statData as Record<string, unknown> | null | undefined,
+        extra: item.extra,
+      })),
+      metadata:
+        (session.st?.author as { chat_metadata?: Record<string, unknown> } | undefined)
+          ?.chat_metadata ?? null,
+    }),
+    [
+      session.id,
+      session.userName,
+      session.characterName,
+      session.characterAvatar,
+      authorMessages,
+    ]
+  )
   const uploadRetryId = getUploadRetryId(messages, streaming)
   // 群聊窗口由后端按座位分别应答，暂不支持编辑/重新生成；只读会话同理。
   const editable = !session.readOnly && session.threadKind !== 'group'
@@ -254,6 +280,7 @@ export const MessageList = ({
       <ScrollToBottomContext.Provider value={scrollToBottom}>
         <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
         <div ref={isMobile ? scrollRef : undefined} className={styles.scroll}>
+          <CardAppChatContext.Provider value={cardChat}>
           <CardAppCharacterContext.Provider value={cardCharacter}>
             <div ref={contentRef} className={styles.column}>
               {messages.map((message, index) =>
@@ -305,6 +332,7 @@ export const MessageList = ({
               )}
             </div>
           </CardAppCharacterContext.Provider>
+          </CardAppChatContext.Provider>
         </div>
         {footer}
       </div>

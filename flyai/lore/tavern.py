@@ -88,16 +88,23 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+_LOGIC_MAP = {0: "and_any", 1: "not_all", 2: "not_any", 3: "and_all"}
+_POSITION_MAP = {
+    0: "before",
+    1: "after",
+    2: "ANTop",
+    3: "ANBottom",
+    4: "at_depth",
+    5: "EMTop",
+    6: "EMBottom",
+    7: "outlet",
+}
+
+
 def parse_entry(e: Dict[str, Any]) -> LoreEntry:
     """单条酒馆 entry → LoreEntry（调用方负责空内容过滤）。"""
     keys = _entry_keys(e)
-    # selectiveLogic: 0=AND ANY（主词 + 任一次级词）时把次级词也当触发词；
-    # 1=AND ALL / 2=NOT ANY / 3=NOT ALL 的语义本项目没有，忽略次级词
-    if e.get("selective") and _as_int(e.get("selectiveLogic"), 0) == 0:
-        for k in _entry_secondary(e):
-            if k not in keys:
-                keys.append(k)
-
+    secondary = _entry_secondary(e)
     constant = bool(e.get("constant"))
     # 世界书用 disable=True；CC 卡内嵌条目用 enabled=False
     disabled = bool(e.get("disable")) or (e.get("enabled") is False)
@@ -105,6 +112,20 @@ def parse_entry(e: Dict[str, Any]) -> LoreEntry:
 
     use_prob = e.get("useProbability")
     probability = _as_int(e.get("probability"), 100) if use_prob else 100
+    raw_scan = e.get("scanDepth")
+    try:
+        scan_depth = int(raw_scan) if raw_scan not in (None, "") else None
+    except (TypeError, ValueError):
+        scan_depth = None
+
+    def _opt(key: str):
+        value = e.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     return LoreEntry(
         title=_entry_title(e),
@@ -116,6 +137,21 @@ def parse_entry(e: Dict[str, Any]) -> LoreEntry:
         insert_order=_as_int(e.get("order"), 100),
         role=_ROLE_MAP.get(_as_int(e.get("role"), 0), "system"),
         probability=max(1, min(100, probability)),
+        enabled=not disabled,
+        constant=constant and not disabled,
+        selective=bool(e.get("selective", True)),
+        secondary_keys=secondary,
+        selective_logic=_LOGIC_MAP.get(_as_int(e.get("selectiveLogic"), 0), "and_any"),
+        scan_depth=scan_depth,
+        case_sensitive=bool(e.get("caseSensitive", False)),
+        match_whole_words=bool(e.get("matchWholeWords", False)),
+        sticky=_opt("sticky"),
+        cooldown=_opt("cooldown"),
+        delay=_opt("delay"),
+        prevent_recursion=bool(e.get("preventRecursion", False)),
+        exclude_recursion=bool(e.get("excludeRecursion", False)),
+        delay_until_recursion=_opt("delayUntilRecursion"),
+        position_type=_POSITION_MAP.get(st_position, "before"),
     )
 
 

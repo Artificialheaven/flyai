@@ -63,7 +63,10 @@ class LoreQuerier:
         for idx, e in enumerate(table):
             title_l = (e.title or "").lower()
             content_l = (e.content or "").lower()
-            keys_l = [str(k).lower() for k in (e.keys or [])]
+            keys_l = [
+                str(k).lower()
+                for k in list(e.keys or []) + list(getattr(e, "secondary_keys", None) or [])
+            ]
             score = 0
             for term in terms:
                 if title_l == term:
@@ -104,8 +107,11 @@ class LoreQuerier:
     @staticmethod
     def _table_signature(entries: List[LoreEntry]) -> str:
         blob = json.dumps(
-            [{"title": e.title, "content": e.content, "pinned": e.pinned,
-              "keys": list(e.keys or [])} for e in entries],
+            [{"title": e.title, "content": e.content,
+              "pinned": e.pinned or getattr(e, "constant", False),
+              "keys": list(e.keys or []),
+              "secondary_keys": list(getattr(e, "secondary_keys", None) or [])}
+             for e in entries],
             ensure_ascii=False,
         )
         return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
@@ -127,7 +133,8 @@ class LoreQuerier:
                 return cached["entries"], cached["texts"], cached["vecs"]
 
             texts = [
-                ((e.title or "") + "\n" + " ".join(e.keys or [])
+                ((e.title or "") + "\n"
+                 + " ".join(list(e.keys or []) + list(getattr(e, "secondary_keys", None) or []))
                  + "\n" + (e.content or ""))[:_EMBED_TEXT]
                 for e in entries
             ]
@@ -160,7 +167,8 @@ class LoreQuerier:
     async def trigger_block(self, text: str, embedder=None, *,
                             char_name: str = "", user_name: str = "",
                             group_names: Optional[List[str]] = None,
-                            variables: Optional[Dict[str, Any]] = None) -> str:
+                            variables: Optional[Dict[str, Any]] = None,
+                            scan_texts: Optional[List[str]] = None) -> str:
         """扫描本轮用户消息，返回自动注入的【相关设定】块（无命中返回 ""）。
 
         关键词/模糊命中优先；配了 embedder 时再用语义检索补足至多
@@ -183,7 +191,9 @@ class LoreQuerier:
                 group_names=group_names,
             )
 
-        picked = _trigger.keyword_hits(tables, text, _render_key)
+        picked = _trigger.keyword_hits(
+            tables, text, _render_key, scan_texts=scan_texts
+        )
         if embedder is not None and len(picked) < _trigger.MAX_TRIGGER_ENTRIES:
             picked.extend(
                 await self._semantic_triggers(tables, text, embedder, picked)
@@ -208,9 +218,13 @@ class LoreQuerier:
             self.world.table if self.world else [],
         ]
         specs: List[Dict[str, Any]] = []
+        from .trigger import entry_constant, entry_enabled
+
         for table in tables:
             for e in table:
-                if not e.pinned or e.position != "depth":
+                if not entry_enabled(e):
+                    continue
+                if not entry_constant(e) or e.position != "depth":
                     continue
                 if not (e.content or "").strip():
                     continue
@@ -244,8 +258,10 @@ class LoreQuerier:
             except Exception:
                 continue
             scored = []
+            from .trigger import entry_constant, entry_enabled
+
             for e, v in zip(entries, vecs):
-                if e.pinned or id(e) in hit_ids:
+                if not entry_enabled(e) or entry_constant(e) or id(e) in hit_ids:
                     continue
                 scored.append((dot(qv, v), e))
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -327,14 +343,19 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
     parts: List[str] = []
     render = _prompt_renderer(character, opts)
 
-    if character:
-        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
-        pinned = _pinned_block(
-            character.table, "角色常驻资料", rp,
-            variables=opts.variables, char_name=character.name,
+    def _pin(table: List[LoreEntry], label: str, *types: str) -> Optional[str]:
+        return _pinned_block(
+            table, label, rp,
+            variables=opts.variables,
+            char_name=(character.name if character else ""),
             user_name=(opts.user_character.name if opts.user_character else ""),
             group_names=opts.audience or [],
+            position_types=set(types),
         )
+
+    if character:
+        parts.append(f"你正在扮演角色「{character.name}」,以角色的身份、语气与记忆与用户对话。")
+        pinned = _pin(character.table, "角色常驻资料", "before")
         if pinned:
             parts.append(pinned)
         if character.intro:
@@ -346,9 +367,18 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
                 f"【角色经历】\n"
                 f"{fit_budget(render(character.background), _budget(rp, 'background_chars'))}"
             )
+        after = _pin(character.table, "角色常驻资料", "after")
+        if after:
+            parts.append(after)
+        em_top = _pin(character.table, "角色常驻资料", "EMTop")
+        if em_top:
+            parts.append(em_top)
         example = _mes_example_block(character, opts)
         if example:
             parts.append(example)
+        em_bottom = _pin(character.table, "角色常驻资料", "EMBottom")
+        if em_bottom:
+            parts.append(em_bottom)
         # 与旧构建器一致：角色 query_lore 引导无条件注入
         parts.append(
             "角色内容记录表中还有更详细的资料，需要时调用工具 query_lore(kind='character', keyword=…) 查询。"
@@ -357,24 +387,42 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
         # 无角色卡：回退到通用 AI 助手人格，不使用扮演口吻
         parts.append(GENERAL_ASSISTANT_PROMPT)
 
+    # ANTop：用户自设块之前；ANBottom：自设块之后
+    an_top = []
+    an_bottom = []
+    if character:
+        top = _pin(character.table, "角色常驻资料", "ANTop")
+        bottom = _pin(character.table, "角色常驻资料", "ANBottom")
+        if top:
+            an_top.append(top)
+        if bottom:
+            an_bottom.append(bottom)
+    if world:
+        top = _pin(world.table, "世界常驻设定", "ANTop")
+        bottom = _pin(world.table, "世界常驻设定", "ANBottom")
+        if top:
+            an_top.append(top)
+        if bottom:
+            an_bottom.append(bottom)
+    parts.extend(an_top)
+
     persona = _persona_block(opts.user_character, render)
     if persona:
         parts.append(persona)
+    parts.extend(an_bottom)
 
+    if world:
+        wbefore = _pin(world.table, "世界常驻设定", "before", "EMTop")
+        if wbefore:
+            parts.append(wbefore)
     if world and world.content:
         parts.append(
             f"【世界观】\n{fit_budget(render(world.content), _budget(rp, 'world_chars'))}"
         )
     if world:
-        wpinned = _pinned_block(
-            world.table, "世界常驻设定", rp,
-            variables=opts.variables,
-            char_name=(character.name if character else ""),
-            user_name=(opts.user_character.name if opts.user_character else ""),
-            group_names=opts.audience or [],
-        )
-        if wpinned:
-            parts.append(wpinned)
+        wafter = _pin(world.table, "世界常驻设定", "after", "EMBottom")
+        if wafter:
+            parts.append(wafter)
         if world.table:
             parts.append(
                 "世界设定表的更多细节可通过 query_lore(kind='world', keyword=…) 查询。"
@@ -445,6 +493,7 @@ def _pinned_block(
     char_name: str = "",
     user_name: str = "",
     group_names: Optional[List[str]] = None,
+    position_types: Optional[set] = None,
 ) -> Optional[str]:
     """渲染钉选条目为常驻块；无钉选返回 None。
 
@@ -460,9 +509,21 @@ def _pinned_block(
             group_names=group_names or [], variables=variables,
         )
 
+    from .trigger import entry_constant, entry_enabled
+
+    def _selected(e: LoreEntry) -> bool:
+        if not (entry_enabled(e) and entry_constant(e)):
+            return False
+        # depth 条目走 depth_block_specs，不在系统提示词常驻块里重复注入
+        if getattr(e, "position", "system") == "depth":
+            return False
+        if position_types is None:
+            return True
+        return e.resolved_position_type in position_types
+
     blocks = [
         f"『{e.title or '(无标题)'}』\n{_render(e.content or '(空内容)')}"
-        for e in (table or []) if e.pinned
+        for e in (table or []) if _selected(e)
     ]
     if not blocks:
         return None

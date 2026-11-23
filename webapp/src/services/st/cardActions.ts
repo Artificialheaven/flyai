@@ -19,13 +19,13 @@ export const MAX_CARD_VARS_OPS = 200
 export const MAX_CARD_VARS_PATH = 512
 /** 世界书条目数与序列化上限 */
 export const MAX_CARD_WORLD_ENTRIES = 500
-export const MAX_CARD_WORLD_BYTES = 2 * 1024 * 1024
+export const MAX_CARD_WORLD_BYTES = 5 * 1024 * 1024
 /**
- * 角色字段写入序列化上限，与后端 _ST_CHAR_MAX_BYTES 保持一致。
+ * 角色字段写入序列化上限；后端按 lore.max_card_write_mb（1–5MB）最终校验。
  * 不能取更小的值：没有挂载世界书的卡会把自带世界（extensions.world）整表
  * 经 updateWorldbookWith 写回 character.table，条目多的卡轻松超过 64KB。
  */
-export const MAX_CARD_CHARACTER_BYTES = 1024 * 1024
+export const MAX_CARD_CHARACTER_BYTES = 5 * 1024 * 1024
 
 /** 角色副本字段白名单（与后端 routes_session 保持一致） */
 export const CARD_CHARACTER_FIELDS = [

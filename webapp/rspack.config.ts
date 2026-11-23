@@ -46,11 +46,18 @@ export const createConfig = (devServer?: Configuration['devServer']): Configurat
     rules: [
       { test: /\.module\.css$/, type: 'css/module', use: [cssLoader] },
       { test: /\.css$/, exclude: /\.module\.css$/, type: 'css', use: [cssLoader] },
-      // 内置第三方库以字符串形式内联（卡内沙箱的 jQuery，见 services/st/vendor）
+      // 内置第三方库与共享兼容核心以字符串形式内联（见 services/st/vendor、services/st/compat）
       { test: /\.js$/, resourceQuery: /raw/, type: 'asset/source' },
       {
         test: /\.(j|t)sx?$/,
-        exclude: [/[\\/]node_modules[\\/]/, /[\\/]src[\\/]services[\\/]st[\\/]vendor[\\/]/],
+        // vendor/compat 里的 .js 只通过 ?raw 引入；若再被 swc 当模块编译，
+        // `import source from '...?raw'` 会拿到模块对象而不是字符串，
+        // 注入沙箱时变成 `[object Object]`（srcdoc 语法错误）。
+        exclude: [
+          /[\\/]node_modules[\\/]/,
+          /[\\/]src[\\/]services[\\/]st[\\/]vendor[\\/]/,
+          /[\\/]src[\\/]services[\\/]st[\\/]compat[\\/]/,
+        ],
         loader: 'builtin:swc-loader',
         options: {
           jsc: {

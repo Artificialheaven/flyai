@@ -28,6 +28,8 @@ export type ChatSendPayload = {
   regenerate_message_id?: string
   /** 续写锚点：目标必须是该窗口最后一条可见 AI 回复（仅 dm，与编辑/重生成互斥） */
   continue_message_id?: string
+  /** 酒馆卡 context.generate：只进本轮出站提示词，不新增用户消息 */
+  quiet_prompt?: string
   /** 消息来源标记；目前只接受 'card' */
   origin?: 'card'
   /**

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useTranslate } from '../../i18n/index.js'
 import { useAuth } from '../../services/flyai/auth.js'
-import { assetUrl } from '../../services/flyai/client.js'
+import { assetUrl, type UploadProgress } from '../../services/flyai/client.js'
 import {
   createCharacter,
   createWorld,
@@ -98,6 +98,9 @@ const LoreContent = () => {
   const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
   const [busyId, setBusyId] = useState('')
+  const [uploadState, setUploadState] = useState<{ name: string; percent: number } | null>(
+    null
+  )
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [regexTarget, setRegexTarget] = useState<Preset | null>(null)
@@ -321,16 +324,25 @@ const LoreContent = () => {
     }
   }
 
+  const uploadProgress = (file: File) => (progress: UploadProgress) => {
+    setUploadState({
+      name: file.name,
+      percent: Math.max(0, Math.min(100, Math.round(progress.percent * 100))),
+    })
+  }
+
   const importPresetFile = async (file: File) => {
     setBusyId('import')
+    setUploadState({ name: file.name, percent: 0 })
     try {
-      await importPreset(file)
+      await importPreset(file, uploadProgress(file))
       await load()
       showToast(t('loreImported'))
     } catch (err) {
       showToast(t('loreImportFailed', { message: errorText(err) }))
     } finally {
       setBusyId('')
+      setUploadState(null)
     }
   }
 
@@ -359,11 +371,12 @@ const LoreContent = () => {
 
   const importCharacterFile = async (file: File) => {
     setBusyId('import')
+    setUploadState({ name: file.name, percent: 0 })
     try {
       if (file.name.toLowerCase().endsWith('.png')) {
-        await importCharacterCard(file)
+        await importCharacterCard(file, uploadProgress(file))
       } else {
-        await importCharacterJson(file)
+        await importCharacterJson(file, uploadProgress(file))
       }
       await load()
       showToast(t('loreImported'))
@@ -371,11 +384,13 @@ const LoreContent = () => {
       showToast(t('loreImportFailed', { message: errorText(err) }))
     } finally {
       setBusyId('')
+      setUploadState(null)
     }
   }
 
   const importWorldFile = async (file: File) => {
     setBusyId('import')
+    setUploadState({ name: file.name, percent: 0 })
     try {
       const text = await file.text()
       let parsed: unknown = null
@@ -389,9 +404,9 @@ const LoreContent = () => {
           ? (parsed as { type?: unknown }).type === 'flyai-world'
           : 'data' in parsed)
       if (isFlyaiWorld) {
-        await importWorldJson(file)
+        await importWorldJson(file, uploadProgress(file))
       } else {
-        await importWorldbook(file)
+        await importWorldbook(file, uploadProgress(file))
       }
       await load()
       showToast(t('loreImported'))
@@ -399,6 +414,7 @@ const LoreContent = () => {
       showToast(t('loreImportFailed', { message: errorText(err) }))
     } finally {
       setBusyId('')
+      setUploadState(null)
     }
   }
 
@@ -739,6 +755,22 @@ const LoreContent = () => {
         </div>
       </div>
 
+      {uploadState ? (
+        <div className={styles.uploadProgress}>
+          <div className={styles.uploadProgressTrack}>
+            <div
+              className={styles.uploadProgressBar}
+              style={{ width: `${uploadState.percent}%` }}
+            />
+          </div>
+          <span className={styles.uploadProgressText}>
+            {t('loreUploading', {
+              name: uploadState.name,
+              percent: uploadState.percent,
+            })}
+          </span>
+        </div>
+      ) : null}
       {loadError ? <div className={styles.error}>{loadError}</div> : null}
       {loading ? (
         <div className={styles.empty}>{t('loreLoading')}</div>

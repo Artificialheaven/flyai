@@ -13,6 +13,10 @@ type Posted = {
   intent?: Record<string, unknown>
   request?: Record<string, unknown>
   context?: unknown
+  metadata?: unknown
+  changes?: unknown
+  creates?: unknown
+  quiet_prompt?: unknown
   ok?: unknown
   error?: unknown
   status?: unknown
@@ -35,7 +39,8 @@ const makeSandbox = (
   message = 'hello',
   variables: Record<string, unknown> | null = { stat_data: { hp: 7 } },
   character: CharacterLike | null = null,
-  capabilities: CardAppCapabilities | null = null
+  capabilities: CardAppCapabilities | null = null,
+  chat: Parameters<typeof buildCardAppShim>[4] = null
 ) => {
   const posted: Posted[] = []
   const listeners: Record<string, Array<(event: MessageLike) => void>> = {}
@@ -106,6 +111,8 @@ const makeSandbox = (
     },
     removeEventListener: () => undefined,
     open: () => undefined,
+    // 沙箱 iframe 里可能被浏览器拒绝的 Web API
+    navigator: {},
     // 受控网络 shim 用到的 Web API（Node 18+ 全局）
     Response,
     Headers,
@@ -125,7 +132,10 @@ const makeSandbox = (
   sandbox.host = host
 
   const context = vm.createContext(sandbox)
-  vm.runInContext(buildCardAppShim(message, variables, character, capabilities), context)
+  vm.runInContext(
+    buildCardAppShim(message, variables, character, capabilities, chat),
+    context
+  )
 
   const emit = (type: string, event: MessageLike) => {
     for (const fn of listeners[type] || []) {
@@ -193,25 +203,28 @@ describe('buildCardAppShim', () => {
     }
     const context = (sandbox.SillyTavern as {
       getContext: () => {
-        generate: () => boolean
+        generate: () => Promise<boolean>
         extensionSettings: Record<string, unknown>
       }
     }).getContext()
     context.extensionSettings.Astro = { optionMode: 'append' }
     expect(context.extensionSettings.Astro).toEqual({ optionMode: 'append' })
-    expect(context.generate()).toBe(true)
+    // generate 现在返回等待回复落地的 Promise
+    const pending = context.generate()
+    expect(typeof pending.then).toBe('function')
     const action = posted.find((item) => item.type === 'flyai-card-action')
     expect(action?.intent).toEqual({ kind: 'action', action: 'send', text: '选它' })
   })
 
-  it('兼容层没有动作能力时只提示只读，不发送', () => {
+  it('兼容层没有动作能力时只提示只读，不发送', async () => {
     const { sandbox, posted } = makeSandbox()
     const area = (sandbox.document as { getElementById: (id: string) => { value: string } })
       .getElementById('send_textarea')
     area.value = '选它'
-    const generate = (sandbox.SillyTavern as { getContext: () => { generate: () => boolean } })
-      .getContext().generate
-    expect(generate()).toBe(false)
+    const generate = (sandbox.SillyTavern as {
+      getContext: () => { generate: () => Promise<boolean> }
+    }).getContext().generate
+    await expect(generate()).resolves.toBe(false)
     expect(posted.some((item) => item.type === 'flyai-card-action')).toBe(false)
     expect(toasts(posted).map((item) => item.code)).toEqual(['read-only'])
   })
@@ -369,14 +382,21 @@ describe('buildCardAppShim', () => {
     expect(calls).toHaveLength(2)
   })
 
-  it('alert/toastr 走宿主提示，confirm/prompt 返回拒绝值', () => {
+  it('alert/toastr 走宿主提示，confirm 只读拒绝、可写放行，prompt 返回空', () => {
     const { sandbox, posted } = makeSandbox()
     const alertFn = sandbox.alert as (message: string) => void
     alertFn('提示')
     const toastr = sandbox.toastr as { success: (message: string) => void }
     toastr.success('完成')
     expect(toasts(posted).map((item) => item.text)).toEqual(['提示', '完成'])
+    // 只读卡：confirm 一律拒绝；可写卡：放行到宿主逐次确认
     expect((sandbox.confirm as () => boolean)()).toBe(false)
+    const writable = makeSandbox('x', null, null, {
+      actions: false,
+      write: true,
+      net: false,
+    })
+    expect((writable.sandbox.confirm as () => boolean)()).toBe(true)
     expect((sandbox.prompt as () => string | null)()).toBeNull()
   })
 
@@ -462,10 +482,16 @@ describe('buildCardAppShim', () => {
     expect(stSub('{{char}}')).toBe('角色甲')
 
     const context = (sandbox.SillyTavern as {
-      getContext: () => { characters: Array<{ name: string; avatar: string }>; name2: string }
+      getContext: () => {
+        characters: Array<{ name: string; avatar: string }>
+        name1: string
+        name2: string
+      }
     }).getContext()
     expect(context.characters[0]).toMatchObject({ name: '角色甲', avatar: 'https://cdn.example.com/a.png' })
-    expect(context.name2).toBe('')
+    // 楼层检测兼容：name2 必须是角色名，name1 是宿主用户名
+    expect(context.name2).toBe('角色甲')
+    expect(context.name1).toBe('')
 
     const setVariables = sandbox.setVariables as () => boolean
     const insertVariables = sandbox.insertVariables as () => boolean
@@ -515,6 +541,419 @@ describe('buildCardAppShim', () => {
     }
     expect(errors()).toHaveLength(20)
   })
+
+  it('聊天镜像：getContext 暴露 0 楼聊天，createChatMessages/generate 交给宿主发送', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox(
+      '开场白',
+      null,
+      { name: '角色甲', avatar: 'a.png' },
+      { actions: true, write: false, net: false },
+      {
+        chatId: 'chat-1',
+        userName: '玩家',
+        characterName: '角色甲',
+        characterAvatar: 'a.png',
+        messages: [{ role: 'assistant', name: '角色甲', text: '开场白' }],
+      }
+    )
+    type Context = {
+      chat: Array<Record<string, unknown>>
+      chatId: string
+      name1: string
+      name2: string
+      saveChat: () => Promise<boolean>
+      generate: () => Promise<boolean>
+      getCurrentMessageId: () => number
+    }
+    const context = (sandbox.SillyTavern as { getContext: () => Context }).getContext()
+    expect(context.chatId).toBe('chat-1')
+    expect(context.name1).toBe('玩家')
+    expect(context.name2).toBe('角色甲')
+    expect(context.getCurrentMessageId()).toBe(0)
+    expect(context.chat).toHaveLength(1)
+    expect(context.chat[0]).toMatchObject({ is_user: false, mes: '开场白' })
+    await expect(context.saveChat()).resolves.toBe(true)
+
+    const create = sandbox.createChatMessages as (messages: unknown[]) => Promise<
+      Array<Record<string, unknown>>
+    >
+    const created = await create([
+      {
+        role: 'user',
+        message: '开始约会',
+        data: {
+          schema: '没有用别管这个',
+          stat_data: { 世界: { 日期: '' }, 玩家: {}, 角色: {}, 剧情: {} },
+          initialized_lorebooks: { book: [] },
+        },
+      },
+    ])
+    expect(created).toHaveLength(1)
+    expect(context.chat).toHaveLength(2)
+    expect(context.chat[1]).toMatchObject({ is_user: true, mes: '开始约会' })
+    // 消息变量按 swipe 下标存放，保留完整信封
+    expect(context.chat[1].variables).toEqual([
+      {
+        schema: '没有用别管这个',
+        stat_data: { 世界: { 日期: '' }, 玩家: {}, 角色: {}, 剧情: {} },
+        initialized_lorebooks: { book: [] },
+      },
+    ])
+
+    // generate() 把 createChatMessages 暂存的用户文本交给宿主确认发送，
+    // 并等待回复楼层落地后才 resolve
+    const generated = context.generate()
+    expect(posted.filter((item) => item.type === 'flyai-card-action').map((item) => item.intent)).toEqual([
+      { kind: 'action', action: 'send', text: '开始约会' },
+    ])
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-chat',
+        chat: {
+          chatId: 'chat-1',
+          userName: '玩家',
+          messages: [
+            { role: 'assistant', name: '角色甲', text: '开场白' },
+            { role: 'user', name: '玩家', text: '开始约会' },
+            { role: 'assistant', name: '角色甲', text: '回复' },
+          ],
+        },
+      },
+    })
+    await expect(generated).resolves.toBe(true)
+
+    const detail = sandbox.getChatHistoryDetail as (files?: unknown[]) => Promise<
+      Record<string, unknown[]>
+    >
+    const history = await detail()
+    expect(history['chat-1.jsonl']).toBe(context.chat)
+  })
+
+  it('write：createChatMessages 追加楼层落库，并把后端 id 映射回镜像', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox(
+      '开场白',
+      null,
+      { name: '角色甲' },
+      { actions: true, write: true, net: false },
+      {
+        chatId: 'chat-1',
+        userName: '玩家',
+        characterName: '角色甲',
+        messages: [{ id: 'm0', role: 'assistant', text: '开场白' }],
+      }
+    )
+    type Context = {
+      chat: Array<Record<string, unknown>>
+      generate: (type?: string, options?: Record<string, unknown>) => Promise<boolean>
+    }
+    const context = (sandbox.SillyTavern as { getContext: () => Context }).getContext()
+    const create = sandbox.createChatMessages as (messages: unknown[]) => Promise<
+      Array<Record<string, unknown>>
+    >
+    const pending = create([
+      {
+        role: 'user',
+        name: '玩家',
+        message: '开场正文',
+        extra: { dal_opening: { version: 2, id: 'op-1', mode: 'body' } },
+        data: { stat_data: { hp: 1 }, schema: 'x' },
+      },
+    ])
+    const patch = posted.find((item) => item.type === 'flyai-card-messages-patch')
+    expect(patch?.changes).toEqual([])
+    expect(patch?.creates).toEqual([
+      {
+        role: 'user',
+        name: '玩家',
+        message: '开场正文',
+        extra: { dal_opening: { version: 2, id: 'op-1', mode: 'body' } },
+        data: { stat_data: { hp: 1 }, schema: 'x' },
+        is_hidden: false,
+      },
+    ])
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-messages-result',
+        id: patch?.id,
+        ok: true,
+        result: {
+          updated: [],
+          created: [{ id: 'srv-1', message_id: 1, role: 'user' }],
+        },
+      },
+    })
+    const created = await pending
+    expect(created[0].id).toBe('srv-1')
+    expect(context.chat).toHaveLength(2)
+    expect(context.chat[1]).toMatchObject({
+      id: 'srv-1',
+      is_user: true,
+      mes: '开场正文',
+      extra: { dal_opening: { version: 2, id: 'op-1', mode: 'body' } },
+    })
+    // create 已落库后调 generate()：不再重复发送 user 楼层，只请求生成回复
+    const generated = context.generate('normal')
+    const generateMessage = posted.find((item) => item.type === 'flyai-card-generate')
+    expect(generateMessage?.quiet_prompt).toBe('')
+    expect(posted.some((item) => item.type === 'flyai-card-action')).toBe(false)
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-generate-result',
+        id: generateMessage?.id,
+        ok: true,
+      },
+    })
+    await expect(generated).resolves.toBe(true)
+  })
+
+  it('聊天镜像：宿主更新保留 chat[0] 引用与 extra 标记', () => {
+    const { sandbox, emitMessage } = makeSandbox(
+      '开场白',
+      null,
+      { name: '角色甲' },
+      null,
+      {
+        chatId: 'chat-1',
+        userName: '玩家',
+        characterName: '角色甲',
+        messages: [{ role: 'assistant', text: '开场白' }],
+      }
+    )
+    type Context = {
+      chat: Array<Record<string, unknown>>
+      chatId: string
+      name1: string
+    }
+    const context = (sandbox.SillyTavern as { getContext: () => Context }).getContext()
+    const opening = context.chat[0]
+    opening.extra = { dal_opening: true }
+    const envelope = {
+      schema: '没有用别管这个',
+      stat_data: { hp: 1 },
+      initialized_lorebooks: {},
+    }
+    opening.variables = [envelope]
+
+    // 模拟宿主窗口发来的聊天快照（source 必须是宿主窗口）
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-chat',
+        chat: {
+          chatId: 'chat-2',
+          userName: '新玩家',
+          messages: [
+            {
+              role: 'assistant',
+              name: '角色甲',
+              text: '更新后的开场白',
+              statData: { hp: 9 },
+            },
+            { role: 'user', name: '新玩家', text: '你好' },
+          ],
+        },
+      },
+    })
+    expect(context.chat[0]).toBe(opening)
+    expect(context.chat[0].mes).toBe('更新后的开场白')
+    expect(context.chat[0].extra).toEqual({ dal_opening: true })
+    // 宿主快照只有 stat_data，不能覆盖卡写入的完整变量信封
+    expect(context.chat[0].variables).toEqual([envelope])
+    expect(context.chat).toHaveLength(2)
+    const updated = (sandbox.SillyTavern as { getContext: () => Context }).getContext()
+    expect(updated.chatId).toBe('chat-2')
+    expect(updated.name1).toBe('新玩家')
+  })
+
+  it('世界书 HTTP：/api/worldinfo/get|edit 走本地副本，写入交给宿主确认', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox(
+      'hi',
+      null,
+      null,
+      { actions: false, write: true, net: false }
+    )
+    const fetchFn = sandbox.fetch as (
+      url: string,
+      init?: { method?: string; body?: string }
+    ) => Promise<{ json: () => Promise<Record<string, unknown>> }>
+
+    const empty = await fetchFn('/api/worldinfo/get', {
+      method: 'POST',
+      body: JSON.stringify({ name: '约会世界' }),
+    })
+    expect(await empty.json()).toEqual({ entries: {} })
+
+    const pendingEdit = fetchFn('/api/worldinfo/edit', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: '约会世界',
+        data: {
+          entries: {
+            0: { key: ['精灵'], content: '十万个为什么', comment: '设定' },
+          },
+        },
+      }),
+    })
+    await Promise.resolve()
+    const writeIntent = posted.find((item) => item.type === 'flyai-card-action')
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-action-result',
+        id: writeIntent?.id,
+        ok: true,
+        result: { entries: [] },
+      },
+    })
+    const edited = await pendingEdit
+    expect(await edited.json()).toEqual({ ok: true })
+
+    const world = posted.filter((item) => {
+      const intent = item.intent as Record<string, unknown> | undefined
+      return item.type === 'flyai-card-action' && intent?.kind === 'world'
+    })
+    expect(world).toHaveLength(1)
+    expect(world[0].intent).toMatchObject({
+      kind: 'world',
+      entries: [
+        {
+          title: '设定',
+          content: '十万个为什么',
+          keys: ['精灵'],
+          pinned: false,
+        },
+      ],
+    })
+
+    // 读回本地副本
+    const read = await fetchFn('/api/worldinfo/get', {
+      method: 'POST',
+      body: JSON.stringify({ name: '约会世界' }),
+    })
+    expect(await read.json()).toMatchObject({
+      entries: { 0: { content: '十万个为什么' } },
+    })
+  })
+
+  it('世界书 HTTP：无写权限时 edit 被拒绝并提示只读', async () => {
+    const { sandbox, posted } = makeSandbox()
+    const fetchFn = sandbox.fetch as (url: string, init?: { body?: string }) => Promise<unknown>
+    await expect(
+      fetchFn('/api/worldinfo/edit', {
+        body: JSON.stringify({ name: 'x', data: { entries: { 0: { content: 'c' } } } }),
+      })
+    ).rejects.toThrow('flyai-card-read-only')
+    expect(toasts(posted).map((item) => item.code)).toContain('read-only')
+  })
+
+  it('角色卡内嵌世界书：按卡的 slots 映射 uid，供 /api/worldinfo/get 读取', async () => {
+    const { sandbox, emitMessage } = makeSandbox(
+      'hi',
+      null,
+      null,
+      { actions: false, write: true, net: false }
+    )
+    ;(sandbox as Record<string, unknown>).DALOpeningWorldbook = {
+      slots: [
+        { uid: 265, title: '[本局] 玩家资料', constant: true },
+        { uid: 266, title: '[本局] 世界设定', constant: true },
+        { uid: 267, title: '[本局] 原创NPC 1', constant: false },
+      ],
+    }
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-write-context',
+        context: {
+          characterWorldName: '约会大作战P-v1',
+          worldbook: null,
+          character: {
+            table: [
+              { title: '[本局] 玩家资料', content: '待填写', pinned: false, keys: [] },
+              { title: '[本局] 世界设定', content: '待填写', pinned: false, keys: [] },
+              { title: '[本局] 原创NPC 1', content: '待填写', pinned: false, keys: [] },
+              { title: '普通条目', content: '正文', pinned: true, keys: ['甲'] },
+            ],
+          },
+        },
+      },
+    })
+    const names = sandbox.getCharWorldbookNames as (type?: string) => {
+      primary: string | null
+      additional: string[]
+    }
+    expect(names('current')).toEqual({ primary: '约会大作战P-v1', additional: [] })
+
+    const fetchFn = sandbox.fetch as (
+      url: string,
+      init?: { method?: string; body?: string }
+    ) => Promise<{ json: () => Promise<{ entries: Record<string, Record<string, unknown>> }> }>
+    const res = await fetchFn('/api/worldinfo/get', {
+      method: 'POST',
+      body: JSON.stringify({ name: '约会大作战P-v1' }),
+    })
+    const book = await res.json()
+    expect(book.entries['265']).toMatchObject({
+      uid: 265,
+      comment: '[本局] 玩家资料',
+      constant: true,
+      content: '待填写',
+      key: [],
+      disable: false,
+    })
+    expect(book.entries['267']).toMatchObject({ uid: 267, constant: false })
+    // 没有 manifest 声明的条目用稳定序号，避开 slots 的 uid
+    const plain = Object.values(book.entries).find(
+      (entry) => entry.comment === '普通条目'
+    )
+    expect(plain).toMatchObject({ content: '正文', constant: true, key: ['甲'] })
+    expect([265, 266, 267]).not.toContain(plain?.uid)
+  })
+
+  it('navigator.locks 兼容：不抛 SecurityError，同名单串行执行', async () => {
+    const { sandbox } = makeSandbox()
+    type LockManagerLike = {
+      request: (
+        name: string,
+        options: unknown,
+        callback: (lock: unknown) => unknown
+      ) => Promise<unknown>
+      query: () => Promise<{ held: unknown[]; pending: unknown[] }>
+    }
+    const locks = (sandbox.navigator as { locks: LockManagerLike }).locks
+    expect(locks).toBeTruthy()
+    const order: string[] = []
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const first = locks.request('book', { ifAvailable: true }, async () => {
+      await gate
+      order.push('first')
+      return 1
+    })
+    const second = locks.request('book', { ifAvailable: true }, () => {
+      order.push('second')
+      return 2
+    })
+    // 第二把锁必须等第一把完成，而不是被 ifAvailable 直接跳过
+    await Promise.resolve()
+    expect(order).toEqual([])
+    release()
+    await expect(first).resolves.toBe(1)
+    await expect(second).resolves.toBe(2)
+    expect(order).toEqual(['first', 'second'])
+    await expect(locks.query()).resolves.toEqual({ held: [], pending: [] })
+  })
 })
 
 describe('L4 授权能力', () => {
@@ -522,14 +961,17 @@ describe('L4 授权能力', () => {
   const writeOnly: CardAppCapabilities = { actions: false, write: true, net: false }
   const netOnly: CardAppCapabilities = { actions: false, write: false, net: true }
 
-  it('默认不授予任何能力：发送被拒绝、fetch/XHR 不安装', async () => {
+  it('默认不授予任何能力：发送被拒绝、网络请求被拒', async () => {
     const { sandbox, posted } = makeSandbox()
     expect((sandbox.FlyAI as { capabilities: unknown }).capabilities).toEqual({
       actions: false,
       write: false,
       net: false,
     })
-    expect(sandbox.fetch).toBeUndefined()
+    // 世界书本地兼容层需要 fetch 存在；外网请求仍被拒绝，XHR 不安装
+    expect(typeof sandbox.fetch).toBe('function')
+    const fetchFn = sandbox.fetch as (url: string) => Promise<unknown>
+    await expect(fetchFn('https://example.com/api')).rejects.toThrow()
     expect(sandbox.XMLHttpRequest).toBeUndefined()
 
     const triggerSlash = sandbox.triggerSlash as (command: string) => string
@@ -597,8 +1039,10 @@ describe('L4 授权能力', () => {
     })
     expect((sandbox.getChatVariable as (key: string) => unknown)('hp')).toBe(9)
 
-    const deleteVariable = sandbox.deleteVariable as (key: string) => boolean
-    expect(deleteVariable('hp')).toBe(true)
+    const deleteVariable = sandbox.deleteVariable as (
+      key: string
+    ) => { variables: unknown; delete_occurred: boolean }
+    expect(deleteVariable('hp')).toEqual({ variables: {}, delete_occurred: true })
     const remove = posted.filter((item) => item.type === 'flyai-card-action').at(-1)
     expect(remove?.intent).toEqual({ kind: 'vars', mode: 'patch', ops: [{ op: 'remove', path: '/hp' }] })
 
@@ -649,9 +1093,8 @@ describe('L4 授权能力', () => {
       primary: '世界书',
       additional: [],
     })
-    expect((sandbox.getWorldbook as (name: string) => unknown[])('世界书')).toEqual([
-      { title: 'A' },
-    ])
+    const worldbook = (sandbox.getWorldbook as (name: string) => unknown[])('世界书')
+    expect(worldbook.map((entry) => (entry as { title?: string }).title)).toEqual(['A'])
     expect(
       (sandbox.FlyAI as { getCharacterFields: () => unknown }).getCharacterFields()
     ).toEqual({ name: '甲', intro: '介绍', id: 999 })
@@ -660,7 +1103,9 @@ describe('L4 授权能力', () => {
       { title: 'B' },
     ])
     const message = posted.find((item) => item.type === 'flyai-card-action')
-    expect(message?.intent).toEqual({ kind: 'world', entries: [{ title: 'B' }] })
+    const intent = message?.intent as { kind: string; entries: Array<{ title?: string }> }
+    expect(intent.kind).toBe('world')
+    expect(intent.entries.map((entry) => entry.title)).toEqual(['B'])
     emitMessage({
       source: sandbox.host,
       data: {
@@ -696,9 +1141,10 @@ describe('L4 授权能力', () => {
     })
     // 卡期望的书名与两份书都不匹配时仍然返回全部条目；A 在两份书中重复只保留一份
     const getWorldbook = sandbox.getWorldbook as (name: string) => unknown[]
-    const expected = [{ title: 'A' }, { title: 'C' }, { title: 'B' }]
-    expect(getWorldbook('卡片期望的名字')).toEqual(expected)
-    expect(getWorldbook('卡内书')).toEqual(expected)
+    const titles = (name: string) =>
+      getWorldbook(name).map((entry) => (entry as { title?: string }).title)
+    expect(titles('卡片期望的名字')).toEqual(['A', 'C', 'B'])
+    expect(titles('卡内书')).toEqual(['A', 'C', 'B'])
   })
 
   it('write：没有挂载世界书时，写回落到会话角色副本的 table', async () => {
@@ -724,10 +1170,12 @@ describe('L4 授权能力', () => {
       { title: '新增' },
     ])
     const message = posted.find((item) => item.type === 'flyai-card-action')
-    expect(message?.intent).toEqual({
-      kind: 'character',
-      fields: { table: [{ title: 'A' }, { title: '新增' }] },
-    })
+    const intent = message?.intent as {
+      kind: string
+      fields: { table: Array<{ title?: string }> }
+    }
+    expect(intent.kind).toBe('character')
+    expect(intent.fields.table.map((entry) => entry.title)).toEqual(['A', '新增'])
     emitMessage({
       source: sandbox.host,
       data: {
@@ -737,11 +1185,13 @@ describe('L4 授权能力', () => {
         ok: true,
       },
     })
-    await expect(pending).resolves.toEqual([{ title: 'A' }, { title: '新增' }])
-    expect((sandbox.getWorldbook as (name: string) => unknown[])('卡内书')).toEqual([
-      { title: 'A' },
-      { title: '新增' },
-    ])
+    const titlesOf = (entries: unknown[]) =>
+      entries.map((entry) => (entry as { title?: string }).title)
+    const resolved = (await pending) as unknown[]
+    expect(titlesOf(resolved)).toEqual(['A', '新增'])
+    expect(
+      titlesOf((sandbox.getWorldbook as (name: string) => unknown[])('卡内书'))
+    ).toEqual(['A', '新增'])
   })
 
   it('write：角色字段写回发 character 意图，拒绝时 reject', async () => {
@@ -763,6 +1213,105 @@ describe('L4 授权能力', () => {
       },
     })
     await expect(pending).rejects.toThrow('unavailable')
+  })
+
+  it('write：chatMetadata 走宿主桥，setChatMessages 按消息 id 落库', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox('x', null, null, writeOnly, {
+      chatId: 'c1',
+      userName: '你',
+      characterName: '甲',
+      messages: [
+        { id: 'm1', role: 'assistant', text: '旧正文' },
+        { id: 'm2', role: 'user', text: '提问' },
+      ],
+    })
+    const updateChatMetadata = sandbox.updateChatMetadata as (
+      patch: Record<string, unknown>,
+      reset?: boolean
+    ) => void
+    updateChatMetadata({ map: { a: 1 } })
+    const context = (
+      sandbox.SillyTavern as { getContext: () => { chatMetadata: unknown } }
+    ).getContext()
+    expect(context.chatMetadata).toEqual({ map: { a: 1 } })
+
+    const saveMetadata = sandbox.saveMetadata as () => Promise<unknown>
+    const saving = saveMetadata()
+    const metadataMessage = posted.find((item) => item.type === 'flyai-card-metadata-set')
+    expect(metadataMessage?.metadata).toEqual({ map: { a: 1 } })
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-metadata-result',
+        id: metadataMessage?.id,
+        ok: true,
+      },
+    })
+    await expect(saving).resolves.toBeUndefined()
+
+    const setChatMessages = sandbox.setChatMessages as (
+      changes: unknown[]
+    ) => Promise<unknown>
+    const pending = setChatMessages([{ message_id: 0, message: '新正文' }])
+    const patchMessage = posted.find((item) => item.type === 'flyai-card-messages-patch')
+    expect(patchMessage?.changes).toEqual([{ id: 'm1', message: '新正文' }])
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-messages-result',
+        id: patchMessage?.id,
+        ok: true,
+        result: { updated: ['m1'] },
+      },
+    })
+    await pending
+  })
+
+  it('write：localStorage 写入落到 chatMetadata 保留键', () => {
+    const { sandbox, posted } = makeSandbox('x', null, null, writeOnly)
+    const storage = sandbox.localStorage as {
+      setItem: (key: string, value: string) => void
+      getItem: (key: string) => string | null
+      removeItem: (key: string) => void
+    }
+    storage.setItem('k', 'v')
+    expect(storage.getItem('k')).toBe('v')
+    // removeItem 会立即 flush，避免测试等待 400ms 防抖
+    storage.removeItem('missing')
+    const message = posted.find((item) => item.type === 'flyai-card-metadata-set')
+    expect(
+      (message?.metadata as { __flyai_storage_local?: unknown }).__flyai_storage_local
+    ).toEqual({ k: 'v' })
+  })
+
+  it('actions：context.generate 的 quiet_prompt 走主聊天生成桥', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox('x', null, null, {
+      actions: true,
+      write: true,
+      net: false,
+    })
+    const context = (
+      sandbox.SillyTavern as {
+        getContext: () => {
+          generate: (type: string, options: { quiet_prompt: string }) => Promise<unknown>
+        }
+      }
+    ).getContext()
+    const pending = context.generate('normal', { quiet_prompt: '系统旁白' })
+    const message = posted.find((item) => item.type === 'flyai-card-generate')
+    expect(message?.quiet_prompt).toBe('系统旁白')
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-generate-result',
+        id: message?.id,
+        ok: true,
+      },
+    })
+    await expect(pending).resolves.toBe(true)
   })
 
   it('net：fetch 经宿主代理，请求头白名单与响应还原', async () => {

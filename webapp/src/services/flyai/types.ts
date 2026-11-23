@@ -90,6 +90,8 @@ export type StAuthorPayload = {
   scripts?: StAuthorScript[]
   /** 脚本数量或体积超限，已截断 */
   truncated?: boolean
+  /** 酒馆 chatMetadata（作者脚本的地图/手札存档），会话级持久化 */
+  chat_metadata?: Record<string, unknown>
   character?: {
     name?: string
     description?: string
@@ -181,6 +183,8 @@ export type Message = {
   /** 该消息的 message 作用域模板变量 */
   template_vars?: Record<string, unknown> | null
   template_render_id?: string | null
+  /** 酒馆卡消息扩展字段：卡内 createChatMessages 写入，刷新后读回 */
+  st_extra?: Record<string, unknown> | null
 }
 
 /** 内容库角色卡（当前阶段只用到展示/绑定所需字段，完整编辑器类型后续补齐） */

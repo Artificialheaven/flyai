@@ -125,6 +125,14 @@ const sandboxMain = () => {
     const started = Date.now()
     const cells = Array.isArray(payload.cells) ? payload.cells.slice(0, 500) : []
     const context = payload.context || {}
+    // 卡片世界书 EJS 会调用 globalThis.DALPhoneMainline.read() 取手机往来；
+    // 服务端把作者面板同步的主线摘要放进 context.phoneMainline。
+    const phoneMainline =
+      typeof context.phoneMainline === 'string' ? context.phoneMainline : ''
+    const phoneBridge = { read: async () => phoneMainline }
+    ;(window as unknown as { DALPhoneMainline: unknown }).DALPhoneMainline = phoneBridge
+    ;(globalThis as unknown as { DALPhoneMainline: unknown }).DALPhoneMainline =
+      phoneBridge
     const scopes = {
       message: clone(context.scopes?.message) || {},
       local: clone(context.scopes?.local) || {},

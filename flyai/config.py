@@ -760,6 +760,10 @@ class LoreSettings(BaseModel):
     """
 
     max_card_mb: int = 50
+    # 卡内写回角色/世界书副本的序列化上限；条数多的卡（整表 1–3MB）需要放宽
+    max_card_write_mb: int = 2
+    # 酒馆助手作者脚本单条/总量上限；整页面板脚本可达 4–5MB
+    max_author_script_mb: int = 5
 
     @validator("max_card_mb", pre=True)
     def _clamp_max_card_mb(cls, v):  # noqa: N805
@@ -768,6 +772,22 @@ class LoreSettings(BaseModel):
         except (TypeError, ValueError):
             return 50
         return max(1, min(v, 200))
+
+    @validator("max_card_write_mb", pre=True)
+    def _clamp_max_card_write_mb(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 2
+        return max(1, min(v, 5))
+
+    @validator("max_author_script_mb", pre=True)
+    def _clamp_max_author_script_mb(cls, v):  # noqa: N805
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 5
+        return max(1, min(v, 5))
 
 
 class PromptTemplateSettings(BaseModel):

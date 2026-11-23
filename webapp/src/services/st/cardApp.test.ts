@@ -108,7 +108,7 @@ describe('contentSecurityPolicy', () => {
     const csp = contentSecurityPolicy(false)
     expect(csp).toContain("default-src 'none'")
     expect(csp).toContain("connect-src 'none'")
-    expect(csp).toContain("frame-src 'none'")
+    expect(csp).toContain("frame-src 'self' data: blob:;")
     expect(csp).toContain('img-src data: blob:;')
     expect(csp).toContain('media-src data: blob:;')
     // 单文件卡把主逻辑内嵌为 data:text/javascript

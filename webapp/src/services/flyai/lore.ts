@@ -1,4 +1,12 @@
-import { apiUrl, authHeaders, FlyApiError, readDetail, request } from './client.js'
+import {
+  apiUrl,
+  authHeaders,
+  FlyApiError,
+  readDetail,
+  request,
+  uploadRequest,
+  type UploadProgress,
+} from './client.js'
 import { downloadBlob } from '../native.js'
 import { invalidateCatalog, loadCatalog } from './catalogCache.js'
 import type { AttributeDef, Character, World } from './types.js'
@@ -114,23 +122,26 @@ export const exportWorld = async (world: World): Promise<void> => {
   await downloadBlob(blob, `${safeName(world.name)}.json`)
 }
 
-const uploadFile = async <T>(path: string, file: File): Promise<T> => {
+const uploadFile = <T>(
+  path: string,
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<T> => {
   const form = new FormData()
   form.append('file', file, file.name)
-  const res = await fetch(apiUrl(path), {
-    method: 'POST',
-    headers: authHeaders(),
-    body: form,
-  })
-  if (!res.ok) {
-    throw new FlyApiError(res.status, await readDetail(res))
-  }
-  return (await res.json()) as T
+  return uploadRequest<T>(path, form, { onProgress })
 }
 
 /** 酒馆 CCv2/v3 角色卡（PNG/JSON） */
-export const importCharacterCard = async (file: File): Promise<Character> => {
-  const character = await uploadFile<Character>('/api/characters/import-card', file)
+export const importCharacterCard = async (
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<Character> => {
+  const character = await uploadFile<Character>(
+    '/api/characters/import-card',
+    file,
+    onProgress
+  )
   invalidateCatalog('characters')
   return character
 }
@@ -139,7 +150,10 @@ export const importCharacterCard = async (file: File): Promise<Character> => {
  * FlyAI / 酒馆 v2 角色卡 JSON（导出文件可直接再导入）。
  * 走服务端 /characters/import：保留酒馆保真字段，并还原内嵌头像。
  */
-export const importCharacterJson = async (file: File): Promise<Character> => {
+export const importCharacterJson = async (
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<Character> => {
   const text = await file.text()
   let parsed: unknown
   try {
@@ -156,26 +170,32 @@ export const importCharacterJson = async (file: File): Promise<Character> => {
       ? envelope.data
       : parsed
   const type = typeof envelope.type === 'string' && envelope.type ? envelope.type : 'character'
-  const character = await request<Character>('/api/characters/import', {
-    method: 'POST',
-    body: JSON.stringify({ type, data }),
-  })
+  const character = await uploadRequest<Character>(
+    '/api/characters/import',
+    JSON.stringify({ type, data }),
+    { contentType: 'application/json', onProgress }
+  )
   invalidateCatalog('characters')
   return character
 }
 
 export const importWorldbook = async (
-  file: File
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
 ): Promise<{ world: World; stats: Record<string, unknown> }> => {
   const result = await uploadFile<{ world: World; stats: Record<string, unknown> }>(
     '/api/worlds/import-worldbook',
-    file
+    file,
+    onProgress
   )
   invalidateCatalog('worlds')
   return result
 }
 
-export const importWorldJson = async (file: File): Promise<World> => {
+export const importWorldJson = async (
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<World> => {
   const text = await file.text()
   let parsed: unknown
   try {
@@ -187,7 +207,12 @@ export const importWorldJson = async (file: File): Promise<World> => {
     parsed && typeof parsed === 'object' && 'data' in parsed
       ? (parsed as { data: Partial<World> }).data
       : (parsed as Partial<World>)
-  return createWorld(data)
+  const world = await uploadRequest<World>('/api/worlds', JSON.stringify(data), {
+    contentType: 'application/json',
+    onProgress,
+  })
+  invalidateCatalog('worlds')
+  return world
 }
 
 /** 图片上传（头像、背景图），返回 /uploads/... 路径 */

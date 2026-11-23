@@ -22,7 +22,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { FlyApiError, assetUrl } from '../../services/flyai/client.js'
+import { FlyApiError, assetUrl, request } from '../../services/flyai/client.js'
 import {
   clearCardResourceCache,
   readCachedNetProxy,
@@ -36,6 +36,7 @@ import {
 } from '../../services/flyai/st.js'
 import {
   continueReply,
+  generateCardReply,
   regenerateReply,
   reloadSession,
   sendCardMessage,
@@ -57,13 +58,21 @@ import {
   CARD_CODE_VARS_TOO_LARGE,
   CARD_MSG_ACTION,
   CARD_MSG_ACTION_RESULT,
+  CARD_MSG_CHAT,
   CARD_MSG_COMPOSE,
   CARD_MSG_DRAFT,
   CARD_MSG_ERROR,
   CARD_MSG_FETCH,
   CARD_MSG_FETCH_ABORT,
   CARD_MSG_FETCH_RESULT,
+  CARD_MSG_GENERATE,
+  CARD_MSG_GENERATE_RESULT,
+  CARD_MSG_INJECT_PROMPTS,
   CARD_MSG_MESSAGE,
+  CARD_MSG_MESSAGES_PATCH,
+  CARD_MSG_MESSAGES_RESULT,
+  CARD_MSG_METADATA_RESULT,
+  CARD_MSG_METADATA_SET,
   CARD_MSG_READY,
   CARD_MSG_RESIZE,
   CARD_MSG_TOAST,
@@ -73,6 +82,7 @@ import {
   sanitizeCardAppVariables,
   type CardAppCapabilities,
   type CardAppCharacter,
+  type CardAppChat,
   type CardAppWriteContext,
 } from '../../services/st/cardApp.js'
 import {
@@ -119,6 +129,9 @@ export const useCardAppVariables = (): Record<string, unknown> | undefined =>
 export const CardAppCharacterContext = createContext<CardAppCharacter | undefined>(
   undefined
 )
+
+/** 当前会话的聊天镜像；供卡内 getContext().chat / 楼层检测使用。 */
+export const CardAppChatContext = createContext<CardAppChat | undefined>(undefined)
 
 /**
  * 卡内授权动作的宿主上下文。只有消息列表里的消息气泡会提供；
@@ -228,6 +241,7 @@ export const CardAppFrame = memo(function CardAppFrame({
   const t = useTranslate()
   const host = useContext(CardAppHostContext)
   const contextCharacter = useContext(CardAppCharacterContext)
+  const contextChat = useContext(CardAppChatContext)
   const [height, setHeight] = useState(INITIAL_HEIGHT)
   const [reloadKey, setReloadKey] = useState(0)
   const [fullscreen, setFullscreen] = useState(false)
@@ -272,6 +286,12 @@ export const CardAppFrame = memo(function CardAppFrame({
   useLayoutEffect(() => {
     latestRef.current = { message, variables: sanitized.variables }
   }, [message, sanitized.variables])
+  // 聊天镜像变化不重建 iframe（否则卡内状态丢失）；首次 doc 用当前快照，
+  // 后续变化经 postMessage 补发。
+  const chatRef = useRef(contextChat)
+  useLayoutEffect(() => {
+    chatRef.current = contextChat
+  }, [contextChat])
 
   const doc = useMemo(() => {
     const latest = latestRef.current
@@ -280,6 +300,7 @@ export const CardAppFrame = memo(function CardAppFrame({
       variables: latest.variables,
       externalMedia,
       character: resolvedCharacter,
+      chat: chatRef.current,
       capabilities: { actions: capActions, write: capWrite, net: capNet },
     })
   }, [html, externalMedia, reloadKey, resolvedCharacter, capActions, capWrite, capNet])
@@ -299,7 +320,17 @@ export const CardAppFrame = memo(function CardAppFrame({
   const sendContext = useCallback(() => {
     postToCard({ type: CARD_MSG_VARS, variables: sanitized.variables })
     postToCard({ type: CARD_MSG_MESSAGE, message })
+    if (chatRef.current) {
+      postToCard({ type: CARD_MSG_CHAT, chat: chatRef.current })
+    }
   }, [message, postToCard, sanitized])
+
+  // 消息增删/切换会话时把新镜像推给已加载的卡；不重建 iframe。
+  useEffect(() => {
+    if (contextChat) {
+      postToCard({ type: CARD_MSG_CHAT, chat: contextChat })
+    }
+  }, [contextChat, postToCard])
 
   // 世界书/角色快照可能很大：只在能力开启且内容变化时补发，不随每次 token 更新重发。
   const writeCtxJson = useMemo(() => {
@@ -469,7 +500,14 @@ export const CardAppFrame = memo(function CardAppFrame({
               : { mode: 'replace', stat_data: intent.stat_data, thread_id: target.threadId }
           )
         } else if (intent.kind === 'world') {
-          await writeSessionWorld(target.sessionId, intent.entries)
+          // 没有绑定独立世界书时，酒馆的「主世界书」实际是角色卡内嵌书，
+          // 写回落到角色副本的 table，避免 world-not-bound 直接失败。
+          const worldbook = target.writeContext?.worldbook
+          if (!worldbook || !worldbook.name) {
+            await writeSessionCharacter(target.sessionId, { table: intent.entries })
+          } else {
+            await writeSessionWorld(target.sessionId, intent.entries)
+          }
         } else {
           await writeSessionCharacter(target.sessionId, intent.fields)
         }
@@ -486,6 +524,127 @@ export const CardAppFrame = memo(function CardAppFrame({
       }
     },
     [askConfirm, t]
+  )
+
+  /** 卡片保存 chatMetadata：只写会话副本，不触碰根卡。 */
+  const handleMetadataSet = useCallback(
+    async (data: { id?: unknown; metadata?: unknown }) => {
+      const id = data.id
+      if (typeof id !== 'string') {
+        return
+      }
+      const target = cardHostRef.current
+      const reply = (payload: Record<string, unknown>) =>
+        postToCard({ type: CARD_MSG_METADATA_RESULT, id, ...payload })
+      if (!target) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const metadata = data.metadata
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+        reply({ ok: false, error: CARD_CODE_ACTION_FAILED })
+        return
+      }
+      try {
+        await request(`/api/sessions/${encodeURIComponent(target.sessionId)}/st/chat-metadata`, {
+          method: 'POST',
+          body: JSON.stringify({ metadata }),
+        })
+        reply({ ok: true, result: { ok: true } })
+        // 不在这里 reloadSession：卡内 localStorage 的高频写入会触发整页会话
+        // 重载，导致卡片 iframe 重建/尺寸跳变/抽屉白屏。下次正常刷新会话时
+        // 会从服务端重新读到 metadata。
+      } catch (err) {
+        const status = err instanceof FlyApiError ? err.status : 0
+        reply({
+          ok: false,
+          error: status === 403 || status === 409 ? CARD_CODE_UNAVAILABLE : CARD_CODE_ACTION_FAILED,
+        })
+      }
+    },
+    [postToCard]
+  )
+
+  /**
+   * 卡片 setChatMessages / createChatMessages：写回正文/隐藏/变量，或追加新楼层。
+   * 新增楼层后不立刻 reloadSession——卡紧接着会调 generate()，重载会重建 iframe
+   * 打断这一流程；楼层由本轮生成结束后的会话刷新统一带回。
+   */
+  const handleMessagesPatch = useCallback(
+    async (data: { id?: unknown; changes?: unknown; creates?: unknown }) => {
+      const id = data.id
+      if (typeof id !== 'string') {
+        return
+      }
+      const target = cardHostRef.current
+      const reply = (payload: Record<string, unknown>) =>
+        postToCard({ type: CARD_MSG_MESSAGES_RESULT, id, ...payload })
+      if (!target) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const changes = Array.isArray(data.changes) ? data.changes : []
+      const creates = Array.isArray(data.creates) ? data.creates : []
+      if (changes.length === 0 && creates.length === 0) {
+        reply({ ok: true, result: { updated: [], created: [] } })
+        return
+      }
+      try {
+        const result = await request<{
+          updated?: string[]
+          created?: Array<{ id?: string; message_id?: number; role?: string }>
+        }>(`/api/sessions/${encodeURIComponent(target.sessionId)}/st/messages`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            thread_id: target.threadId,
+            changes,
+            creates,
+          }),
+        })
+        reply({
+          ok: true,
+          result: { updated: result.updated ?? [], created: result.created ?? [] },
+        })
+        if (changes.length > 0) {
+          void reloadSession(target.sessionId).catch(() => undefined)
+        }
+      } catch (err) {
+        const status = err instanceof FlyApiError ? err.status : 0
+        reply({
+          ok: false,
+          error: status === 403 || status === 409 ? CARD_CODE_UNAVAILABLE : CARD_CODE_ACTION_FAILED,
+        })
+      }
+    },
+    [postToCard]
+  )
+
+  /** 卡片 context.generate('normal', {quiet_prompt})：生成一条 AI 楼层。 */
+  const handleGenerateMain = useCallback(
+    (data: { id?: unknown; quiet_prompt?: unknown }) => {
+      const id = data.id
+      if (typeof id !== 'string') {
+        return
+      }
+      const reply = (payload: Record<string, unknown>) =>
+        postToCard({ type: CARD_MSG_GENERATE_RESULT, id, ...payload })
+      const target = cardHostRef.current
+      if (!target) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const resolved = resolveCapabilities(target.features, target)
+      if (!resolved.actions) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const ok = generateCardReply(target.sessionId, {
+        quietPrompt: typeof data.quiet_prompt === 'string' ? data.quiet_prompt : '',
+        automaticTrigger: true,
+      })
+      reply(ok ? { ok: true } : { ok: false, error: CARD_CODE_UNAVAILABLE })
+    },
+    [postToCard]
   )
 
   const handleAction = useCallback(
@@ -717,6 +876,31 @@ export const CardAppFrame = memo(function CardAppFrame({
         void handleAction(data)
         return
       }
+      if (data.type === CARD_MSG_METADATA_SET) {
+        void handleMetadataSet(data)
+        return
+      }
+      if (data.type === CARD_MSG_MESSAGES_PATCH) {
+        void handleMessagesPatch(data)
+        return
+      }
+      if (data.type === CARD_MSG_GENERATE) {
+        handleGenerateMain(data)
+        return
+      }
+      if (data.type === CARD_MSG_INJECT_PROMPTS) {
+        const target = cardHostRef.current
+        if (target) {
+          void request(`/api/sessions/${encodeURIComponent(target.sessionId)}/author/state`, {
+            method: 'POST',
+            body: JSON.stringify({
+              prompts: (data as { prompts?: unknown }).prompts,
+              remove_prompts: (data as { remove?: unknown }).remove,
+            }),
+          }).catch(() => undefined)
+        }
+        return
+      }
       if (data.type === CARD_MSG_FETCH) {
         void handleFetch(data)
         return
@@ -730,7 +914,17 @@ export const CardAppFrame = memo(function CardAppFrame({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [handleAction, handleFetch, sendContext, sendDraft, sendWriteContext, t])
+  }, [
+    handleAction,
+    handleFetch,
+    handleGenerateMain,
+    handleMessagesPatch,
+    handleMetadataSet,
+    sendContext,
+    sendDraft,
+    sendWriteContext,
+    t,
+  ])
 
   // 变量超限时提示一次：卡片只能拿到空状态
   const truncatedRef = useRef(false)
@@ -837,7 +1031,7 @@ export const CardAppFrame = memo(function CardAppFrame({
         className={styles.frame}
         style={fullscreen ? undefined : { height }}
         title={t('cardAppLabel')}
-        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
         srcDoc={doc}
         loading="lazy"
         referrerPolicy="no-referrer"

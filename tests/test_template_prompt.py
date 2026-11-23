@@ -35,6 +35,7 @@ def _session(messages=None, local=None):
         messages=list(messages or []),
         template_vars={"local": dict(local or {}), "message": {}},
         mvu={"stat_data": {"mp": 2}},
+        attributes={},
     )
 
 
@@ -110,6 +111,25 @@ def test_prepare_commit_splices_and_applies_ops(tmp_path):
     assert out[0].content == "HP=4"
     bridge.finalize()
     assert session.template_vars["local"]["hp"] == 4
+
+
+def test_phone_mainline_is_exposed_to_ejs(tmp_path):
+    session = _session()
+    session.attributes = {"author": {"phone_mainline": "【手机往来】十香：在吗"}}
+    run = ChatRun("r1", "u1", "s1")
+    bridge = _bridge(tmp_path, session, run)
+    text = "<%= await globalThis.DALPhoneMainline.read() %>"
+
+    async def scenario():
+        task = asyncio.ensure_future(bridge.apply([_src(text)]))
+        payload = await _wait_event(run, "template_prepare")
+        assert payload["context"]["phoneMainline"] == "【手机往来】十香：在吗"
+        _commit(run, payload, {cell_id(text): "【手机往来】十香：在吗"})
+        return await task
+
+    out = _run(scenario())
+    assert out[0].content == "【手机往来】十香：在吗"
+    bridge.finalize()
 
 
 def test_global_ops_persist_on_finalize(tmp_path):

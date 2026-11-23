@@ -74,6 +74,106 @@ def test_keyword_hits_fuzzy_key():
     assert out == [("world", e)]
 
 
+def test_keyword_hits_skips_disabled_and_constant():
+    disabled = LoreEntry("禁用", "内容", keys=["铁剑"], enabled=False)
+    constant = LoreEntry("常驻", "内容", keys=["铁剑"], constant=True)
+    hit = LoreEntry("命中", "内容", keys=["铁剑"])
+    out = trigger.keyword_hits([("world", [disabled, constant, hit])], "铁剑")
+    assert out == [("world", hit)]
+
+
+def test_keyword_hits_secondary_and_any_and_all():
+    entry = LoreEntry(
+        "二次键", "内容", keys=["铁剑"], secondary_keys=["铭文", "咒文"],
+        selective_logic="and_all",
+    )
+    assert not trigger.keyword_hits([("world", [entry])], "铁剑 铭文")
+    assert trigger.keyword_hits([("world", [entry])], "铁剑 铭文 咒文")
+
+
+def test_keyword_hits_secondary_not_any():
+    entry = LoreEntry(
+        "排除", "内容", keys=["铁剑"], secondary_keys=["已损坏"],
+        selective_logic="not_any",
+    )
+    assert trigger.keyword_hits([("world", [entry])], "完好的铁剑")
+    assert not trigger.keyword_hits([("world", [entry])], "铁剑已损坏")
+
+
+def test_keyword_hits_scan_depth_reads_recent_history():
+    entry = LoreEntry("时线", "内容", keys=["时间线"], scan_depth=3)
+    tables = [("world", [entry])]
+    # 当前消息没提，但最近 3 条里提过 → 命中
+    assert trigger.keyword_hits(
+        tables, "继续", scan_texts=["时间线更新", "无关", "继续"]
+    ) == [("world", entry)]
+    # 提到它的消息已经超出扫描深度 → 不命中
+    assert trigger.keyword_hits(
+        tables, "继续", scan_texts=["时间线更新", "a", "b", "继续"]
+    ) == []
+
+
+def test_keyword_hits_sticky_keeps_entry_active():
+    entry = LoreEntry("黏性", "内容", keys=["时间线"], sticky=2)
+    tables = [("world", [entry])]
+    assert trigger.keyword_hits(
+        tables, "继续", scan_texts=["时间线更新", "普通", "继续"]
+    ) == [("world", entry)]
+    assert trigger.keyword_hits(
+        tables, "继续", scan_texts=["时间线更新", "a", "b", "继续"]
+    ) == []
+
+
+def test_keyword_hits_cooldown_suppresses_reactivation():
+    entry = LoreEntry("冷却", "内容", keys=["时间线"], cooldown=2)
+    tables = [("world", [entry])]
+    # 两轮前刚激活过 → 本次命中也被冷却压掉
+    assert trigger.keyword_hits(
+        tables, "时间线更新", scan_texts=["时间线更新", "普通", "时间线更新"]
+    ) == []
+    # 冷却窗口外 → 正常激活
+    assert trigger.keyword_hits(
+        tables, "时间线更新", scan_texts=["时间线更新", "a", "b", "时间线更新"]
+    ) == [("world", entry)]
+
+
+def test_keyword_hits_recursion_from_activated_content():
+    first = LoreEntry("铁剑", "这把铁剑刻有古老符文", keys=["铁剑"])
+    second = LoreEntry("符文", "符文会发光", keys=["符文"])
+    out = trigger.keyword_hits([("world", [first, second])], "我拔出了铁剑")
+    assert out == [("world", first), ("world", second)]
+
+
+def test_keyword_hits_recursion_blocked_by_flags():
+    first = LoreEntry("铁剑", "这把铁剑刻有古老符文", keys=["铁剑"])
+    blocked = LoreEntry("符文", "内容", keys=["符文"], prevent_recursion=True)
+    out = trigger.keyword_hits([("world", [first, blocked])], "铁剑")
+    assert out == [("world", first)]
+
+    first_out = LoreEntry("铁剑", "符文", keys=["铁剑"], exclude_recursion=True)
+    second = LoreEntry("符文", "内容", keys=["符文"])
+    out = trigger.keyword_hits([("world", [first_out, second])], "铁剑")
+    assert out == [("world", first_out)]
+
+
+def test_keyword_hits_delay_waits_for_enough_messages():
+    entry = LoreEntry("延迟", "内容", keys=["线索"], delay=3)
+    tables = [("world", [entry])]
+    assert trigger.keyword_hits(tables, "线索", scan_texts=["线索"]) == []
+    assert trigger.keyword_hits(
+        tables, "线索", scan_texts=["a", "b", "线索"]
+    ) == [("world", entry)]
+
+
+def test_keyword_hits_case_and_whole_word():
+    entry = LoreEntry(
+        "英文", "内容", keys=["Sword"], case_sensitive=True, match_whole_words=True,
+    )
+    assert trigger.keyword_hits([("world", [entry])], "take the Sword")
+    assert not trigger.keyword_hits([("world", [entry])], "take the sword")
+    assert not trigger.keyword_hits([("world", [entry])], "Swordsman")
+
+
 # ---- render_trigger_block：格式、去重、预算 ----
 
 def test_render_trigger_block_empty():

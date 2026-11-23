@@ -523,6 +523,9 @@ const mapMessage = (
       ...(source.character_id ? { characterId: source.character_id } : {}),
       ...(source.stat_data ? { statData: source.stat_data } : {}),
       ...(source.origin === 'card' ? { origin: 'card' as const } : {}),
+      ...(source.st_extra && typeof source.st_extra === 'object'
+        ? { stExtra: source.st_extra }
+        : {}),
     }
     return { message, files: stored }
   }
@@ -743,6 +746,10 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
         character: pickCardCharacterFields(
           character as unknown as Record<string, unknown> | null
         ),
+        chatMetadata:
+          detail.st?.author && typeof detail.st.author === 'object'
+            ? (detail.st.author as { chat_metadata?: Record<string, unknown> }).chat_metadata ?? null
+            : null,
       }
     : undefined
   return {
@@ -2012,6 +2019,8 @@ type StreamRequest = {
   regenerateMessageId?: string
   /** 续写：后端把目标回复作为 prefill，增量并回同一条消息 */
   continueMessageId?: string
+  /** 酒馆 context.generate：quiet_prompt 只进本轮提示词，不落用户消息 */
+  quietPrompt?: string
   /** 发起方标记（卡片动作） */
   origin?: 'card'
   /** 群聊点名：被 @ 的座位排到本轮发言顺序最前 */
@@ -2394,6 +2403,7 @@ const streamReply = async (
       edit_message_id: request.editMessageId,
       regenerate_message_id: request.regenerateMessageId,
       continue_message_id: request.continueMessageId,
+      quiet_prompt: request.quietPrompt,
       origin: request.origin,
       client_message_id: request.questionId,
     }
@@ -2776,6 +2786,48 @@ export const sendCardMessage = (sessionId: string, text: string): boolean => {
         messages: current.messages.filter(
           (message) => message.id !== question.id && message.id !== reply.id
         ),
+        updatedAt: Date.now(),
+      }))
+    },
+  })
+  return true
+}
+
+/**
+ * 酒馆卡 `context.generate('normal', {quiet_prompt})`：只追加 AI 回复楼层，
+ * 不产生可见用户消息；quiet_prompt 仅进本轮出站提示词。
+ */
+export const generateCardReply = (
+  sessionId: string,
+  options: { quietPrompt?: string; automaticTrigger?: boolean } = {}
+): boolean => {
+  const state = get()
+  if (state.importingHistory || !state.ready) {
+    return false
+  }
+  if (sendsInFlight.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  if (!session || session.readOnly || session.threadKind === 'group') {
+    return false
+  }
+  const reply = { ...createReply(), origin: 'card' as const }
+  updateSession(sessionId, (current) => ({
+    ...current,
+    messages: [...current.messages, reply],
+    updatedAt: Date.now(),
+    rootMessageId: undefined,
+  }))
+  void streamReply(sessionId, reply, {
+    text: '',
+    images: [],
+    quietPrompt: options.quietPrompt ?? '',
+    origin: 'card',
+    onUnsent: () => {
+      updateSession(sessionId, (current) => ({
+        ...current,
+        messages: current.messages.filter((message) => message.id !== reply.id),
         updatedAt: Date.now(),
       }))
     },

@@ -103,6 +103,9 @@ class Message:
     template_vars: Optional[Dict[str, Any]] = None
     # 客户端提交的幂等 id：重复提交同一份结果不再执行
     template_render_id: Optional[str] = None
+    # 酒馆卡消息扩展字段（ST 的 message.extra）：卡内 createChatMessages 写入，
+    # 刷新后由 getChatMessages 读回（如约会大作战用它标记 1 楼开场与建档副本）。
+    st_extra: Optional[Dict[str, Any]] = None
     # 提示词骨架来源标记（不落盘）：系统提示词/PHI/LIVE_CTX/@depth 等
     # 卡与预设文本。EJS 提示词侧只执行这些消息，聊天历史与工具结果只剥离。
     template_source: Optional[bool] = None
@@ -135,6 +138,7 @@ class Message:
             "template_rendered": self.template_rendered,
             "template_vars": self.template_vars,
             "template_render_id": self.template_render_id,
+            "st_extra": self.st_extra,
         }
 
     @classmethod
@@ -168,4 +172,5 @@ class Message:
             template_rendered=data.get("template_rendered"),
             template_vars=data.get("template_vars"),
             template_render_id=data.get("template_render_id"),
+            st_extra=data.get("st_extra"),
         )

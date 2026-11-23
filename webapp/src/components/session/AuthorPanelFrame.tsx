@@ -15,6 +15,7 @@ import {
 import { setDraftText } from '../../services/chat/drafts.js'
 import {
   continueReply,
+  generateCardReply,
   regenerateReply,
   sendCardMessage,
 } from '../../services/chat/store.js'
@@ -22,6 +23,16 @@ import {
   AUTHOR_MSG_ACTION,
   AUTHOR_MSG_COMPOSE,
   AUTHOR_MSG_EVENT,
+  AUTHOR_MSG_GENERATE,
+  AUTHOR_MSG_GENERATE_MAIN,
+  AUTHOR_MSG_GENERATE_MAIN_RESULT,
+  AUTHOR_MSG_GENERATE_RESULT,
+  AUTHOR_MSG_INJECT_PROMPTS,
+  AUTHOR_MSG_PHONE_MAINLINE,
+  AUTHOR_MSG_SAVE_MESSAGES,
+  AUTHOR_MSG_SAVE_MESSAGES_RESULT,
+  AUTHOR_MSG_SAVE_METADATA,
+  AUTHOR_MSG_SAVE_METADATA_RESULT,
   AUTHOR_MSG_VARS,
   AUTHOR_MSG_WRITE,
   AUTHOR_MSG_WRITE_CHARACTER,
@@ -30,6 +41,7 @@ import {
   type AuthorRuntimeMessage,
 } from '../../services/st/authorRuntime.js'
 import { CARD_APP_PROTOCOL_VERSION, CARD_MSG_RESIZE } from '../../services/st/cardApp.js'
+import { request } from '../../services/flyai/client.js'
 import {
   CardActionDialog,
   type CardConfirmRequest,
@@ -47,10 +59,12 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   author,
   messages,
   variables,
+  chatMetadata,
   character,
   externalMedia = false,
   sessionId,
   threadId,
+  userName,
   canWrite = false,
   canAct = false,
   actionMessageId,
@@ -61,10 +75,14 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   author: StAuthorPayload
   messages: AuthorRuntimeMessage[]
   variables?: Record<string, unknown> | null
+  /** 会话级 chatMetadata（作者手札/地图存档） */
+  chatMetadata?: Record<string, unknown> | null
   character?: { name?: string; description?: string; avatar?: string | null }
   externalMedia?: boolean
   /** 卡内指令填入真实输入框需要会话 id */
   sessionId?: string
+  /** 玩家名（context.name1 / 手机署名） */
+  userName?: string
   /** 私聊窗口 id；写入变量时回传 */
   threadId?: string
   /** 是否允许把面板写入落到会话副本（st_card_write） */
@@ -96,13 +114,30 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         author,
         messages: initialMessages.current,
         variables,
+        chatMetadata,
         character,
         externalMedia,
         writeContext,
+        sessionId,
+        chatId: sessionId,
+        userName,
+        canWrite,
+        canAct,
       }),
     // 消息文本/变量只做初始快照；后续变化走 postMessage，避免重载 iframe。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [html, author, character?.name, character?.avatar, externalMedia, writeContext]
+    [
+      html,
+      author,
+      character?.name,
+      character?.avatar,
+      externalMedia,
+      writeContext,
+      sessionId,
+      userName,
+      canWrite,
+      canAct,
+    ]
   )
 
   const latestRef = useRef({ variables, messages })
@@ -119,6 +154,134 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
     confirmResolve.current = null
     setConfirmRequest(null)
     resolve?.(ok)
+  }
+
+  const postGenerateResult = (id: string, payload: Record<string, unknown>) => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) {
+      return
+    }
+    try {
+      win.postMessage(
+        { v: CARD_APP_PROTOCOL_VERSION, type: AUTHOR_MSG_GENERATE_RESULT, id, ...payload },
+        '*'
+      )
+    } catch {
+      // iframe 已卸载
+    }
+  }
+
+  const postMetadataResult = (id: string, payload: Record<string, unknown>) => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) {
+      return
+    }
+    try {
+      win.postMessage(
+        { v: CARD_APP_PROTOCOL_VERSION, type: AUTHOR_MSG_SAVE_METADATA_RESULT, id, ...payload },
+        '*'
+      )
+    } catch {
+      // iframe 已卸载
+    }
+  }
+
+  const postMessagesResult = (id: string, payload: Record<string, unknown>) => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) {
+      return
+    }
+    try {
+      win.postMessage(
+        { v: CARD_APP_PROTOCOL_VERSION, type: AUTHOR_MSG_SAVE_MESSAGES_RESULT, id, ...payload },
+        '*'
+      )
+    } catch {
+      // iframe 已卸载
+    }
+  }
+
+  const postGenerateMainResult = (id: string, payload: Record<string, unknown>) => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) {
+      return
+    }
+    try {
+      win.postMessage(
+        {
+          v: CARD_APP_PROTOCOL_VERSION,
+          type: AUTHOR_MSG_GENERATE_MAIN_RESULT,
+          id,
+          ...payload,
+        },
+        '*'
+      )
+    } catch {
+      // iframe 已卸载
+    }
+  }
+
+  const runGenerate = async (data: {
+    id?: unknown
+    purpose?: unknown
+    messages?: unknown
+    systemPrompt?: unknown
+    maxTokens?: unknown
+  }) => {
+    const id = typeof data.id === 'string' ? data.id : ''
+    if (!id || !sessionId) {
+      return
+    }
+    const messages = Array.isArray(data.messages)
+      ? data.messages.filter(
+          (item): item is { role: string; content: string } =>
+            !!item &&
+            typeof item === 'object' &&
+            typeof (item as { role?: unknown }).role === 'string' &&
+            typeof (item as { content?: unknown }).content === 'string'
+        )
+      : []
+    const useMessages = messages.slice(0, 40).map((item) => ({
+      role: item.role,
+      content: item.content.slice(0, 16000),
+    }))
+    const maxTokens = Math.max(0, Math.min(Number(data.maxTokens) || 0, 8192))
+    const preview = useMessages
+      .map((item) => `${item.role}: ${item.content}`)
+      .join('\n')
+      .slice(0, 2000)
+    const allowed = await askConfirm({
+      kind: 'generate',
+      purpose: String(data.purpose ?? 'phone'),
+      messageCount: useMessages.length,
+      chars: useMessages.reduce((sum, item) => sum + item.content.length, 0),
+      maxTokens,
+      preview,
+    })
+    if (!allowed) {
+      postGenerateResult(id, { ok: false, error: 'cancelled' })
+      return
+    }
+    try {
+      const result = await request<{ text?: string }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/author/generate`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            purpose: String(data.purpose ?? 'phone'),
+            messages: useMessages,
+            system_prompt: String(data.systemPrompt ?? '').slice(0, 16000),
+            max_tokens: maxTokens,
+          }),
+        }
+      )
+      postGenerateResult(id, { ok: true, text: String(result.text ?? '') })
+    } catch (error) {
+      postGenerateResult(id, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   const flushWrite = () => {
@@ -171,6 +334,100 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         if (Number.isFinite(next)) {
           setHeight(clampHeight(next))
         }
+        return
+      }
+      if (data.type === AUTHOR_MSG_GENERATE) {
+        void runGenerate(data as {
+          id?: unknown
+          purpose?: unknown
+          messages?: unknown
+          systemPrompt?: unknown
+          maxTokens?: unknown
+        })
+        return
+      }
+      if (data.type === AUTHOR_MSG_SAVE_METADATA && sessionId) {
+        const id = String((data as { id?: unknown }).id ?? '')
+        const metadata = (data as { metadata?: unknown }).metadata
+        if (!id || !metadata || typeof metadata !== 'object') {
+          return
+        }
+        void request(`/api/sessions/${encodeURIComponent(sessionId)}/author/state`, {
+          method: 'POST',
+          body: JSON.stringify({ chat_metadata: metadata }),
+        })
+          .then(() => postMetadataResult(id, { ok: true }))
+          .catch((error) => {
+            postMetadataResult(id, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          })
+        return
+      }
+      if (data.type === AUTHOR_MSG_SAVE_MESSAGES && sessionId) {
+        const id = String((data as { id?: unknown }).id ?? '')
+        const changes = (data as { changes?: unknown }).changes
+        const creates = (data as { creates?: unknown }).creates
+        if (!id) {
+          return
+        }
+        const changeList = Array.isArray(changes) ? changes : []
+        const createList = Array.isArray(creates) ? creates : []
+        if (changeList.length === 0 && createList.length === 0) {
+          postMessagesResult(id, { ok: true, result: { updated: [], created: [] } })
+          return
+        }
+        void request<{
+          updated?: string[]
+          created?: Array<{ id?: string; message_id?: number; role?: string }>
+        }>(`/api/sessions/${encodeURIComponent(sessionId)}/st/messages`, {
+          method: 'PATCH',
+          body: JSON.stringify({ changes: changeList, creates: createList }),
+        })
+          .then((result) =>
+            postMessagesResult(id, {
+              ok: true,
+              result: { updated: result.updated ?? [], created: result.created ?? [] },
+            })
+          )
+          .catch((error) => {
+            postMessagesResult(id, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          })
+        return
+      }
+      if (data.type === AUTHOR_MSG_GENERATE_MAIN && sessionId) {
+        const id = String((data as { id?: unknown }).id ?? '')
+        if (!id) {
+          return
+        }
+        const quiet = String((data as { quiet_prompt?: unknown }).quiet_prompt ?? '')
+        const ok = generateCardReply(sessionId, {
+          quietPrompt: quiet,
+          automaticTrigger: true,
+        })
+        postGenerateMainResult(id, ok ? { ok: true } : { ok: false, error: 'unavailable' })
+        return
+      }
+      if (data.type === AUTHOR_MSG_PHONE_MAINLINE && sessionId) {
+        const text = String((data as { text?: unknown }).text ?? '')
+        void request(`/api/sessions/${encodeURIComponent(sessionId)}/author/state`, {
+          method: 'POST',
+          body: JSON.stringify({ phone_mainline: text }),
+        }).catch(() => undefined)
+        return
+      }
+      if (data.type === AUTHOR_MSG_INJECT_PROMPTS && sessionId) {
+        void request(`/api/sessions/${encodeURIComponent(sessionId)}/author/state`, {
+          method: 'POST',
+          body: JSON.stringify({
+            prompts: (data as { prompts?: unknown }).prompts,
+            remove_prompts: (data as { remove?: unknown }).remove,
+          }),
+        }).catch(() => undefined)
         return
       }
       if (data.type === AUTHOR_MSG_COMPOSE && sessionId) {
@@ -288,7 +545,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
     <iframe
       ref={iframeRef}
       title="酒馆助手脚本面板"
-      sandbox="allow-scripts allow-modals"
+      sandbox="allow-scripts allow-modals allow-forms"
       srcDoc={doc}
       onLoad={pushContext}
       style={{

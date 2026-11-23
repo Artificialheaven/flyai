@@ -71,10 +71,12 @@ def test_limits_script_count_and_size():
     assert len(result["scripts"]) == MAX_SCRIPTS
     assert result["truncated"] is True
 
-    huge = _card({"id": "huge", "name": "大", "content": "x" * (MAX_SCRIPT_CHARS + 1)})
-    result = collect_author_scripts(huge)
+    huge = _card({"id": "huge", "name": "大", "content": "x" * 101})
+    result = collect_author_scripts(huge, max_script_chars=100, max_total_chars=100)
     assert result["scripts"] == []
     assert result["truncated"] is True
+    # 默认上限足够容纳整页面板脚本（约 4.3MB）
+    assert MAX_SCRIPT_CHARS == 5 * 1024 * 1024
 
 
 def _session():

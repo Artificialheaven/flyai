@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -27,9 +27,34 @@ class LoreEntry:
     insert_order: int = 100  # 同一深度多条时的排序（小的在前）
     role: str = "system"     # depth 注入时的消息角色：system/user/assistant
     probability: int = 100   # 触发概率 0-100（酒馆 useProbability/probability）
+    # ---- 酒馆世界书保真字段 ----
+    enabled: bool = True                 # ST disable=false；False 时永不注入
+    constant: bool = False               # ST constant：无条件常驻（与 pinned 同义）
+    selective: bool = True               # ST selective：按 keys 选择性触发
+    secondary_keys: List[str] = field(default_factory=list)
+    # and_any（默认）/and_all/not_all/not_any：主键命中后对次键的判定
+    selective_logic: str = "and_any"
+    scan_depth: Optional[int] = None     # None=same_as_global
+    case_sensitive: bool = False
+    match_whole_words: bool = False
+    # ST effect：命中后保持 N 条消息 / 冷却 N 条消息 / 延迟 N 条消息
+    sticky: Optional[int] = None
+    cooldown: Optional[int] = None
+    delay: Optional[int] = None
+    prevent_recursion: bool = False
+    exclude_recursion: bool = False
+    delay_until_recursion: Optional[int] = None
+    # ST 世界书位置：before/after/ANTop/ANBottom/at_depth/EMTop/EMBottom/outlet
+    position_type: str = ""
+
+    @property
+    def resolved_position_type(self) -> str:
+        if self.position_type:
+            return self.position_type
+        return "at_depth" if self.position == "depth" else "before"
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "title": self.title,
             "content": self.content,
             "pinned": self.pinned,
@@ -40,6 +65,38 @@ class LoreEntry:
             "role": self.role if self.role in ("user", "assistant") else "system",
             "probability": max(1, min(100, int(self.probability or 100))),
         }
+        # 酒馆保真字段只在非默认时落盘，旧数据/旧断言保持原形状。
+        if not self.enabled:
+            d["enabled"] = False
+        if self.constant:
+            d["constant"] = True
+        if not self.selective:
+            d["selective"] = False
+        if self.secondary_keys:
+            d["secondary_keys"] = list(self.secondary_keys)
+        if (self.selective_logic or "and_any") != "and_any":
+            d["selective_logic"] = self.selective_logic
+        if self.scan_depth is not None:
+            d["scan_depth"] = self.scan_depth
+        if self.case_sensitive:
+            d["case_sensitive"] = True
+        if self.match_whole_words:
+            d["match_whole_words"] = True
+        if self.sticky is not None:
+            d["sticky"] = self.sticky
+        if self.cooldown is not None:
+            d["cooldown"] = self.cooldown
+        if self.delay is not None:
+            d["delay"] = self.delay
+        if self.prevent_recursion:
+            d["prevent_recursion"] = True
+        if self.exclude_recursion:
+            d["exclude_recursion"] = True
+        if self.delay_until_recursion is not None:
+            d["delay_until_recursion"] = self.delay_until_recursion
+        if self.position_type and self.position_type not in ("before", "at_depth"):
+            d["position_type"] = self.position_type
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "LoreEntry":
@@ -54,16 +111,86 @@ class LoreEntry:
             except (TypeError, ValueError):
                 return default
 
+        raw_secondary = d.get("secondary_keys") or d.get("keysecondary") or []
+        if isinstance(raw_secondary, str):
+            raw_secondary = [raw_secondary]
+        secondary = [
+            str(k).strip() for k in raw_secondary if str(k or "").strip()
+        ]
+        logic = str(
+            d.get("selective_logic")
+            or (
+                d.get("strategy", {}).get("keys_secondary", {}).get("logic")
+                if isinstance(d.get("strategy"), dict) else ""
+            )
+            or "and_any"
+        ).strip().lower()
+        if logic not in ("and_any", "and_all", "not_all", "not_any"):
+            logic = "and_any"
+        raw_scan = d.get("scan_depth")
+        if raw_scan in (None, "", "same_as_global"):
+            scan_depth = None
+        else:
+            scan_depth = _int("scan_depth", 0) or None
+
+        def _opt_int(source: Dict[str, Any], *names: str) -> Optional[int]:
+            for name in names:
+                value = source.get(name)
+                if value is None or value == "":
+                    continue
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        effect = d.get("effect") if isinstance(d.get("effect"), dict) else {}
+        recursion = d.get("recursion") if isinstance(d.get("recursion"), dict) else {}
+        pos_type = str(d.get("position_type") or "").strip()
+        is_depth = pos_type == "at_depth" or (
+            not pos_type and d.get("position") == "depth"
+        )
+
         return cls(
             title=d.get("title", ""),
             content=d.get("content", ""),
-            pinned=bool(d.get("pinned", False)),
+            pinned=bool(d.get("pinned", False) or d.get("constant", False)),
             keys=keys,
-            position="depth" if d.get("position") == "depth" else "system",
+            position="depth" if is_depth else "system",
             depth=_int("depth", 4),
             insert_order=_int("insert_order", 100),
             role=d.get("role") if d.get("role") in ("user", "assistant") else "system",
             probability=max(1, min(100, _int("probability", 100))),
+            enabled=bool(d.get("enabled", not bool(d.get("disable", False)))),
+            constant=bool(d.get("constant", False) or d.get("pinned", False)),
+            selective=bool(d.get("selective", True)),
+            secondary_keys=secondary,
+            selective_logic=logic,
+            scan_depth=scan_depth,
+            case_sensitive=bool(d.get("case_sensitive", False)),
+            match_whole_words=bool(d.get("match_whole_words", False)),
+            sticky=_opt_int(d, "sticky") if d.get("sticky") is not None
+            else _opt_int(effect, "sticky"),
+            cooldown=_opt_int(d, "cooldown") if d.get("cooldown") is not None
+            else _opt_int(effect, "cooldown"),
+            delay=_opt_int(d, "delay") if d.get("delay") is not None
+            else _opt_int(effect, "delay"),
+            prevent_recursion=bool(
+                d.get("prevent_recursion")
+                or recursion.get("prevent_incoming")
+                or d.get("preventRecursion", False)
+            ),
+            exclude_recursion=bool(
+                d.get("exclude_recursion")
+                or recursion.get("prevent_outgoing")
+                or d.get("excludeRecursion", False)
+            ),
+            delay_until_recursion=_opt_int(
+                d, "delay_until_recursion", "delayUntilRecursion"
+            ) if d.get("delay_until_recursion") is not None
+            or d.get("delayUntilRecursion") is not None
+            else _opt_int(recursion, "delay_until"),
+            position_type=pos_type,
         )
 
 

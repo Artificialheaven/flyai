@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -253,10 +254,26 @@ class JsonSessionStore(SessionStore):
         session.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         data = session_to_dict(session)
         p = self._path(session.id)
-        tmp = p.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, p)
+        # 并发保存（卡片连续写角色/世界书 + 宿主刷新）不能共用同一个 .tmp：
+        # Windows 上 os.replace 会因另一个请求仍在写/读而报 WinError 32。
+        tmp = p.with_name("%s.%s.tmp" % (p.name, uuid.uuid4().hex))
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            for attempt in range(6):
+                try:
+                    os.replace(tmp, p)
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    # 杀毒/索引/并发读取短暂占用，退避重试
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._forget(p)
 
     def delete(self, sid: str) -> None:

@@ -112,6 +112,31 @@ describe('模板沙箱 runner', () => {
     expect(result.errors[0].message).toContain('不允许')
   })
 
+  it('手机主线摘要通过 globalThis.DALPhoneMainline 注入', async () => {
+    const posted = await withSandbox((send) => {
+      send({
+        __flyaiTemplateRequest: 1,
+        id: 'req-phone',
+        cells: [
+          {
+            id: 'c1',
+            text: "<%= await globalThis.DALPhoneMainline.read() %>",
+          },
+        ],
+        context: {
+          messageId: 'm1',
+          scopes: {},
+          escapeOutput: true,
+          phoneMainline: '【手机往来】十香：在吗',
+        },
+      })
+    })
+    const result = posted[0] as Record<string, any>
+    expect(result.type).toBe('done')
+    expect(result.cells.c1).toBe('【手机往来】十香：在吗')
+    expect(result.errors).toEqual([])
+  })
+
   it('只读 stat_data 可通过 getvar 读取', async () => {
     const posted = await withSandbox((send) => {
       send({

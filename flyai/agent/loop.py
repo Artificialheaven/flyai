@@ -323,6 +323,7 @@ async def run_agent_loop(
     st_regex: Optional[Dict[str, Any]] = None,
     macro_ctx: Optional[Dict[str, Any]] = None,
     template_prompt: Optional[Any] = None,
+    quiet_prompt: str = "",
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -468,6 +469,17 @@ async def run_agent_loop(
         msgs = _keep_recent_turns(msgs, keep_turns)
         # 撤回墓碑永不发给模型（_actor_view 对无归属消息原样保留，必须显式过滤）
         msgs = [m for m in msgs if not getattr(m, "tombstone", None)]
+        # 酒馆 quiet_prompt：只追加到出站最后一条消息副本，不写入 history。
+        # 与 ST 一致，在最后一条提示词末尾换行后拼接。
+        if quiet_prompt:
+            if msgs:
+                last = msgs[-1]
+                base = last.content or ""
+                msgs[-1] = _replace_message(
+                    last, content=(base + "\n" + quiet_prompt) if base else quiet_prompt
+                )
+            else:
+                msgs.append(Message(role="user", content=quiet_prompt))
         # 酒馆正则脚本（prompt 侧）：在截断前对副本应用，history 原文不变
         if st_regex:
             from ..st.regex_scripts import apply_to_messages

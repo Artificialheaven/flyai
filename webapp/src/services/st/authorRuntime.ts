@@ -27,6 +27,7 @@ import {
 import JQUERY_SOURCE from './vendor/jquery-3.6.0.min.js?raw'
 import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
 import ZOD_SOURCE from './vendor/zod-4.6.7.min.js?raw'
+import ST_CORE_SOURCE from './compat/stCore.js?raw'
 
 /** 宿主 → 卡：变量/消息快照更新 */
 export const AUTHOR_MSG_VARS = 'flyai-author-vars'
@@ -42,6 +43,26 @@ export const AUTHOR_MSG_WRITE_WORLD = 'flyai-author-write-world'
 export const AUTHOR_MSG_WRITE_CHARACTER = 'flyai-author-write-character'
 /** 宿主 → 卡：生成/聊天事件 */
 export const AUTHOR_MSG_EVENT = 'flyai-author-event'
+/** 卡 → 宿主：静默生成（手机短信/记忆整理），不进主聊天 */
+export const AUTHOR_MSG_GENERATE = 'flyai-author-generate'
+/** 宿主 → 卡：静默生成结果 */
+export const AUTHOR_MSG_GENERATE_RESULT = 'flyai-author-generate-result'
+/** 卡 → 宿主：手机主线摘要（供主聊天 EJS 的 DALPhoneMainline.read 使用） */
+export const AUTHOR_MSG_PHONE_MAINLINE = 'flyai-author-phone-mainline'
+/** 卡 → 宿主：临时提示词注入（剧情锚点/场记） */
+export const AUTHOR_MSG_INJECT_PROMPTS = 'flyai-author-inject-prompts'
+/** 卡 → 宿主：chatMetadata 持久化（地图/手札存档） */
+export const AUTHOR_MSG_SAVE_METADATA = 'flyai-author-save-metadata'
+/** 宿主 → 卡：chatMetadata 保存结果 */
+export const AUTHOR_MSG_SAVE_METADATA_RESULT = 'flyai-author-save-metadata-result'
+/** 卡 → 宿主：按消息 id 写回正文/隐藏/变量 */
+export const AUTHOR_MSG_SAVE_MESSAGES = 'flyai-author-save-messages'
+/** 宿主 → 卡：消息写回结果 */
+export const AUTHOR_MSG_SAVE_MESSAGES_RESULT = 'flyai-author-save-messages-result'
+/** 卡 → 宿主：主聊天生成（context.generate，可带 quiet_prompt） */
+export const AUTHOR_MSG_GENERATE_MAIN = 'flyai-author-generate-main'
+/** 宿主 → 卡：主聊天生成结果 */
+export const AUTHOR_MSG_GENERATE_MAIN_RESULT = 'flyai-author-generate-main-result'
 
 const MAX_MESSAGES = 200
 const MAX_MESSAGE_CHARS = 8000
@@ -51,6 +72,10 @@ export type AuthorRuntimeMessage = {
   text: string
   name?: string
   statData?: Record<string, unknown>
+  /** 酒馆 message.extra（开场标记等），卡内 getChatMessages 读回 */
+  extra?: Record<string, unknown>
+  /** 后端消息 id：setChatMessages 落库时定位 */
+  id?: string
 }
 
 export type AuthorRuntimeOptions = {
@@ -60,10 +85,21 @@ export type AuthorRuntimeOptions = {
   messages: AuthorRuntimeMessage[]
   /** 会话级 MVU stat_data */
   variables?: Record<string, unknown> | null
+  /** 会话级 chatMetadata（作者脚本地图/手札存档） */
+  chatMetadata?: Record<string, unknown> | null
   character?: { name?: string; description?: string; avatar?: string | null }
   externalMedia?: boolean
   /** 世界书/角色副本读取快照（st.write_context） */
   writeContext?: CardWriteContext
+  /** 会话/聊天标识；酒馆助手 context.chatId 需要 */
+  sessionId?: string
+  chatId?: string
+  /** 玩家名；context.name1 需要 */
+  userName?: string
+  /** 是否允许写回（决定 confirm/Popup 与 helper 写入语义） */
+  canWrite?: boolean
+  /** 是否允许发送/继续/重生成 */
+  canAct?: boolean
 }
 
 /** 会话可见消息 → 作者运行时镜像；只保留文本与变量快照。 */
@@ -74,9 +110,11 @@ export const authorRuntimeMessages = (
   for (const message of messages) {
     if (message.role === 'user') {
       out.push({
+        id: message.id,
         role: 'user',
         text: message.content.slice(0, MAX_MESSAGE_CHARS),
         statData: message.statData,
+        extra: message.stExtra,
       })
       continue
     }
@@ -88,6 +126,7 @@ export const authorRuntimeMessages = (
       .map((block) => (block.type === 'text' ? block.text : ''))
       .join('')
     out.push({
+      id: message.id,
       role: 'assistant',
       text: text.slice(0, MAX_MESSAGE_CHARS),
       name: message.speakerName,
@@ -222,8 +261,13 @@ const buildImportMap = (source: string): string => {
   const mvu = `data:text/javascript,${encodeURIComponent(
     'export const Mvu = globalThis.Mvu; export default Mvu;'
   )}`
+  // 卡会把 globalThis.registerMvuSchema 覆盖成这个导出函数（红楼批次115）。
+  // 若转发时再动态取 globalThis，就会自己调自己无限递归；必须在模块求值
+  // 时先抓住原始实现。
   const zod = `data:text/javascript,${encodeURIComponent(
-    'export const registerMvuSchema = (...a) => globalThis.registerMvuSchema(...a);'
+    'const impl = globalThis.registerMvuSchema; ' +
+      'export const registerMvuSchema = (...a) => ' +
+      '(typeof impl === "function" ? impl : globalThis.registerMvuSchema)(...a);'
   )}`
   const add = (url: string, target: string) => {
     if (url && !imports[url]) {
@@ -275,7 +319,8 @@ const contentSecurityPolicy = (externalMedia: boolean): string =>
     `media-src data: blob:${externalMedia ? ' https:' : ''}`,
     'font-src data: https:',
     "connect-src 'none'",
-    "frame-src 'none'",
+    // 手札舆图/约会大作战地图是卡内嵌套 iframe（srcdoc 或 CDN 页面）
+    `frame-src 'self' data: blob:${externalMedia ? ' https:' : ''}`,
     "worker-src 'none'",
     "object-src 'none'",
     "base-uri 'none'",
@@ -304,21 +349,36 @@ const chatMarkup = (
 type ShimOptions = {
   messages: readonly AuthorRuntimeMessage[]
   variables?: Record<string, unknown> | null
+  chatMetadata?: Record<string, unknown> | null
   character?: { name?: string; description?: string; avatar?: string | null }
   writeContext?: CardWriteContext
+  sessionId?: string
+  chatId?: string
+  userName?: string
+  canWrite?: boolean
+  canAct?: boolean
 }
 
 const buildShim = ({
   messages,
   variables,
+  chatMetadata,
   character,
   writeContext,
+  sessionId,
+  chatId,
+  userName,
+  canWrite,
+  canAct,
 }: ShimOptions): string => {
   const messageData = JSON.stringify(messages)
   const chatVariables = JSON.stringify({
     stat_data:
       variables && typeof variables === 'object' ? variables : {},
   })
+  const chatMetadataData = JSON.stringify(
+    chatMetadata && typeof chatMetadata === 'object' ? chatMetadata : {}
+  )
   const characterData = JSON.stringify({
     name: character?.name ?? '',
     description: character?.description ?? '',
@@ -352,6 +412,7 @@ const buildShim = ({
   } catch (e) { hostProxy = window; }
   window.__FLYAI_HOST__ = hostProxy;
   var VERSION = ${CARD_APP_PROTOCOL_VERSION};
+  var STCORE = globalThis.__FLYAI_ST_CORE__;
   var RESIZE = ${escapeForScript(CARD_MSG_RESIZE)};
   var READY = ${escapeForScript(CARD_MSG_READY)};
   var ERROR_EVENT = ${escapeForScript(CARD_MSG_ERROR)};
@@ -362,81 +423,186 @@ const buildShim = ({
   var MSG_WRITE_WORLD = ${escapeForScript(AUTHOR_MSG_WRITE_WORLD)};
   var MSG_WRITE_CHARACTER = ${escapeForScript(AUTHOR_MSG_WRITE_CHARACTER)};
   var MSG_EVENT = ${escapeForScript(AUTHOR_MSG_EVENT)};
+  var MSG_GENERATE = ${escapeForScript(AUTHOR_MSG_GENERATE)};
+  var MSG_GENERATE_RESULT = ${escapeForScript(AUTHOR_MSG_GENERATE_RESULT)};
+  var MSG_PHONE_MAINLINE = ${escapeForScript(AUTHOR_MSG_PHONE_MAINLINE)};
+  var MSG_INJECT_PROMPTS = ${escapeForScript(AUTHOR_MSG_INJECT_PROMPTS)};
+  var MSG_SAVE_METADATA = ${escapeForScript(AUTHOR_MSG_SAVE_METADATA)};
+  var MSG_SAVE_METADATA_RESULT = ${escapeForScript(AUTHOR_MSG_SAVE_METADATA_RESULT)};
+  var MSG_SAVE_MESSAGES = ${escapeForScript(AUTHOR_MSG_SAVE_MESSAGES)};
+  var MSG_SAVE_MESSAGES_RESULT = ${escapeForScript(AUTHOR_MSG_SAVE_MESSAGES_RESULT)};
+  var MSG_GENERATE_MAIN = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN)};
+  var MSG_GENERATE_MAIN_RESULT = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN_RESULT)};
   var MESSAGES = JSON.parse(${escapeForScript(messageData)});
   var CHAT_VARIABLES = JSON.parse(${escapeForScript(chatVariables)});
   var CHARACTER = JSON.parse(${escapeForScript(characterData)});
   var WORLD = JSON.parse(${escapeForScript(worldbookData)});
   var WORLD_ENTRIES = Array.isArray(WORLD.entries) ? WORLD.entries : [];
   var CHARACTER_FIELDS = WORLD.character && typeof WORLD.character === 'object' ? WORLD.character : {};
+  var SESSION_ID = ${escapeForScript(sessionId ?? '')};
+  var CHAT_ID = ${escapeForScript(chatId ?? sessionId ?? '')};
+  var USER_NAME = ${escapeForScript(userName ?? '')};
+  var CAN_WRITE = ${canWrite === true};
+  var CAN_ACT = ${canAct === true};
   function clone(value){
     try { return JSON.parse(JSON.stringify(value)); } catch (e) { return {}; }
   }
-  function storage(){
-    var data = {};
+  // 与卡片侧同一套：会话 chatMetadata 保留键持久化，刷新后恢复。
+  function storage(kind){
+    var metaKey = kind === 'session' ? '__flyai_storage_session' : '__flyai_storage_local';
+    var data = null;
+    var saveTimer = null;
+    function ensure(){
+      if (data) return data;
+      var source = CHAT_METADATA && CHAT_METADATA[metaKey];
+      data = source && typeof source === 'object' ? clone(source) : {};
+      return data;
+    }
+    function flush(){
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      saveMetadata().catch(function(){});
+    }
+    function persist(immediate){
+      if (!CHAT_METADATA || typeof CHAT_METADATA !== 'object') return;
+      CHAT_METADATA[metaKey] = clone(ensure());
+      // 合并高频 localStorage 写入；清理旧草稿立即落库。
+      if (immediate) { flush(); return; }
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function(){ saveTimer = null; flush(); }, 400);
+    }
+    try { window.addEventListener('pagehide', flush); } catch (e) {}
     return {
-      getItem: function(k){ k = String(k); return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
-      setItem: function(k, v){ data[String(k)] = String(v); },
-      removeItem: function(k){ delete data[String(k)]; },
-      clear: function(){ data = {}; },
-      key: function(i){ return Object.keys(data)[i] || null; },
-      get length(){ return Object.keys(data).length; }
+      getItem: function(k){ k = String(k); var d = ensure(); return Object.prototype.hasOwnProperty.call(d, k) ? d[k] : null; },
+      setItem: function(k, v){ ensure()[String(k)] = String(v); persist(false); },
+      removeItem: function(k){ delete ensure()[String(k)]; persist(true); },
+      clear: function(){ data = {}; persist(true); },
+      key: function(i){ return Object.keys(ensure())[i] || null; },
+      get length(){ return Object.keys(ensure()).length; }
     };
   }
-  try { Object.defineProperty(window, 'localStorage', { value: storage(), configurable: true }); } catch (e) {}
-  try { Object.defineProperty(window, 'sessionStorage', { value: storage(), configurable: true }); } catch (e) {}
+  try { Object.defineProperty(window, 'localStorage', { value: storage('local'), configurable: true }); } catch (e) {}
+  try { Object.defineProperty(window, 'sessionStorage', { value: storage('session'), configurable: true }); } catch (e) {}
+  // 沙箱 iframe 里 navigator.locks.request 会抛 SecurityError；换成页面内串行桩
+  try {
+    var lockChains = {};
+    Object.defineProperty(window.navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: function(name, options, callback){
+          if (typeof options === 'function') { callback = options; options = null; }
+          var key = String(name || '');
+          var prev = lockChains[key] || Promise.resolve();
+          var run = function(){
+            return typeof callback === 'function'
+              ? callback({ name: key, mode: 'exclusive' })
+              : undefined;
+          };
+          var result = prev.then(run, run);
+          lockChains[key] = result.then(function(){}, function(){});
+          return result;
+        },
+        query: function(){ return Promise.resolve({ held: [], pending: [] }); }
+      }
+    });
+  } catch (e) {}
 
   var listeners = {};
-  function on(event, handler, once){
+  function on(event, handler, once, first){
     if (typeof handler !== 'function') return;
     var key = String(event);
-    (listeners[key] = listeners[key] || []).push({ fn: handler, once: !!once });
+    var list = listeners[key] = listeners[key] || [];
+    var item = { fn: handler, once: !!once };
+    if (first) list.unshift(item); else list.push(item);
   }
   function off(event, handler){
     var key = String(event);
     var list = listeners[key];
     if (!list) return;
     if (!handler) { delete listeners[key]; return; }
-    listeners[key] = list.filter(function(item){ return item.fn !== handler; });
+    var next = [];
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i].fn !== handler) next.push(list[i]);
+    }
+    listeners[key] = next;
   }
   function emit(event){
     var key = String(event);
     var args = Array.prototype.slice.call(arguments, 1);
     var list = (listeners[key] || []).slice();
+    var results = [];
     for (var i = 0; i < list.length; i += 1) {
       var item = list[i];
       if (item.once) off(key, item.fn);
-      try { item.fn.apply(null, args); } catch (e) { try { console.error(e); } catch (ignore) {} }
+      // 同步调用：卡内监听器常依赖“emit 后立刻可读”；
+      // 返回 Promise 供 eventEmitAndWait 等待异步处理器。
+      try { results.push(item.fn.apply(null, args)); } catch (e) { try { console.error(e); } catch (ignore) {} }
     }
+    return Promise.resolve(results);
+  }
+  function eventReturn(event, handler){
+    on(event, handler, false, false);
+    return { stop: function(){ off(event, handler); } };
   }
   var eventSource = {
-    on: function(event, handler){ on(event, handler); },
-    once: function(event, handler){ on(event, handler, true); },
-    makeFirst: function(event, handler){ on(event, handler); },
-    makeLast: function(event, handler){ on(event, handler); },
+    on: function(event, handler){ return eventReturn(event, handler); },
+    once: function(event, handler){ on(event, handler, true, false); return { stop: function(){ off(event, handler); } }; },
+    makeFirst: function(event, handler){ on(event, handler, false, true); return { stop: function(){ off(event, handler); } }; },
+    makeLast: function(event, handler){ on(event, handler, false, false); return { stop: function(){ off(event, handler); } }; },
     off: function(event, handler){ off(event, handler); },
     removeListener: function(event, handler){ off(event, handler); },
-    emit: emit
+    emit: emit,
+    emitAndWait: emit
   };
-  window.eventOn = function(event, handler){ on(event, handler); };
-  window.eventOnce = function(event, handler){ on(event, handler, true); };
+  window.eventOn = function(event, handler){ return eventReturn(event, handler); };
+  window.eventOnce = function(event, handler){
+    on(event, handler, true, false);
+    return { stop: function(){ off(event, handler); } };
+  };
   window.eventOff = function(event, handler){ off(event, handler); };
   window.eventEmit = emit;
-  window.eventRemoveListener = function(event, handler){ off(event, handler); };
-  window.tavern_events = {
-    MESSAGE_SENT: 'message_sent',
-    MESSAGE_RECEIVED: 'message_received',
-    MESSAGE_UPDATED: 'message_updated',
-    MESSAGE_SWIPED: 'message_swiped',
-    MESSAGE_DELETED: 'message_deleted',
-    USER_MESSAGE_RENDERED: 'user_message_rendered',
-    CHARACTER_MESSAGE_RENDERED: 'character_message_rendered',
-    GENERATION_STARTED: 'generation_started',
-    GENERATION_STOPPED: 'generation_stopped',
-    GENERATION_ENDED: 'generation_ended',
-    CHAT_CHANGED: 'chat_id_changed',
-    CHAT_CREATED: 'chat_created',
-    CHAT_DELETED: 'chat_deleted'
+  window.eventEmitAndWait = emit;
+  window.eventMakeFirst = function(event, handler){
+    on(event, handler, false, true);
+    return { stop: function(){ off(event, handler); } };
   };
+  window.eventMakeLast = function(event, handler){
+    on(event, handler, false, false);
+    return { stop: function(){ off(event, handler); } };
+  };
+  // 酒馆助手的脚本按钮：getButtonEvent(name) 注册事件，同时把按钮挂到面板
+  // 右下角；否则卡里的“随身手札”等入口没有可点击的宿主 UI。
+  var customButtonEvents = {};
+  window.getButtonEvent = function(name){
+    var key = String(name || '');
+    var eventName = 'flyai_script_button_' + key;
+    if (!customButtonEvents[key]) {
+      customButtonEvents[key] = true;
+      try {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = key;
+        button.setAttribute('data-flyai-author-button', key);
+        button.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;' +
+          'padding:6px 12px;border-radius:999px;border:1px solid rgba(120,90,50,.45);' +
+          'background:#fffaf0;color:#5b4630;font:13px/1.4 system-ui,sans-serif;' +
+          'box-shadow:0 2px 8px rgba(0,0,0,.16);cursor:pointer;';
+        button.addEventListener('click', function(){ emit(eventName); });
+        (document.body || document.documentElement).appendChild(button);
+      } catch (e) {}
+    }
+    return eventName;
+  };
+  window.eventRemoveListener = function(event, handler){ off(event, handler); };
+  window.eventClearEvent = function(event){ off(event); };
+  window.eventClearListener = function(handler){
+    for (var key in listeners) off(key, handler);
+  };
+  window.eventClearAll = function(){ listeners = {}; };
+  window.tavern_events = STCORE.tavernEvents;
+  window.iframe_events = STCORE.iframeEvents;
   var MVU_EVENTS = {
     VARIABLE_INITIALIZED: 'mag_variable_initialized',
     VARIABLE_UPDATE_STARTED: 'mag_variable_update_started',
@@ -469,17 +635,13 @@ const buildShim = ({
       extra: { variables: { stat_data: clone(message.statData || {}) } }
     };
   }
-  window.getChatMessages = function(id){
-    if (Array.isArray(id)) {
-      var out = [];
-      for (var i = 0; i < id.length && i < 50; i += 1) {
-        var item = messageAt(resolveId(id[i]));
-        if (item) out.push(item);
-      }
-      return out;
-    }
-    var one = messageAt(resolveId(id));
-    return one ? [one] : [];
+  window.getChatMessages = function(range, options){
+    return STCORE.getChatMessages(
+      MESSAGES,
+      range == null ? -1 : range,
+      options || {},
+      { charName: CHARACTER.name, userName: USER_NAME }
+    );
   };
   window.getCurrentMessageId = function(){ return lastIndex(); };
   window.getLastMessageId = function(){ return lastIndex(); };
@@ -544,45 +706,308 @@ const buildShim = ({
     window.__FLYAI_MVU_SCHEMA__ = schema;
     return true;
   };
-  window.getAllVariables = function(){ return clone(CHAT_VARIABLES); };
-  window.getVariables = function(option){
+  // 酒馆助手的 getVariables/updateVariablesWith 面向“扁平变量表”，
+  // 不是 MVU 的 {stat_data} 信封。手机存档（dal_phone / dal_phone_config）
+  // 直接按顶层键读写，这里必须保持同一形状。
+  function currentVariables(option){
     var type = option && option.type ? String(option.type) : 'chat';
     if (type === 'message') {
       var index = resolveId(option.message_id);
-      return { stat_data: clone(messageVariables(index) || chatStat()) };
+      var stat = messageVariables(index);
+      return clone(stat && typeof stat === 'object' ? stat : chatStat());
     }
-    return clone(CHAT_VARIABLES);
-  };
-  window.replaceVariables = function(value, option){ return window.Mvu.replaceMvuData(value, option); };
+    return clone(chatStat());
+  }
+  function writeVariables(next, option){
+    var type = option && option.type ? String(option.type) : 'chat';
+    var value = next && typeof next === 'object' ? next : {};
+    var envelope = value.stat_data && typeof value.stat_data === 'object'
+      ? clone(value)
+      : { stat_data: clone(value) };
+    return window.Mvu.replaceMvuData(envelope, { type: type, message_id: option && option.message_id });
+  }
+  window.getAllVariables = function(){ return clone(chatStat()); };
+  window.getVariables = function(option){ return currentVariables(option); };
+  window.replaceVariables = function(value, option){ return writeVariables(value, option); };
   window.updateVariablesWith = function(updater, option){
-    var current = normalizeMvu(window.getVariables(option));
-    var next = updater(clone(current));
-    window.Mvu.replaceMvuData(next, option);
+    var current = currentVariables(option);
+    var next = typeof updater === 'function' ? updater(clone(current)) : current;
+    writeVariables(next, option);
     return next;
   };
   window.insertOrAssignVariables = function(value, option){
-    var current = normalizeMvu(window.getVariables(option));
-    current.stat_data = Object.assign({}, current.stat_data, normalizeMvu(value).stat_data);
-    window.Mvu.replaceMvuData(current, option);
-    return current;
+    var current = currentVariables(option);
+    var patch = normalizeMvu(value).stat_data;
+    var next = STCORE.merge(current, patch, true);
+    writeVariables(next, option);
+    return next;
   };
   window.insertVariables = function(value, option){
-    var current = normalizeMvu(window.getVariables(option));
-    current.stat_data = Object.assign({}, normalizeMvu(value).stat_data, current.stat_data);
-    window.Mvu.replaceMvuData(current, option);
-    return current;
+    var current = currentVariables(option);
+    var patch = normalizeMvu(value).stat_data;
+    var next = STCORE.mergeKeep(current, patch);
+    writeVariables(next, option);
+    return next;
   };
   window.deleteVariable = function(key, option){
-    var current = normalizeMvu(window.getVariables(option));
-    delete current.stat_data[String(key)];
-    window.Mvu.replaceMvuData(current, option);
-    return current;
+    var current = currentVariables(option);
+    var deleted = STCORE.deletePath(current, key);
+    if (deleted) writeVariables(current, option);
+    return { variables: clone(current), delete_occurred: deleted };
   };
   window.getChatVariable = function(key){ return chatStat()[String(key)]; };
   window.setChatVariable = function(key, value){ window.insertOrAssignVariables({ [String(key)]: value }, { type: 'chat' }); return true; };
   window.getGlobalVariables = function(){ return {}; };
   window.setGlobalVariable = function(){ return false; };
+  window.setVariables = window.replaceVariables;
 
+  // ── 世界书本地副本 ─────────────────────────────────────────────
+  var WORLDBOOKS = {};
+  function primaryWorldName(){
+    return WORLD.charWorldName || WORLD.name || CHARACTER.name || 'FlyAI';
+  }
+  function characterWorldSlots(){
+    try {
+      var manifest = window.DALOpeningWorldbook;
+      var slots = manifest && Array.isArray(manifest.slots) ? manifest.slots : [];
+      var out = {};
+      for (var i = 0; i < slots.length; i += 1) {
+        var slot = slots[i] || {};
+        if (slot.title && slot.uid != null) out[String(slot.title)] = slot;
+      }
+      return out;
+    } catch (e) { return {}; }
+  }
+  function worldbookFromCharacter(){
+    var table = CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
+      ? CHARACTER_FIELDS.table : [];
+    if (!table.length) return { entries: {} };
+    var named = characterWorldSlots();
+    var entries = {};
+    for (var i = 0; i < table.length; i += 1) {
+      var item = table[i] || {};
+      var title = String(item.title == null ? '' : item.title);
+      var slot = named[title];
+      var uid = slot ? Number(slot.uid) : i + 1;
+      if (!isFinite(uid) || uid < 0) uid = i + 1;
+      while (entries[uid]) uid += 1;
+      entries[uid] = {
+        uid: uid,
+        comment: title || String(uid),
+        key: Array.isArray(item.keys) ? item.keys.slice() : [],
+        content: String(item.content == null ? '' : item.content),
+        constant: slot ? !!slot.constant : !!item.pinned,
+        disable: false,
+        position: 0,
+        depth: Number(item.depth == null ? 4 : item.depth),
+        order: Number(item.insert_order == null ? 100 : item.insert_order),
+        probability: 100
+      };
+    }
+    return { entries: entries };
+  }
+  function worldbookOf(name){
+    var key = String(name || primaryWorldName());
+    var book = WORLDBOOKS[key];
+    var hasEntries = book && book.entries && Object.keys(book.entries).length > 0;
+    if (!book || (!hasEntries && key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table)) {
+      book = key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table
+        ? worldbookFromCharacter()
+        : (book || { entries: {} });
+      WORLDBOOKS[key] = book;
+    }
+    return book;
+  }
+  function worldbookEntries(data){
+    return STCORE.worldbookHostEntries(data);
+  }
+  function saveWorldbook(name, data){
+    if (!CAN_WRITE) return Promise.reject(new Error('flyai-card-read-only'));
+    var key = String(name || primaryWorldName());
+    var book;
+    if (Array.isArray(data)) {
+      book = STCORE.worldbookFromList(data, key);
+    } else if (data && typeof data === 'object') {
+      book = clone(data);
+      if (!book.entries || typeof book.entries !== 'object') book.entries = {};
+    } else {
+      book = { entries: {} };
+    }
+    WORLDBOOKS[key] = book;
+    var entries = worldbookEntries(book);
+    if (entries.length) postWorld(entries);
+    return Promise.resolve(clone(book));
+  }
+  window.getWorldbookNames = function(){
+    var names = [];
+    if (primaryWorldName()) names.push(primaryWorldName());
+    if (WORLD.name && names.indexOf(WORLD.name) < 0) names.push(WORLD.name);
+    return names;
+  };
+  window.getCharWorldbookNames = function(){
+    return { primary: WORLD.charWorldName || WORLD.name || null, additional: [] };
+  };
+  window.getGlobalWorldbookNames = function(){ return []; };
+  window.getChatWorldbookName = function(){
+    return primaryWorldName() || null;
+  };
+  window.getWorldbook = function(name){ return clone(STCORE.worldbookEntryList(worldbookOf(name))); };
+  window.updateWorldbookWith = function(name, updater){
+    var current = STCORE.worldbookEntryList(worldbookOf(name));
+    var next = typeof updater === 'function' ? updater(clone(current)) : current;
+    if (!Array.isArray(next)) return Promise.resolve(clone(current));
+    return saveWorldbook(name, next).then(function(){ return clone(STCORE.worldbookEntryList(WORLDBOOKS[String(name || primaryWorldName())])); });
+  };
+  window.updateWorldbook = window.updateWorldbookWith;
+  window.replaceWorldbook = function(first, second){
+    var name = typeof first === 'string' ? first : (WORLD.name || primaryWorldName());
+    var data = typeof first === 'string' ? second : first;
+    return saveWorldbook(name, Array.isArray(data) ? data : (data && data.entries ? data : []));
+  };
+
+  // 本地 worldinfo HTTP：与开场卡一致，手机/面板调用 /api/worldinfo/* 时
+  // 不再直接联网（CSP 也不允许），返回本地副本。
+  function jsonResponse(data){
+    var text = JSON.stringify(data == null ? {} : data);
+    try {
+      return new Response(text, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    } catch (e) {
+      return { ok: true, status: 200, json: function(){ return Promise.resolve(data); }, text: function(){ return Promise.resolve(text); } };
+    }
+  }
+  function worldinfoFetch(url, init){
+    var path = String(url || '');
+    if (path.indexOf('/api/worldinfo/') < 0) return null;
+    var body = init && init.body;
+    var data = {};
+    try {
+      if (typeof body === 'string') data = JSON.parse(body);
+      else if (body && typeof body === 'object' && !(body instanceof ArrayBuffer)) data = body;
+    } catch (e) {}
+    if (path.indexOf('/api/worldinfo/get') >= 0) {
+      return Promise.resolve(jsonResponse(worldbookOf(data.name)));
+    }
+    if (path.indexOf('/api/worldinfo/edit') >= 0 || path.indexOf('/api/worldinfo/create') >= 0) {
+      var name = data.name || data.world || '';
+      var payload = data.data || data.world_info || data;
+      return saveWorldbook(name, payload).then(function(){ return jsonResponse({ ok: true }); });
+    }
+    if (path.indexOf('/api/worldinfo/delete') >= 0) {
+      delete WORLDBOOKS[String(data.name || '')];
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    return Promise.resolve(jsonResponse({}));
+  }
+  var nativeFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+  // 酒馆聊天文件接口：约会大作战手机用它核对 chat_metadata 是否真的落盘。
+  // 本地没有 jsonl 文件，按 ST 形状把当前聊天镜像 + CHAT_METADATA 拼回去。
+  function chatFileData(){
+    var out = [{
+      user_name: USER_NAME,
+      character_name: CHARACTER.name,
+      create_date: '',
+      chat_metadata: clone(CHAT_METADATA)
+    }];
+    for (var i = 0; i < MESSAGES.length; i += 1) {
+      var item = MESSAGES[i] || {};
+      var text = String(item.text == null ? '' : item.text);
+      out.push({
+        name: item.name || (item.role === 'user' ? USER_NAME : CHARACTER.name),
+        is_user: item.role === 'user',
+        is_system: item.role === 'system',
+        send_date: '',
+        mes: text,
+        extra: {},
+        swipe_id: 0,
+        swipes: [text],
+        swipes_info: [{}],
+        variables: item.statData && typeof item.statData === 'object'
+          ? [{ stat_data: clone(item.statData) }]
+          : [{}]
+      });
+    }
+    return out;
+  }
+  function chatApiFetch(url, init){
+    var path = String(url || '');
+    var data = {};
+    try {
+      var body = init && init.body;
+      if (typeof body === 'string') data = JSON.parse(body);
+      else if (body && typeof body === 'object') data = body;
+    } catch (e) { data = {}; }
+    if (path.indexOf('/api/chats/get') >= 0) {
+      return Promise.resolve(jsonResponse(chatFileData()));
+    }
+    if (path.indexOf('/api/chats/save') >= 0) {
+      var chat = data.chat;
+      if (Array.isArray(chat) && chat[0] && chat[0].chat_metadata &&
+          typeof chat[0].chat_metadata === 'object') {
+        CHAT_METADATA = clone(chat[0].chat_metadata);
+        saveMetadata().catch(function(){});
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    if (path.indexOf('/api/chats/rename') >= 0 ||
+        path.indexOf('/api/chats/delete') >= 0) {
+      // 酒馆聊天文件名只存在于 iframe 镜像里；返回成功避免卡内分支流程中断。
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    if (path.indexOf('/api/users/me') >= 0) {
+      return Promise.resolve(jsonResponse({
+        handle: USER_NAME || 'flyai-user',
+        name: USER_NAME || 'User',
+        admin: false
+      }));
+    }
+    if (path.indexOf('/api/files/sanitize-filename') >= 0) {
+      var name = String(data.fileName || data.file_name || '');
+      name = name.replace(/[\\\\/:*?"<>|]/g, '_').replace(/^\\s+|\\s+$/g, '');
+      return Promise.resolve(jsonResponse({ fileName: name }));
+    }
+    return null;
+  }
+  window.fetch = function(input, init){
+    var url = typeof input === 'string' ? input : (input && input.url ? String(input.url) : String(input));
+    var local = worldinfoFetch(url, init);
+    if (local) return local;
+    var chatApi = chatApiFetch(url, init);
+    if (chatApi) return chatApi;
+    // 手机作者模块通过这个酒馆内部地址请求模型；改成宿主静默生成桥。
+    if (url.indexOf('/api/backends/chat-completions/generate') >= 0) {
+      var body = {};
+      try { body = JSON.parse(String((init && init.body) || '{}')); } catch (e) { body = {}; }
+      var messages = Array.isArray(body.messages) ? body.messages : [];
+      var maxTokens = Number(body.max_tokens || body.max_completion_tokens || 0) || 0;
+      return requestGenerate({ purpose: 'phone', messages: messages, maxTokens: maxTokens }).then(function(text){
+        return jsonResponse({
+          choices: [{ message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+          model: String(body.model || '')
+        });
+      });
+    }
+    // 其余外网请求仍保持禁止（CSP connect-src 'none'）。
+    if (nativeFetch) {
+      try { return nativeFetch(input, init); } catch (e) { return Promise.reject(e); }
+    }
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+
+  window.errorCatched = function(fn){
+    return function(){
+      try {
+        var result = fn.apply(this, arguments);
+        if (result && typeof result.then === 'function') {
+          return result.then(function(value){ return value; }, function(err){
+            try { console.error(err); } catch (ignore) {}
+          });
+        }
+        return result;
+      } catch (err) {
+        try { console.error(err); } catch (ignore) {}
+      }
+    };
+  };
   window.waitGlobalInitialized = function(name){
     var key = String(name);
     return new Promise(function(resolve){
@@ -602,29 +1027,134 @@ const buildShim = ({
     WORLD_ENTRIES = list;
     return Promise.resolve(clone(list));
   }
-  window.getWorldbookNames = function(){
-    var names = [];
-    if (WORLD.charWorldName) names.push(WORLD.charWorldName);
-    if (WORLD.name && names.indexOf(WORLD.name) < 0) names.push(WORLD.name);
-    return names;
-  };
-  window.getCharWorldbookNames = function(){
-    return { primary: WORLD.charWorldName || WORLD.name || null, additional: [] };
-  };
-  window.getGlobalWorldbookNames = function(){ return []; };
-  window.getWorldbook = function(){ return clone(WORLD_ENTRIES); };
-  window.updateWorldbookWith = function(name, updater){
-    var next = typeof updater === 'function' ? updater(clone(WORLD_ENTRIES)) : WORLD_ENTRIES;
-    return postWorld(next);
-  };
-  window.updateWorldbook = window.updateWorldbookWith;
-  window.replaceWorldbook = function(first, second){
-    return postWorld(Array.isArray(first) ? first : second);
-  };
   window.getCharName = function(){ return CHARACTER.name; };
   window.getCurrentCharName = window.getCharName;
   window.getCharAvatar = function(){ return CHARACTER.avatar; };
+  window.getCurrentPersonaName = function(){ return USER_NAME; };
+  window.getCurrentPersonaId = function(){ return ''; };
+  window.retrieveDisplayedMessage = function(id){
+    var list = STCORE.getChatMessages(
+      MESSAGES, [id], {}, { charName: CHARACTER.name, userName: USER_NAME }
+    );
+    return list.length ? String(list[0].message || '') : '';
+  };
 
+  var GLOBAL_VARS = {};
+  function variableStore(scope){
+    var isGlobal = scope === 'global';
+    function read(){ return isGlobal ? GLOBAL_VARS : chatStat(); }
+    function write(next){
+      if (isGlobal) { GLOBAL_VARS = next && typeof next === 'object' ? next : {}; return; }
+      window.replaceVariables(next, { type: 'chat' });
+    }
+    return {
+      get: function(key){ var v = read()[String(key)]; return v === undefined ? '' : v; },
+      set: function(key, value){ var next = Object.assign({}, read()); next[String(key)] = value; write(next); return value; },
+      has: function(key){ return Object.prototype.hasOwnProperty.call(read(), String(key)); },
+      delete: function(key){ var next = Object.assign({}, read()); delete next[String(key)]; write(next); return ''; },
+      inc: function(key, delta){ var n = Number(read()[String(key)] || 0) + (delta == null ? 1 : Number(delta)); var next = Object.assign({}, read()); next[String(key)] = n; write(next); return n; },
+      dec: function(key, delta){ var n = Number(read()[String(key)] || 0) - (delta == null ? 1 : Number(delta)); var next = Object.assign({}, read()); next[String(key)] = n; write(next); return n; },
+      add: function(key, delta){ return this.inc(key, delta); }
+    };
+  }
+  var CHAT_METADATA = ${chatMetadataData};
+  // accountStorage：跨刷新保留账号 handle 等少量用户级键；存进会话 chatMetadata，
+  // 通过 saveMetadata 落库（容量小，不做大数据缓存）。
+  function accountStorage(){
+    function bag(){
+      if (!CHAT_METADATA.account_storage || typeof CHAT_METADATA.account_storage !== 'object') {
+        CHAT_METADATA.account_storage = {};
+      }
+      return CHAT_METADATA.account_storage;
+    }
+    return {
+      getItem: function(key){
+        var value = bag()[String(key)];
+        return value == null ? null : String(value);
+      },
+      setItem: function(key, value){
+        bag()[String(key)] = String(value);
+        saveMetadata().catch(function(){});
+        return String(value);
+      },
+      removeItem: function(key){
+        delete bag()[String(key)];
+        saveMetadata().catch(function(){});
+      },
+      clear: function(){
+        CHAT_METADATA.account_storage = {};
+        saveMetadata().catch(function(){});
+      }
+    };
+  }
+
+  // 手札 shell 以 srcdoc 嵌在作者 iframe 内。沙箱没有 allow-same-origin，
+  // 它直接读 window.parent.HLMHandbookAdapter 会被浏览器拦截；在 srcdoc
+  // 写入时注入一个 postMessage RPC 代理，保持卡内调用方式不变。
+  function handbookBridgeSource(){
+    return [
+      '(function(){',
+      'var pending={},seq=0;',
+      'window.addEventListener("message",function(e){',
+      'var d=e&&e.data;if(!d||d.type!=="flyai-handbook-rpc-result"||!d.id)return;',
+      'var p=pending[d.id];if(!p)return;delete pending[d.id];',
+      'if(d.ok)p.resolve(d.value);else p.reject(new Error(d.error||"rpc-failed"));',
+      '});',
+      'function call(method,args){return new Promise(function(resolve,reject){',
+      'var id="rpc-"+(++seq);pending[id]={resolve:resolve,reject:reject};',
+      'try{parent.postMessage({type:"flyai-handbook-rpc",id:id,method:method,args:args||[]},"*");}',
+      'catch(err){delete pending[id];reject(err);}',
+      '});}',
+      'window.HLMHandbookAdapter={',
+      'readContext:function(){return call("readContext",[]);},',
+      'readBook:function(chatId){return call("readBook",[chatId]);},',
+      'commitBook:function(book,expected){return call("commitBook",[book,expected]);},',
+      'setPlotConstraint:function(content,expected){return call("setPlotConstraint",[content,expected]);},',
+      'clearPlotConstraint:function(){return call("clearPlotConstraint",[]);}',
+      '};',
+      'window.__FLYAI_MAP_RUNTIME__=undefined;',
+      '})();'
+    ].join('');
+  }
+  function patchHandbookSrcdoc(html){
+    var text = String(html == null ? '' : html);
+    if (text.indexOf('HLMHandbookAdapter') < 0 &&
+        text.indexOf('HLMMapRuntime') < 0) {
+      return text;
+    }
+    text = text
+      .replace(/window\\.parent\\.HLMHandbookAdapter/g, 'window.HLMHandbookAdapter')
+      .replace(/window\\.parent\\.HLMMapRuntime/g, 'window.__FLYAI_MAP_RUNTIME__')
+      .replace(/window\\.top\\.HLMMapRuntime/g, 'window.__FLYAI_MAP_RUNTIME__')
+      .replace(/stateViewHost\\s*=\\s*window\\.parent\\s*\\|\\|\\s*window/g, 'stateViewHost=window');
+    var script = '<script>' + handbookBridgeSource() + '</scr' + 'ipt>';
+    var head = text.match(/<head[^>]*>/i);
+    if (head && typeof head.index === 'number') {
+      var at = head.index + head[0].length;
+      return text.slice(0, at) + script + text.slice(at);
+    }
+    var body = text.match(/<body[^>]*>/i);
+    if (body && typeof body.index === 'number') {
+      var bat = body.index + body[0].length;
+      return text.slice(0, bat) + script + text.slice(bat);
+    }
+    return script + text;
+  }
+  try {
+    var iframeProto = window.HTMLIFrameElement && window.HTMLIFrameElement.prototype;
+    var srcdocDesc = iframeProto && Object.getOwnPropertyDescriptor(iframeProto, 'srcdoc');
+    if (srcdocDesc && srcdocDesc.set) {
+      var patchedSet = function(value){
+        return srcdocDesc.set.call(this, patchHandbookSrcdoc(value));
+      };
+      Object.defineProperty(iframeProto, 'srcdoc', {
+        configurable: true,
+        enumerable: srcdocDesc.enumerable,
+        get: srcdocDesc.get,
+        set: patchedSet
+      });
+    }
+  } catch (e) {}
   window.SillyTavern = window.SillyTavern || {};
   window.SillyTavern.getContext = function(){
     return {
@@ -632,31 +1162,316 @@ const buildShim = ({
         name: CHARACTER.name,
         avatar: CHARACTER.avatar,
         description: CHARACTER.description,
-        data: { name: CHARACTER.name, avatar: CHARACTER.avatar, description: CHARACTER.description }
+        data: {
+          name: CHARACTER.name,
+          avatar: CHARACTER.avatar,
+          description: CHARACTER.description,
+          extensions: { tavern_helper: { scripts: [] } }
+        }
       }],
       characterId: 0,
-      chat: MESSAGES.map(function(message){
+      chatId: CHAT_ID,
+      groupId: null,
+      chat: MESSAGES.map(function(message, index){
         return {
+          message_id: index,
           mes: String(message.text || ''),
           message: String(message.text || ''),
-          name: message.name || (message.role === 'user' ? '' : CHARACTER.name),
+          name: message.name || (message.role === 'user' ? USER_NAME : CHARACTER.name),
           is_user: message.role === 'user',
           is_system: false,
-          extra: {}
+          swipe_id: 0,
+          extra: {},
+          variables: [{ stat_data: clone(message.statData || {}) }]
         };
       }),
-      chatMetadata: {},
-      name1: '',
+      chatMetadata: CHAT_METADATA,
+      updateChatMetadata: updateChatMetadata,
+      name1: USER_NAME,
       name2: CHARACTER.name,
       eventSource: eventSource,
+      eventTypes: window.tavern_events,
+      extensionSettings: { variables: { global: GLOBAL_VARS } },
+      saveSettingsDebounced: function(){},
+      saveMetadata: saveMetadata,
+      variables: { global: variableStore('global'), local: variableStore('local') },
+      mainApi: 'openai',
+      getPresetManager: function(){ return null; },
+      tagMap: {},
+      getRequestHeaders: function(){ return {}; },
+      accountStorage: accountStorage(),
+      extensionPrompts: {},
+      setExtensionPrompt: function(key, value, position, depth, scan, role){
+        injectPrompts([{
+          id: String(key || ''),
+          content: String(value || ''),
+          position: position,
+          depth: depth,
+          scan: scan,
+          role: role
+        }]);
+      },
+      loadWorldInfo: function(name){ return Promise.resolve(clone(worldbookOf(name))); },
+      saveWorldInfo: function(name, data){ return saveWorldbook(name, data); },
+      saveChat: function(){ return Promise.resolve(true); },
+      generate: contextGenerate,
+      generateRaw: generateRaw,
+      stopGenerationById: stopGenerationById,
+      stopGeneration: function(){ emit(window.tavern_events.GENERATION_STOPPED); },
       getCurrentMessageId: function(){ return lastIndex(); }
     };
   };
+  function getChatHistoryDetail(files){
+    var out = {};
+    var name = (CHAT_ID || 'chat') + '.jsonl';
+    var list = MESSAGES.map(function(message, index){
+      return {
+        message_id: index,
+        name: message.name || (message.role === 'user' ? USER_NAME : CHARACTER.name),
+        is_user: message.role === 'user',
+        is_system: false,
+        mes: String(message.text || ''),
+        swipe_id: 0,
+        extra: clone(message.extra || {}),
+        variables: [{ stat_data: clone(message.statData || {}) }]
+      };
+    });
+    if (Array.isArray(files) && files.length) {
+      for (var i = 0; i < files.length; i += 1) {
+        var file = files[i] || {};
+        out[String(file.file_name || name)] = list;
+      }
+    } else {
+      out[name] = list;
+    }
+    return Promise.resolve(out);
+  }
+  function createChatMessages(messages){
+    var list = Array.isArray(messages) ? messages : [messages];
+    var created = [];
+    var payload = [];
+    var base = MESSAGES.length;
+    for (var i = 0; i < list.length; i += 1) {
+      var raw = list[i] || {};
+      var role = String(raw.role || 'user');
+      var item = {
+        message_id: MESSAGES.length,
+        name: String(raw.name || (role === 'user' ? USER_NAME : CHARACTER.name)),
+        is_user: role === 'user',
+        is_system: role === 'system',
+        mes: String(raw.message != null ? raw.message : (raw.mes != null ? raw.mes : '')),
+        swipe_id: 0,
+        extra: raw.extra && typeof raw.extra === 'object' ? clone(raw.extra) : {},
+        variables: raw.data && typeof raw.data === 'object'
+          ? [clone(raw.data)]
+          : (Array.isArray(raw.variables) ? clone(raw.variables) : undefined)
+      };
+      var mirror = {
+        role: role === 'user' ? 'user' : 'assistant',
+        text: item.mes,
+        name: item.name,
+        extra: item.extra,
+        statData: item.variables && item.variables[0] ? item.variables[0].stat_data : undefined
+      };
+      MESSAGES.push(mirror);
+      created.push(item);
+      payload.push({
+        role: role,
+        name: item.name,
+        message: item.mes,
+        extra: item.extra,
+        data: item.variables && item.variables[0] ? item.variables[0] : undefined,
+        is_hidden: raw.is_hidden === true
+      });
+    }
+    emit(window.tavern_events.MESSAGE_SENT, MESSAGES.length - 1);
+    if (!CAN_WRITE) return Promise.resolve(created);
+    // 与卡片侧一致：先把新楼层落到宿主会话，再让 generate() 基于这段上下文生成。
+    return requestMessagePatch([], payload).then(function(result){
+      var rows = result && Array.isArray(result.created) ? result.created : [];
+      for (var j = 0; j < rows.length; j += 1) {
+        var row = rows[j] || {};
+        if (created[j] && row.id) created[j].id = String(row.id);
+        if (MESSAGES[base + j] && row.id) MESSAGES[base + j].id = String(row.id);
+      }
+      return created;
+    });
+  }
+  // 面板侧 setChatMessages：先改本地镜像，再按后端消息 id 落库。
+  window.setChatMessages = function(changes, options){
+    var list = Array.isArray(changes) ? changes : (changes ? [changes] : []);
+    var patches = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var change = list[i] || {};
+      var id = Number(change.message_id);
+      if (!isFinite(id) || id < 0 || id >= MESSAGES.length) continue;
+      var target = MESSAGES[id];
+      var patch = { id: String(target.id || '') };
+      if (change.message != null || change.mes != null) {
+        target.text = String(change.message != null ? change.message : change.mes);
+        patch.message = target.text;
+      }
+      if (change.name != null) target.name = String(change.name);
+      if (change.role != null) target.role = change.role === 'user' ? 'user' : 'assistant';
+      if (change.is_hidden != null) patch.is_hidden = !!change.is_hidden;
+      if (change.data && typeof change.data === 'object') {
+        target.statData = (change.data.stat_data && typeof change.data.stat_data === 'object')
+          ? clone(change.data.stat_data)
+          : clone(change.data);
+        patch.data = clone(change.data);
+      }
+      if (patch.id && Object.keys(patch).length > 1) patches.push(patch);
+    }
+    emit(window.tavern_events.MESSAGE_UPDATED, lastIndex());
+    if (patches.length) return requestMessagePatch(patches).then(function(){ return undefined; });
+    return Promise.resolve();
+  };
+  window.deleteChatMessages = function(ids, options){
+    var list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(function(id){
+      return isFinite(id) && id >= 0 && id < MESSAGES.length;
+    }).sort(function(a, b){ return b - a; });
+    for (var i = 0; i < list.length; i += 1) MESSAGES.splice(list[i], 1);
+    return Promise.resolve();
+  };
+  window.rotateChatMessages = function(begin, middle, end, options){
+    begin = Number(begin); middle = Number(middle); end = Number(end);
+    if (!(begin >= 0 && middle >= begin && end >= middle && end <= MESSAGES.length)) {
+      return Promise.reject(new Error('invalid rotate range'));
+    }
+    var next = MESSAGES.slice(0, begin)
+      .concat(MESSAGES.slice(middle, end), MESSAGES.slice(begin, middle), MESSAGES.slice(end));
+    for (var i = 0; i < next.length; i += 1) MESSAGES[i] = next[i];
+    MESSAGES.length = next.length;
+    return Promise.resolve();
+  };
+  function injectPrompts(prompts, options){
+    var list = Array.isArray(prompts) ? clone(prompts) : [];
+    try { HOST.postMessage({ v: VERSION, type: MSG_INJECT_PROMPTS, prompts: list, remove: [] }, '*'); } catch (e) {}
+    var deleted = false;
+    var ids = list.map(function(p){ return String((p && p.id) || ''); }).filter(Boolean);
+    function uninject(){
+      if (deleted) return;
+      deleted = true;
+      uninjectPrompts(ids);
+    }
+    if (options && options.once) {
+      on(window.tavern_events.GENERATION_ENDED, uninject, true, false);
+      on(window.tavern_events.GENERATION_STOPPED, uninject, true, false);
+      on(window.iframe_events.GENERATION_ENDED, uninject, true, false);
+    }
+    return { uninject: uninject };
+  }
+  function uninjectPrompts(ids){
+    var list = Array.isArray(ids) ? ids.map(String) : [];
+    try { HOST.postMessage({ v: VERSION, type: MSG_INJECT_PROMPTS, prompts: [], remove: list }, '*'); } catch (e) {}
+  }
+
+  var helper = window.TavernHelper || window.tavernHelper || {};
+  helper.getVariables = window.getVariables;
+  helper.setVariables = window.setVariables;
+  helper.replaceVariables = window.replaceVariables;
+  helper.updateVariablesWith = window.updateVariablesWith;
+  helper.insertOrAssignVariables = window.insertOrAssignVariables;
+  helper.insertVariables = window.insertVariables;
+  helper.deleteVariable = window.deleteVariable;
+  helper.deleteVariables = window.deleteVariable;
+  helper.getAllVariables = window.getAllVariables;
+  helper.getChatVariable = window.getChatVariable;
+  helper.setChatVariable = window.setChatVariable;
+  helper.getGlobalVariables = window.getGlobalVariables;
+  helper.setGlobalVariable = window.setGlobalVariable;
+  helper.getChatMessages = window.getChatMessages;
+  helper.createChatMessages = createChatMessages;
+  helper.setChatMessages = window.setChatMessages;
+  helper.deleteChatMessages = window.deleteChatMessages;
+  helper.rotateChatMessages = window.rotateChatMessages;
+  helper.getChatHistoryDetail = getChatHistoryDetail;
+  helper.getCurrentMessageId = window.getCurrentMessageId;
+  helper.getLastMessageId = window.getLastMessageId;
+  helper.getWorldbookNames = window.getWorldbookNames;
+  helper.getCharWorldbookNames = window.getCharWorldbookNames;
+  helper.getGlobalWorldbookNames = window.getGlobalWorldbookNames;
+  helper.getWorldbook = window.getWorldbook;
+  helper.updateWorldbookWith = window.updateWorldbookWith;
+  helper.updateWorldbook = window.updateWorldbook;
+  helper.replaceWorldbook = window.replaceWorldbook;
+  helper.getCharName = window.getCharName;
+  helper.getCurrentCharName = window.getCurrentCharName;
+  helper.getCharAvatar = window.getCharAvatar;
+  helper.getCurrentPersonaName = window.getCurrentPersonaName;
+  helper.getCurrentPersonaId = window.getCurrentPersonaId;
+  helper.retrieveDisplayedMessage = window.retrieveDisplayedMessage;
+  helper.getCurrentCharacterId = function(){ return CHARACTER.avatar || CHARACTER.name; };
+  helper.getChatWorldbookName = window.getChatWorldbookName;
+  helper.getCharacter = function(){ return clone(CHARACTER); };
+  helper.getScriptId = function(){ return ''; };
+  helper.getPresetNames = function(){ return []; };
+  helper.triggerSlash = function(){ return window.triggerSlash.apply(window, arguments); };
+  helper.substituteParams = function(){ return window.substituteParams.apply(window, arguments); };
+  helper.substitudeMacros = function(){ return window.substituteParams.apply(window, arguments); };
+  helper.eventOn = window.eventOn;
+  helper.eventOnce = window.eventOnce;
+  helper.eventOff = window.eventOff;
+  helper.eventEmit = window.eventEmit;
+  helper.eventEmitAndWait = window.eventEmitAndWait;
+  helper.eventMakeFirst = window.eventMakeFirst;
+  helper.eventMakeLast = window.eventMakeLast;
+  helper.getButtonEvent = window.getButtonEvent;
+  helper.eventRemoveListener = window.eventRemoveListener;
+  helper.eventClearEvent = window.eventClearEvent;
+  helper.eventClearListener = window.eventClearListener;
+  helper.eventClearAll = window.eventClearAll;
+  helper.getCharacterIds = function(){ return CHARACTER.avatar || CHARACTER.name ? [CHARACTER.avatar || CHARACTER.name] : []; };
+  helper.getCharacterNames = function(){ return CHARACTER.name ? [CHARACTER.name] : []; };
+  helper.initializeGlobal = function(name, value){ window[String(name)] = value; };
+  helper.injectPrompts = injectPrompts;
+  helper.uninjectPrompts = uninjectPrompts;
+  window.injectPrompts = injectPrompts;
+  window.uninjectPrompts = uninjectPrompts;
+  window.TavernHelper = helper;
+  window.tavernHelper = helper;
+  // EJS 世界书条目会调用 globalThis.DALPhoneMainline.read()；作者面板里的
+  // 手机模块会赋值该对象，这里包一层，把主线摘要同步给宿主 EJS 运行时。
+  var mainlineValue = null;
+  try {
+    Object.defineProperty(window, 'DALPhoneMainline', {
+      configurable: true,
+      get: function(){ return mainlineValue; },
+      set: function(value){
+        if (value && typeof value.read === 'function') {
+          var original = value.read;
+          value.read = function(){
+            return Promise.resolve(original.apply(value, arguments)).then(function(text){
+              try {
+                HOST.postMessage({ v: VERSION, type: MSG_PHONE_MAINLINE, text: String(text == null ? '' : text).slice(0, 131072) }, '*');
+              } catch (e) {}
+              return text;
+            });
+          };
+        }
+        mainlineValue = value;
+      }
+    });
+  } catch (e) {}
+  // 面板打开期间周期性刷新主线摘要（read 已被上面的 setter 包成“顺带上报”）
+  try {
+    var syncMainline = function(){
+      try {
+        if (mainlineValue && typeof mainlineValue.read === 'function') {
+          Promise.resolve(mainlineValue.read()).catch(function(){});
+        }
+      } catch (e) {}
+    };
+    setTimeout(syncMainline, 3000);
+    setInterval(syncMainline, 15000);
+  } catch (e) {}
+
   window.toastr = {
     info: function(){}, success: function(){}, warning: function(){}, error: function(){}, clear: function(){}
   };
   try { window.alert = function(message){ try { HOST.postMessage({ v: VERSION, type: 'flyai-card-toast', level: 'info', text: String(message || '') }, '*'); } catch (e) {} }; } catch (e) {}
-  try { window.confirm = function(){ return false; }; } catch (e) {}
+  try { window.confirm = function(){ return !!CAN_WRITE; }; } catch (e) {}
+  try { window.Popup = window.Popup || {}; window.Popup.show = { confirm: function(){ return Promise.resolve(CAN_WRITE ? 1 : 0); } }; window.POPUP_RESULT = { AFFIRMATIVE: 1, CANCELLED: 0 }; } catch (e) {}
   try { window.prompt = function(){ return null; }; } catch (e) {}
   window.isEditMode = false;
   // 脚本在 body 末尾执行，DOM 已就绪；$(fn) 直接同步执行，
@@ -734,16 +1549,301 @@ const buildShim = ({
   };
   window.substitudeMacros = window.substituteParams;
 
+  var pendingGenerates = {};
+  var externalGenerates = {};
+  var generateSeq = 0;
+  var pendingMetadata = {};
+  var metadataSeq = 0;
+
+  function saveMetadata(){
+    var id = 'm' + (++metadataSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMetadata[id];
+        reject(new Error('flyai-save-metadata-timeout'));
+      }, 20000);
+      pendingMetadata[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MSG_SAVE_METADATA,
+          id: id,
+          metadata: CHAT_METADATA
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMetadata[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMetadata(data){
+    if (!data || data.id == null) return;
+    var item = pendingMetadata[data.id];
+    if (!item) return;
+    delete pendingMetadata[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(true);
+    else item.reject(new Error(String(data.error || 'save-metadata-failed')));
+  }
+  var pendingMessages = {};
+  var messagesSeq = 0;
+  function requestMessagePatch(changes, creates){
+    var id = 'p' + (++messagesSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMessages[id];
+        reject(new Error('flyai-message-patch-timeout'));
+      }, 20000);
+      pendingMessages[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MSG_SAVE_MESSAGES,
+          id: id,
+          changes: changes || [],
+          creates: creates || []
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMessages[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMessages(data){
+    if (!data || data.id == null) return;
+    var item = pendingMessages[data.id];
+    if (!item) return;
+    delete pendingMessages[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(data.result);
+    else item.reject(new Error(String(data.error || 'patch-messages-failed')));
+  }
+  var pendingMainGenerates = {};
+  var mainGenerateSeq = 0;
+  function requestGenerateMain(quietPrompt){
+    var id = 'g' + (++mainGenerateSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMainGenerates[id];
+        reject(new Error('flyai-generate-timeout'));
+      }, 180000);
+      pendingMainGenerates[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MSG_GENERATE_MAIN,
+          id: id,
+          quiet_prompt: String(quietPrompt == null ? '' : quietPrompt),
+          automatic_trigger: true
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMainGenerates[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMainGenerate(data){
+    if (!data || data.id == null) return;
+    var item = pendingMainGenerates[data.id];
+    if (!item) return;
+    delete pendingMainGenerates[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(true);
+    else item.reject(new Error(String(data.error || 'generate-failed')));
+  }
+  function contextGenerate(type, options){
+    if (options && typeof options === 'object' &&
+        typeof options.quiet_prompt === 'string' && options.quiet_prompt) {
+      return requestGenerateMain(options.quiet_prompt);
+    }
+    return window.__flyaiGenerate ? window.__flyaiGenerate(type, options) : Promise.resolve(false);
+  }
+  function updateChatMetadata(patch, reset){
+    if (!patch || typeof patch !== 'object') return;
+    var next = clone(patch);
+    if (reset === true) {
+      CHAT_METADATA = next;
+    } else {
+      // 酒馆语义：默认按顶层键合并，未提及的命名空间保持不变。
+      Object.keys(next).forEach(function(key){ CHAT_METADATA[key] = next[key]; });
+    }
+    var context = window.SillyTavern && window.SillyTavern.getContext
+      ? window.SillyTavern.getContext() : null;
+    if (context) context.chatMetadata = CHAT_METADATA;
+  }
+  function requestGenerate(payload, externalId){
+    var id = 'g' + (++generateSeq);
+    var ext = externalId ? String(externalId) : '';
+    if (ext) externalGenerates[ext] = id;
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingGenerates[id];
+        if (ext && externalGenerates[ext] === id) delete externalGenerates[ext];
+        reject(new Error('flyai-author-generate-timeout'));
+      }, 180000);
+      pendingGenerates[id] = {
+        resolve: resolve, reject: reject, timer: timer, externalId: ext
+      };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MSG_GENERATE,
+          id: id,
+          purpose: String((payload && payload.purpose) || 'phone'),
+          messages: Array.isArray(payload && payload.messages) ? payload.messages : [],
+          systemPrompt: String((payload && payload.systemPrompt) || ''),
+          maxTokens: Number((payload && payload.maxTokens) || 0) || undefined
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingGenerates[id];
+        if (ext && externalGenerates[ext] === id) delete externalGenerates[ext];
+        reject(e);
+      }
+    });
+  }
+  function settleGenerate(data){
+    if (!data || data.id == null) return;
+    var item = pendingGenerates[data.id];
+    if (!item) return;
+    delete pendingGenerates[data.id];
+    if (item.externalId && externalGenerates[item.externalId] === data.id) {
+      delete externalGenerates[item.externalId];
+    }
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(String(data.text || ''));
+    else item.reject(new Error(String(data.error || 'generate-failed')));
+  }
+  window.__flyaiGenerate = function(type, options){
+    var opts = options && typeof options === 'object' ? options : {};
+    var messages = Array.isArray(opts.messages) ? opts.messages : [];
+    var prompt = opts.quiet_prompt || opts.prompt || opts.text || '';
+    if (!messages.length && prompt) messages = [{ role: 'user', content: String(prompt) }];
+    return requestGenerate({
+      purpose: opts.purpose || 'phone',
+      messages: messages,
+      systemPrompt: opts.systemPrompt || opts.system_prompt || '',
+      maxTokens: opts.max_tokens || opts.maxTokens || 0
+    });
+  };
+
+  function normalizeGenerateContent(value){
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) {
+      return value.map(function(item){
+        if (typeof item === 'string') return item;
+        if (item && typeof item.text === 'string') return item.text;
+        return '';
+      }).join('');
+    }
+    if (value && typeof value === 'object') {
+      // TavernHelper 的提示词项可能是 {role, content: [{type:'text',text}]}
+      try { return JSON.stringify(value); } catch (e) { return String(value); }
+    }
+    return '';
+  }
+  function generateRaw(request, maybeOptions){
+    if (request && typeof request === 'object' &&
+        (Array.isArray(request.ordered_prompts) || Array.isArray(request.messages))) {
+      var list = Array.isArray(request.ordered_prompts)
+        ? request.ordered_prompts
+        : request.messages;
+      var messages = list.map(function(item){
+        var role = item && item.role ? String(item.role) : 'user';
+        var content = item && item.content != null ? item.content : (item && item.text);
+        return { role: role, content: normalizeGenerateContent(content) };
+      }).filter(function(item){ return item.content; });
+      var maxTokens = 0;
+      if (request.custom_api && request.custom_api.max_tokens) {
+        maxTokens = Number(request.custom_api.max_tokens) || 0;
+      } else if (request.max_tokens) {
+        maxTokens = Number(request.max_tokens) || 0;
+      }
+      // 卡内 custom_api 的 endpoint/key 不透传：作者脚本不能借宿主的网络
+      // 把请求发到卡自带地址；这里统一走会话模型，并在宿主弹确认。
+      return requestGenerate({
+        purpose: String(request.purpose || 'handbook'),
+        messages: messages,
+        systemPrompt: '',
+        maxTokens: maxTokens
+      }, request.generation_id);
+    }
+    return window.__flyaiGenerate(request, maybeOptions);
+  }
+  function stopGenerationById(generationId){
+    var ext = generationId == null ? '' : String(generationId);
+    var local = externalGenerates[ext];
+    if (!local) return false;
+    var item = pendingGenerates[local];
+    if (!item) return false;
+    delete pendingGenerates[local];
+    delete externalGenerates[ext];
+    clearTimeout(item.timer);
+    // 宿主目前没有逐次取消通道；拒绝前端 Promise 后，迟到的结果会被丢弃。
+    item.reject(new Error('cancelled'));
+    return true;
+  }
+  window.generateRaw = generateRaw;
+  window.stopGenerationById = stopGenerationById;
+
+  var iframeGenerationId = null;
+  var iframeGenerationSeq = 0;
   window.addEventListener('message', function(event){
     var data = event && event.data;
-    if (!data || data.type !== MSG_VARS) return;
-    if (data.variables && typeof data.variables === 'object') {
-      CHAT_VARIABLES = normalizeMvu(data.variables);
-      emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, clone(CHAT_VARIABLES));
+    if (!data || typeof data !== 'object') return;
+    if (data.type === MSG_GENERATE_RESULT) { settleGenerate(data); return; }
+    if (data.type === MSG_SAVE_METADATA_RESULT) { settleMetadata(data); return; }
+    if (data.type === MSG_SAVE_MESSAGES_RESULT) { settleMessages(data); return; }
+    if (data.type === MSG_GENERATE_MAIN_RESULT) { settleMainGenerate(data); return; }
+    if (data.type === 'flyai-handbook-rpc' && event.source) {
+      // 手札 shell 是嵌套 iframe（沙箱不给 allow-same-origin，不能直接读
+      // 父窗口的 adapter），用 postMessage RPC 转发到本帧的 HLMHandbookAdapter。
+      var source = event.source;
+      var reply = function(ok, value, error){
+        try {
+          source.postMessage({
+            type: 'flyai-handbook-rpc-result',
+            id: data.id,
+            ok: ok,
+            value: value,
+            error: error
+          }, '*');
+        } catch (e) {}
+      };
+      var adapter = window.HLMHandbookAdapter;
+      var method = String(data.method || '');
+      if (!adapter || typeof adapter[method] !== 'function') {
+        reply(false, null, 'unsupported-method');
+        return;
+      }
+      try {
+        Promise.resolve(adapter[method].apply(adapter, Array.isArray(data.args) ? data.args : []))
+          .then(function(value){ reply(true, value, null); },
+                function(error){ reply(false, null, String((error && error.message) || error)); });
+      } catch (e) {
+        reply(false, null, String((e && e.message) || e));
+      }
+      return;
     }
     if (data.type === MSG_EVENT && typeof data.event === 'string') {
       emit(data.event, data.payload);
+      if (data.event === 'GENERATION_STARTED') {
+        iframeGenerationSeq += 1;
+        iframeGenerationId = 'flyai-generation-' + iframeGenerationSeq;
+        emit(window.iframe_events.GENERATION_REQUESTED, iframeGenerationId);
+      } else if (data.event === 'GENERATION_ENDED' || data.event === 'GENERATION_STOPPED') {
+        emit(window.iframe_events.GENERATION_ENDED, '', iframeGenerationId);
+        iframeGenerationId = null;
+      }
       return;
+    }
+    if (data.type !== MSG_VARS) return;
+    if (data.variables && typeof data.variables === 'object') {
+      CHAT_VARIABLES = normalizeMvu(data.variables);
+      emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, clone(CHAT_VARIABLES));
     }
     if (Array.isArray(data.messages)) {
       var previous = MESSAGES.length;
@@ -761,6 +1861,12 @@ const buildShim = ({
           body.textContent = String(message.text || '');
           row.appendChild(body);
           chat.appendChild(row);
+          if (message.role === 'user') {
+            emit(window.tavern_events.USER_MESSAGE_RENDERED, index);
+          } else {
+            emit(window.tavern_events.CHARACTER_MESSAGE_RENDERED, index);
+            emit(window.tavern_events.MESSAGE_RECEIVED, index, 'normal');
+          }
         }
       }
       emit(window.tavern_events.MESSAGE_UPDATED, lastIndex());
@@ -815,14 +1921,22 @@ export const buildAuthorDoc = (options: AuthorRuntimeOptions): string => {
   if (scripts.length === 0) {
     return ''
   }
-  const source = scripts
-    .map((script) => adaptAuthorSource(script.content))
-    .join('\n;\n')
+  // 每个脚本独立成一个 module：酒馆助手按脚本隔离作用域，卡里允许不同脚本
+  // declares 同名顶层函数（红楼两个 MVU 脚本都有 hlmImportWatched）。
+  // 拼进同一个 module 会因严格模式重复声明让整包脚本解析失败。
+  const sources = scripts.map((script) => adaptAuthorSource(script.content))
+  const source = sources.join('\n;\n')
   const shim = buildShim({
     messages: options.messages,
     variables: options.variables,
+    chatMetadata: options.chatMetadata,
     character: options.character ?? options.author.character,
     writeContext: options.writeContext,
+    sessionId: options.sessionId,
+    chatId: options.chatId ?? options.sessionId,
+    userName: options.userName,
+    canWrite: options.canWrite,
+    canAct: options.canAct,
   })
   const importMap = buildImportMap(source)
   const chineseFallback =
@@ -854,9 +1968,12 @@ ${chatMarkup(options.messages, options.html) || chineseFallback}
 <script>${JQUERY_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
 <script>${LODASH_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
 <script>${ZOD_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
+<script>${escapeScriptBody(ST_CORE_SOURCE)}</script>
 <script>${shim}</script>
 ${importMap}
-<script type="module">${escapeScriptBody(source)}</script>
+${sources
+  .map((body) => `<script type="module">${escapeScriptBody(body)}</script>`)
+  .join('\n')}
 </body>
 </html>`
 }

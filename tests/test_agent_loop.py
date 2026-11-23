@@ -493,3 +493,28 @@ def test_keep_turns_with_actor_view():
     assert body[0].content == "问题2"
     # 别人的消息是不带 tool_calls 的干净副本，自己的消息原样
     assert all(not m.tool_calls for m in body)
+
+
+def test_quiet_prompt_only_in_request_copy():
+    history = [Message(role="user", content="你好")]
+
+    async def collect():
+        provider = _ScriptedProvider([("final", "收到")])
+        events = []
+        async for ev in run_agent_loop(
+            history=history,
+            provider=provider,
+            registry=_FakeRegistry(),
+            settings=ToolSettings(),
+            quiet_prompt="（系统旁白：继续）",
+        ):
+            events.append(ev)
+        return provider
+
+    provider = _run(collect())
+    sent = provider.received[0]
+    assert sent[-1].role == "user"
+    assert sent[-1].content == "你好\n（系统旁白：继续）"
+    # 原始历史不被改写；quiet_prompt 不落库
+    assert history[0].content == "你好"
+    assert all("系统旁白" not in (m.content or "") for m in history)

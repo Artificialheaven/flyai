@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from ..ids import InvalidName, check_safe_name
 from ..lore.diff import character_diff, world_diff
 from ..preset.apply import active_preset_regex_scripts
+from ..schemas import Message
 from ..sessions import versions
 from ..sessions.models import RoomMember, Session, Thread
 from ..user import ADMIN_UID
@@ -432,7 +433,16 @@ _ST_MVU_MAX_PATH = 512
 _ST_MVU_OPS = frozenset({"add", "remove", "replace", "move", "copy", "test"})
 _ST_WORLD_MAX_ENTRIES = 500
 _ST_WORLD_MAX_BYTES = 2 * 1024 * 1024
-_ST_CHAR_MAX_BYTES = 1024 * 1024
+_ST_CHAR_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _st_write_max_bytes(request: Request) -> int:
+    """卡内角色/世界书写回上限；管理面板 lore.max_card_write_mb（1–5MB）。"""
+    try:
+        mb = int(request.app.state.flyai.config.lore.max_card_write_mb)
+    except (AttributeError, TypeError, ValueError):
+        mb = 2
+    return max(1, min(mb, 5)) * 1024 * 1024
 _ST_CHAR_FIELDS = frozenset({
     "name", "intro", "background", "mes_example", "table",
     "prompt_format", "prompt_tools", "system_prompt",
@@ -585,20 +595,317 @@ def st_write_world(sid: str, body: StWorldBody, request: Request):
         if not isinstance(item, dict):
             raise HTTPException(400, "世界书条目必须是对象")
         entries.append(LoreEntry.from_dict(item).to_dict())
-    if _json_size(entries) > _ST_WORLD_MAX_BYTES:
-        raise HTTPException(413, "世界书数据超过 2MB 上限")
+    max_bytes = _st_write_max_bytes(request)
+    if _json_size(entries) > max_bytes:
+        raise HTTPException(413, "世界书数据超过 %dMB 上限" % (max_bytes // (1024 * 1024)))
 
     if not s.world_override:
         try:
             fork_world(s, sc.lore)
         except ValueError:
-            raise HTTPException(400, "world-not-bound")
+            # 没有绑定世界观时，用角色卡自带世界书派生一份会话副本，
+            # 避免卡内 /api/worldinfo/edit 因 world-not-bound 整段失败。
+            char = effective_character(s, sc.lore)
+            if char is None:
+                raise HTTPException(400, "world-not-bound")
+            ext = getattr(char, "extensions", None)
+            wname = ""
+            if isinstance(ext, dict) and isinstance(ext.get("world"), str):
+                wname = ext["world"].strip()
+            s.world_override = {
+                "id": "",
+                "name": wname or getattr(char, "name", ""),
+                "avatar": "",
+                "content": "",
+                "table": [e.to_dict() for e in (getattr(char, "table", None) or [])],
+                "prompt_format": "",
+                "prompt_tools": "",
+            }
     override = dict(s.world_override or {})
     override["table"] = entries
     s.world_override = override
     # 不能用 save_merged：world_override 在 MERGED_FIELDS 里，回填会把本次写入抹掉
     sc.store.save(s)
     return {"entries": entries, "scoped": True}
+
+
+class StChatMetadataBody(BaseModel):
+    metadata: Dict = {}
+
+
+@router.get("/sessions/{sid}/st/chat-metadata")
+def st_get_chat_metadata(sid: str, request: Request):
+    """卡内 chatMetadata 读取（地图/手札存档）。"""
+    _state, _sc, s = _st_write_guard(request, sid)
+    author = (getattr(s, "attributes", None) or {}).get("author") or {}
+    data = author.get("chat_metadata") if isinstance(author, dict) else None
+    return {"chat_metadata": data if isinstance(data, dict) else {}}
+
+
+@router.post("/sessions/{sid}/st/chat-metadata")
+def st_set_chat_metadata(sid: str, body: StChatMetadataBody, request: Request):
+    """卡内 chatMetadata 写回；上限 1MB，存 session.attributes.author。"""
+    _state, sc, s = _st_write_guard(request, sid)
+    if not isinstance(body.metadata, dict):
+        raise HTTPException(400, "metadata 必须是对象")
+    if _json_size(body.metadata) > 1024 * 1024:
+        raise HTTPException(413, "chatMetadata 超过 1MB 上限")
+    s.attributes = dict(getattr(s, "attributes", None) or {})
+    author = dict(s.attributes.get("author") or {})
+    author["chat_metadata"] = copy.deepcopy(body.metadata)
+    s.attributes["author"] = author
+    sc.store.save_merged(s)
+    return {"ok": True}
+
+
+class StMessagePatch(BaseModel):
+    id: str = ""
+    message: Optional[str] = None
+    data: Optional[Dict] = None
+    is_hidden: Optional[bool] = None
+    role: Optional[str] = None
+    name: Optional[str] = None
+
+
+class StMessageCreate(BaseModel):
+    """卡内 createChatMessages 的新楼层（酒馆 message 形状）。"""
+
+    role: str = "user"
+    name: Optional[str] = None
+    message: Optional[str] = None
+    data: Optional[Dict] = None
+    extra: Optional[Dict] = None
+    is_hidden: Optional[bool] = None
+
+
+class StMessagesBody(BaseModel):
+    thread_id: Optional[str] = None
+    changes: List[StMessagePatch] = []
+    creates: List[StMessageCreate] = []
+
+
+@router.patch("/sessions/{sid}/st/messages")
+def st_patch_messages(sid: str, body: StMessagesBody, request: Request):
+    """卡内 setChatMessages 落库：按消息 id 修改正文/隐藏/变量快照；creates 追加新楼层。"""
+    _state, sc, s = _st_write_guard(request, sid)
+    t = _st_dm_thread(s, body.thread_id)
+    if len(body.changes) > 200:
+        raise HTTPException(400, "单次修改超过 200 条上限")
+    if len(body.creates) > 20:
+        raise HTTPException(400, "单次新增超过 20 条上限")
+    by_id = {m.id: m for m in t.messages if getattr(m, "id", "")}
+    updated = []
+    created = []
+    for change in body.changes:
+        target = by_id.get(change.id)
+        if target is None:
+            continue
+        if change.message is not None:
+            target.content = str(change.message)
+        if change.role in ("user", "assistant", "system"):
+            target.role = change.role
+        if change.name is not None:
+            target.name = str(change.name)
+        if change.is_hidden is not None:
+            target.hidden = bool(change.is_hidden)
+        if change.data is not None:
+            if not isinstance(change.data, dict):
+                raise HTTPException(400, "data 必须是对象")
+            if _json_size(change.data) > _ST_MVU_MAX_BYTES:
+                raise HTTPException(413, "变量数据超过 128KB 上限")
+            target.stat_data = copy.deepcopy(
+                change.data.get("stat_data")
+                if isinstance(change.data.get("stat_data"), dict)
+                else change.data
+            )
+        updated.append(change.id)
+    for create in body.creates:
+        role = create.role if create.role in ("user", "assistant", "system") else "user"
+        if create.data is not None:
+            if not isinstance(create.data, dict):
+                raise HTTPException(400, "data 必须是对象")
+            if _json_size(create.data) > _ST_MVU_MAX_BYTES:
+                raise HTTPException(413, "变量数据超过 128KB 上限")
+        if create.extra is not None:
+            if not isinstance(create.extra, dict):
+                raise HTTPException(400, "extra 必须是对象")
+            if _json_size(create.extra) > _ST_MVU_MAX_BYTES:
+                raise HTTPException(413, "extra 超过 128KB 上限")
+        stat_data = None
+        if create.data is not None:
+            stat_data = copy.deepcopy(
+                create.data.get("stat_data")
+                if isinstance(create.data.get("stat_data"), dict)
+                else create.data
+            )
+        msg = Message(
+            role=role,
+            content=str(create.message or ""),
+            name=create.name,
+            hidden=create.is_hidden,
+            stat_data=stat_data,
+            st_extra=copy.deepcopy(create.extra) if create.extra is not None else None,
+            origin="card",
+        )
+        t.messages.append(msg)
+        created.append(
+            {
+                "id": msg.id,
+                "message_id": len(t.messages) - 1,
+                "role": msg.role,
+            }
+        )
+    if updated or created:
+        sc.store.save_merged(s)
+    return {"updated": updated, "created": created}
+
+
+class AuthorStateBody(BaseModel):
+    phone_mainline: Optional[str] = None
+    prompts: Optional[List[Dict]] = None
+    remove_prompts: Optional[List[str]] = None
+    chat_metadata: Optional[Dict] = None
+
+
+class AuthorGenerateBody(BaseModel):
+    purpose: str = "phone"
+    messages: List[Dict] = []
+    system_prompt: str = ""
+    max_tokens: int = 0
+
+
+@router.post("/sessions/{sid}/author/state")
+def author_state(sid: str, body: AuthorStateBody, request: Request):
+    """作者面板派生状态：手机主线摘要、剧情锚点/场记提示词注入。"""
+    sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
+    s = sc.store.get(sid)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    author = dict((s.attributes or {}).get("author") or {})
+    if body.phone_mainline is not None:
+        author["phone_mainline"] = str(body.phone_mainline)[:131072]
+    if body.prompts is not None:
+        current = {
+            str(item.get("id")): item
+            for item in (author.get("prompts") or [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        for raw in body.prompts[:20]:
+            if not isinstance(raw, dict):
+                continue
+            pid = str(raw.get("id") or "")[:120]
+            if not pid:
+                continue
+            current[pid] = {
+                "id": pid,
+                "content": str(raw.get("content") or "")[:16384],
+                "position": raw.get("position"),
+                "depth": raw.get("depth"),
+                "scan": bool(raw.get("scan")),
+                "role": raw.get("role"),
+            }
+        author["prompts"] = list(current.values())
+    if body.remove_prompts:
+        remove = {str(item) for item in body.remove_prompts}
+        author["prompts"] = [
+            item for item in (author.get("prompts") or [])
+            if str(item.get("id")) not in remove
+        ]
+    if body.chat_metadata is not None:
+        raw_meta = json.dumps(
+            body.chat_metadata, ensure_ascii=False, separators=(",", ":")
+        )
+        if len(raw_meta.encode("utf-8")) > 1024 * 1024:
+            raise HTTPException(413, "聊天元数据超过 1MB 上限")
+        author["chat_metadata"] = body.chat_metadata
+    s.attributes = dict(s.attributes or {})
+    s.attributes["author"] = author
+    sc.store.save_merged(s)
+    return {"ok": True}
+
+
+@router.post("/sessions/{sid}/author/generate")
+async def author_generate(sid: str, body: AuthorGenerateBody, request: Request):
+    """作者面板静默生成：复用当前会话模型，不写入主聊天记录。"""
+    state = request.app.state.flyai
+    sc = state.user(request)
+    _safe_sid(sid)
+    s = sc.store.get(sid)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    us = getattr(sc, "user_settings", None)
+    is_admin = sc.uid == ADMIN_UID or int(getattr(sc, "level", 0) or 0) >= 256
+    allowed = getattr(us, "st_author_scripts_enabled", None)
+    if allowed is None:
+        allowed = bool(is_admin)
+    if not allowed:
+        raise HTTPException(403, "作者脚本未开启")
+    if body.purpose not in ("phone", "memory", "social"):
+        raise HTTPException(400, "不支持的生成用途")
+    messages = [
+        item for item in body.messages
+        if isinstance(item, dict)
+        and str(item.get("role") or "") in ("system", "user", "assistant")
+        and isinstance(item.get("content"), str)
+    ]
+    if not messages:
+        raise HTTPException(400, "messages 不能为空")
+    if len(messages) > 40:
+        raise HTTPException(400, "消息条数过多")
+    total = sum(len(item["content"]) for item in messages)
+    if total > 64000:
+        raise HTTPException(413, "消息内容过大")
+    max_tokens = max(0, min(int(body.max_tokens or 0), 8192))
+
+    from ..agent.loop import DEFAULT_SYSTEM_PROMPT
+    from ..lore.query import build_member_system_prompt
+    from ..models_access import visible_providers
+    from ..providers.complete import complete
+    from ..schemas import Message
+
+    seat = _single_ai_seat(s)
+    char = member_character(seat, sc.lore) if seat is not None else None
+    world = sc.lore.get_world(s.world_id) if s.world_id else None
+    try:
+        system_prompt = build_member_system_prompt(
+            name=getattr(char, "name", "") or "",
+            memory="",
+            attributes=None,
+            audience=[],
+            character=char,
+            world=world,
+            base=DEFAULT_SYSTEM_PROMPT,
+            roleplay=None,
+            user_character=None,
+            variables=dict((s.mvu or {}).get("stat_data") or {}) or None,
+        )
+    except Exception:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+    if body.system_prompt.strip():
+        system_prompt = system_prompt + "\n\n" + body.system_prompt.strip()[:16000]
+
+    wanted = (s.provider_id or state.config.active_provider or "").strip()
+    visible = visible_providers(state.config, sc.uid, sc.level)
+    cfg = next((p for p in visible if p.id == wanted), None)
+    if cfg is None:
+        exists = any(p.id == wanted for p in state.config.providers)
+        if exists:
+            raise HTTPException(403, "你的权限等级不足以使用该模型")
+        raise HTTPException(400, "未配置可用提供商")
+    provider = state.get_provider(cfg.id)
+    try:
+        text = await complete(
+            provider,
+            [Message(role=item["role"], content=item["content"]) for item in messages],
+            system_prompt=system_prompt,
+            max_tokens=max_tokens or None,
+            session_id=s.id,
+            partial_ok=True,
+        )
+    except Exception as exc:
+        raise HTTPException(502, "生成失败：%s" % str(exc)[:200])
+    return {"ok": True, "text": text}
 
 
 class StCharacterBody(BaseModel):
@@ -630,8 +937,9 @@ def st_write_character(sid: str, body: StCharacterBody, request: Request):
             raise HTTPException(400, "alternate_greetings 必须是字符串数组")
         if key == "table" and not isinstance(value, list):
             raise HTTPException(400, "table 必须是数组")
-    if _json_size(fields) > _ST_CHAR_MAX_BYTES:
-        raise HTTPException(413, "角色写回数据超过 1MB 上限")
+    max_bytes = _st_write_max_bytes(request)
+    if _json_size(fields) > max_bytes:
+        raise HTTPException(413, "角色写回数据超过 %dMB 上限" % (max_bytes // (1024 * 1024)))
 
     base = member_character(m, sc.lore)
     if base is None:
@@ -1254,7 +1562,15 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
     author_scripts = []
     author_truncated = False
     if flags["author_scripts"] and char is not None:
-        collected = collect_author_scripts(char)
+        try:
+            author_mb = int(getattr(getattr(cfg, "lore", None), "max_author_script_mb", 5))
+        except (TypeError, ValueError):
+            author_mb = 5
+        author_mb = max(1, min(author_mb, 5))
+        author_limit = author_mb * 1024 * 1024
+        collected = collect_author_scripts(
+            char, max_script_chars=author_limit, max_total_chars=author_limit
+        )
         author_scripts = collected["scripts"]
         author_truncated = collected["truncated"]
     panels = detect_panels(char)
@@ -1263,10 +1579,16 @@ def _st_payload(s, char, lore, user_settings, cfg=None,
     if author_scripts:
         for panel in panels:
             panel["author"] = True
+    author_state = (getattr(s, "attributes", None) or {}).get("author") or {}
+    chat_metadata = (
+        author_state.get("chat_metadata")
+        if isinstance(author_state, dict) else None
+    )
     author = {
         "enabled": bool(flags["author_scripts"]),
         "scripts": author_scripts,
         "truncated": author_truncated,
+        "chat_metadata": chat_metadata if isinstance(chat_metadata, dict) else {},
         "character": {
             "name": getattr(char, "name", "") if char is not None else "",
             "description": getattr(char, "intro", "") if char is not None else "",

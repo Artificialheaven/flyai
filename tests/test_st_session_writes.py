@@ -12,9 +12,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from flyai.agent.runs import ChatRunManager
 from flyai.api.routes_session import (
+    AuthorStateBody,
     StCharacterBody,
+    StChatMetadataBody,
+    StMessageCreate,
+    StMessagePatch,
+    StMessagesBody,
     StMvuBody,
     StWorldBody,
+    author_state,
+    st_get_chat_metadata,
+    st_patch_messages,
+    st_set_chat_metadata,
     st_write_character,
     st_write_mvu,
     st_write_world,
@@ -391,7 +400,7 @@ def test_character_write_validates_types_and_empty(tmp_path):
         (StCharacterBody(fields={"alternate_greetings": "你好"}), 400),
         (StCharacterBody(fields={"alternate_greetings": [1]}), 400),
         (StCharacterBody(fields={"table": "x"}), 400),
-        (StCharacterBody(fields={"system_prompt": "x" * (1024 * 1024 + 1)}), 413),
+        (StCharacterBody(fields={"system_prompt": "x" * (2 * 1024 * 1024 + 1)}), 413),
     ]
     for body, code in cases:
         with pytest.raises(HTTPException) as ei:
@@ -422,3 +431,162 @@ def test_character_write_rejects_group_and_unbound(tmp_path):
         st_write_character(s2.id, StCharacterBody(fields={"name": "x"}), request2)
     assert ei.value.status_code == 400
     assert "未绑定" in ei.value.detail
+
+
+def test_author_state_syncs_phone_mainline_and_prompts(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, _t = _dm(store)
+    author_state(
+        s.id,
+        AuthorStateBody(
+            phone_mainline="【手机往来】\n十香：在吗",
+            prompts=[
+                {"id": "dal_story_anchor", "content": "锚点", "depth": 1},
+                {"id": "dal_story_cue", "content": "场记", "depth": 0},
+            ],
+        ),
+        request,
+    )
+    saved = store.get(s.id)
+    author = saved.attributes["author"]
+    assert "十香" in author["phone_mainline"]
+    assert [item["id"] for item in author["prompts"]] == [
+        "dal_story_anchor",
+        "dal_story_cue",
+    ]
+    author_state(
+        s.id,
+        AuthorStateBody(remove_prompts=["dal_story_cue"]),
+        request,
+    )
+    saved = store.get(s.id)
+    assert [item["id"] for item in saved.attributes["author"]["prompts"]] == [
+        "dal_story_anchor"
+    ]
+    # 摘要过长时截断，避免把手机历史无上限写进会话
+    author_state(
+        s.id,
+        AuthorStateBody(phone_mainline="x" * 200000),
+        request,
+    )
+    assert len(store.get(s.id).attributes["author"]["phone_mainline"]) == 131072
+
+
+# ---- 未绑定世界书时从角色卡派生 ----
+
+def test_world_write_falls_back_to_character_book(tmp_path):
+    char = Character(
+        id="c1",
+        name="角色1",
+        table=[LoreEntry(title="旧条目", content="旧内容")],
+        extensions={"world": "卡内书"},
+    )
+    _state, _sc, request, _lore, store = _env(tmp_path, chars=[char])
+    s, _m, _t = _dm(store, char=char)
+    s.character_id = "c1"
+    store.save(s)
+    out = st_write_world(
+        s.id,
+        StWorldBody(entries=[{"title": "新条目", "content": "新内容"}]),
+        request,
+    )
+    assert out["scoped"] is True
+    saved = store.get(s.id)
+    assert saved.world_override["name"] == "卡内书"
+    assert saved.world_override["table"][0]["title"] == "新条目"
+
+
+# ---- chatMetadata ----
+
+def test_chat_metadata_roundtrip_and_limit(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, _t = _dm(store)
+    assert st_get_chat_metadata(s.id, request) == {"chat_metadata": {}}
+    st_set_chat_metadata(
+        s.id,
+        StChatMetadataBody(metadata={"map": {"x": 1}}),
+        request,
+    )
+    assert st_get_chat_metadata(s.id, request)["chat_metadata"] == {"map": {"x": 1}}
+    with pytest.raises(HTTPException) as ei:
+        st_set_chat_metadata(
+            s.id,
+            StChatMetadataBody(metadata={"blob": "x" * (1024 * 1024)}),
+            request,
+        )
+    assert ei.value.status_code == 413
+
+
+# ---- 消息写回 ----
+
+def test_patch_messages_by_backend_id(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, t = _dm(store)
+    first = _append(t, "旧正文", stat_data={"hp": 1})
+    store.save(s)
+    out = st_patch_messages(
+        s.id,
+        StMessagesBody(changes=[
+            StMessagePatch(
+                id=first.id,
+                message="新正文",
+                data={"stat_data": {"hp": 9}},
+                is_hidden=True,
+            ),
+            StMessagePatch(id="missing", message="忽略"),
+        ]),
+        request,
+    )
+    assert out["updated"] == [first.id]
+    saved = store.get(s.id)
+    msg = saved.threads[0].messages[0]
+    assert msg.content == "新正文"
+    assert msg.stat_data == {"hp": 9}
+    assert msg.hidden is True
+
+
+def test_create_messages_appends_extra_and_variables(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, _t = _dm(store)
+    out = st_patch_messages(
+        s.id,
+        StMessagesBody(creates=[
+            StMessageCreate(
+                role="user",
+                name="玩家",
+                message="0 楼开场正文",
+                extra={"dal_opening": {"version": 2, "id": "m1", "mode": "body"}},
+                data={"stat_data": {"hp": 3}, "schema": "x", "initialized_lorebooks": {}},
+            ),
+        ]),
+        request,
+    )
+    assert len(out["created"]) == 1
+    assert out["created"][0]["role"] == "user"
+    assert out["created"][0]["message_id"] == 0
+    assert out["created"][0]["id"]
+    # 重新读盘：正文、extra、变量信封里的 stat_data、来源都要保留
+    saved = store.get(s.id)
+    msg = saved.threads[0].messages[0]
+    assert msg.content == "0 楼开场正文"
+    assert msg.name == "玩家"
+    assert msg.st_extra == {"dal_opening": {"version": 2, "id": "m1", "mode": "body"}}
+    assert msg.stat_data == {"hp": 3}
+    assert msg.origin == "card"
+
+
+def test_create_messages_rejects_bad_extra(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, _t = _dm(store)
+    with pytest.raises(HTTPException) as ei:
+        st_patch_messages(
+            s.id,
+            _body(
+                StMessagesBody,
+                thread_id=None,
+                changes=[],
+                creates=[_body(StMessageCreate, role="user", message="x", extra="bad")],
+            ),
+            request,
+        )
+    assert ei.value.status_code == 400

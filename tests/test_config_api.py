@@ -184,14 +184,36 @@ def test_lore_settings_roundtrip_and_clamp(tmp_path):
     state = _mkstate(tmp_path)
     # 默认段随配置下发（不含密钥）
     assert get_config(_req(state))["lore"]["max_card_mb"] == 50
-    put_config(ConfigPayload(lore={"max_card_mb": 120}), _req(state))
+    assert get_config(_req(state))["lore"]["max_card_write_mb"] == 2
+    assert get_config(_req(state))["lore"]["max_author_script_mb"] == 5
+    put_config(
+        ConfigPayload(lore={
+            "max_card_mb": 120,
+            "max_card_write_mb": 4,
+            "max_author_script_mb": 5,
+        }),
+        _req(state),
+    )
     assert state.config.lore.max_card_mb == 120
-    assert get_config(_req(state))["lore"]["max_card_mb"] == 120
+    assert state.config.lore.max_card_write_mb == 4
+    assert state.config.lore.max_author_script_mb == 5
+    assert get_config(_req(state))["lore"]["max_card_write_mb"] == 4
     # 已写入磁盘
     assert load_config(tmp_path / "config.json").lore.max_card_mb == 120
-    # 越界值按 1–200 收口
-    put_config(ConfigPayload(lore={"max_card_mb": 9999}), _req(state))
+    assert load_config(tmp_path / "config.json").lore.max_card_write_mb == 4
+    assert load_config(tmp_path / "config.json").lore.max_author_script_mb == 5
+    # 越界值按 1–200 / 1–5 收口
+    put_config(
+        ConfigPayload(lore={
+            "max_card_mb": 9999,
+            "max_card_write_mb": 999,
+            "max_author_script_mb": 999,
+        }),
+        _req(state),
+    )
     assert state.config.lore.max_card_mb == 200
+    assert state.config.lore.max_card_write_mb == 5
+    assert state.config.lore.max_author_script_mb == 5
 
 
 def test_put_config_credits_masked_embeddings_key(tmp_path):

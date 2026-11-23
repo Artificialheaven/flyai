@@ -856,6 +856,10 @@ class ChatRequest(BaseModel):
     # 客户端预生成的用户消息 id：回答失败（供应商报错/断网）后，前端仍能用
     # 同一个 id 撤回或重发该轮，不会留下服务端不认识的本地脏消息。
     client_message_id: Optional[str] = None
+    # 酒馆卡 context.generate('normal', {quiet_prompt})：不新增可见用户消息，
+    # 仅把 quiet_prompt 追加到本轮出站提示词末尾（不落盘），生成一条 AI 楼层。
+    quiet_prompt: Optional[str] = None
+    automatic_trigger: bool = False
 
 
 _SAFE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -919,6 +923,22 @@ def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
     if exists:
         raise HTTPException(403, "你的权限等级不足以使用该模型")
     raise HTTPException(400, "未配置可用提供商，请在设置中添加")
+
+
+def _author_prompt_extra(session) -> str:
+    """作者面板注入的剧情锚点/场记（injectPrompts / setExtensionPrompt）。"""
+    author = (getattr(session, "attributes", None) or {}).get("author") or {}
+    items = author.get("prompts")
+    if not isinstance(items, list):
+        return ""
+    parts = []
+    for item in items[:20]:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip()[:16384])
+    return "\n\n".join(parts)
 
 
 def _billing_tzname(state) -> str:
@@ -1130,7 +1150,8 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
 
     if (not req.message.strip() and not req.images
             and not req.regenerate_message_id and req.galgame_resume is None
-            and not getattr(req, "continue_message_id", None)):
+            and not getattr(req, "continue_message_id", None)
+            and not (getattr(req, "quiet_prompt", None) or "").strip()):
         raise HTTPException(400, "消息内容为空")
     origin = (getattr(req, "origin", None) or "").strip()
     if origin and origin != "card":
@@ -1286,6 +1307,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             character, world, DEFAULT_SYSTEM_PROMPT, roleplay=eff_roleplay,
             user_character=user_char, variables=mvu_vars,
         )
+        author_extra = _author_prompt_extra(session)
+        if author_extra:
+            system_prompt = system_prompt + "\n\n" + author_extra
     finally:
         if _system_tpl_token is not None:
             reset_preserve_ejs(_system_tpl_token)
@@ -1379,16 +1403,18 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
         else:
             cost = billing.provider_rate(provider)
             billing.charge_or_402(state, sc.uid, cost)
-        # 追加用户消息；首条用户消息自动设为标题
-        session.messages.append(
-            Message(
-                id=user_msg_id,
-                role="user",
-                content=req.message or None,
-                name=user_char.name if user_char else None,
-                images=images,
+        # 追加用户消息；首条用户消息自动设为标题。
+        # quiet_prompt（酒馆 context.generate）不落用户消息，只生成 AI 楼层。
+        if not (getattr(req, "quiet_prompt", None) or "").strip():
+            session.messages.append(
+                Message(
+                    id=user_msg_id,
+                    role="user",
+                    content=req.message or None,
+                    name=user_char.name if user_char else None,
+                    images=images,
+                )
             )
-        )
         user_count = sum(1 for m in session.messages if m.role == "user")
         if user_count == 1:
             session.set_title((req.message[:20] or "图片").strip() or "图片")
@@ -1457,11 +1483,15 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             if getattr(_us, "lore_auto_inject", True) and services.get("lore"):
                 try:
                     lore_block = await services["lore"].trigger_block(
-                        req.message or "", services.get("embedder"),
+                        req.message or (getattr(req, "quiet_prompt", None) or ""),
+                        services.get("embedder"),
                         char_name=getattr(character, "name", "") or "",
                         user_name=getattr(user_char, "name", "") if user_char else "",
                         group_names=[],
                         variables=mvu_vars,
+                        scan_texts=[
+                            m.content for m in session.messages if m.content
+                        ],
                     )
                 except Exception:
                     logger.exception("内容表触发词注入失败")
@@ -1566,6 +1596,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 allowed_tools=allowed_tools,
                 deep_thinking=getattr(req, "deep_thinking", False),
                 post_history_instructions=phi,
+                quiet_prompt=(getattr(req, "quiet_prompt", None) or "").strip(),
                 max_tokens=_effective_max_tokens(
                     session, _us, rendered_preset.max_tokens
                 ),
@@ -1788,6 +1819,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
     if thread is None:
         raise HTTPException(404, "窗口不存在")
     history = thread_messages(session, thread.id)  # 该窗口的独立历史
+    quiet_prompt = (getattr(req, "quiet_prompt", None) or "").strip()
 
     # 解析窗口内 AI 座位（按 member_ids 顺序；dm=1 个，group=多个）
     speakers = []
@@ -1997,7 +2029,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
         # 追加用户消息前认领客户端 id（重复→409），必须在扣费之前失败
         new_user_id = ""
         if not (edit_id or regen_id or resume_body is not None
-                or continue_target is not None):
+                or continue_target is not None or quiet_prompt):
             new_user_id = _claim_user_message_id(req, history)
 
         # 计费：校验通过后一次性预扣旧费率座位的费用（跳过/失败/取消在
@@ -2043,6 +2075,10 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
             sc.store.save_merged(session)
         elif continue_target is not None:
             # L4-A 续写：不新增用户消息，原 AI 回复作为 assistant prefill
+            pass
+        elif quiet_prompt:
+            # 酒馆 context.generate('normal', {quiet_prompt})：
+            # 不新增可见用户消息，quiet_prompt 只进本轮出站提示词。
             pass
         else:
             # 追加用户消息到该窗口（用户扮演自设时按角色名标注，便于展示）
@@ -2175,6 +2211,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         user_character=user_char,
                         variables=spk_vars,
                     )
+                    author_extra = _author_prompt_extra(session)
+                    if author_extra:
+                        sys_prompt = sys_prompt + "\n\n" + author_extra
                 else:
                     sys_prompt = build_member_system_prompt(
                         name=spk.name,
@@ -2188,6 +2227,9 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         user_character=user_char,
                         variables=spk_vars,
                     )
+                    author_extra = _author_prompt_extra(session)
+                    if author_extra:
+                        sys_prompt = sys_prompt + "\n\n" + author_extra
                 services = {}
                 # 召回日志（主动召回记录）
                 services["recall_logs"] = getattr(state, "recall_logs", None)
@@ -2319,13 +2361,16 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 if getattr(_us, "lore_auto_inject", True) and services.get("lore"):
                     try:
                         lore_block = await services["lore"].trigger_block(
-                            req.message or "", services.get("embedder"),
+                            req.message or quiet_prompt, services.get("embedder"),
                             char_name=getattr(char, "name", "") or spk.name,
                             user_name=(
                                 getattr(user_char, "name", "") if user_char else ""
                             ),
                             group_names=others,
                             variables=spk_vars,
+                            scan_texts=[
+                                m.content for m in history if m.content
+                            ],
                         )
                     except Exception:
                         logger.exception("内容表触发词注入失败")
@@ -2469,6 +2514,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         deep_thinking=getattr(req, "deep_thinking", False),
                         post_history_instructions=preset_phi,
                         live_ctx=live_block,
+                        quiet_prompt=quiet_prompt,
                         max_tokens=eff_max_tokens,
                         depth_blocks=depth_specs + rendered_preset.depth_blocks,
                         extra_params=rendered_preset.params or None,

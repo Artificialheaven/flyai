@@ -80,6 +80,8 @@ type FormState = {
   galgameEnabled: boolean
   galgameLoops: string
   loreMaxCardMb: string
+  loreMaxCardWriteMb: string
+  loreMaxAuthorScriptMb: string
   ttsEnabled: boolean
   ttsMinLevel: string
   ttsEngine: 'deepseek' | 'doubao'
@@ -219,6 +221,8 @@ const toForm = (config: AdminConfig): FormState => {
     galgameEnabled: bool(galgame, 'enabled', true),
     galgameLoops: num(galgame, 'max_loops', 40),
     loreMaxCardMb: num(lore, 'max_card_mb', 50),
+    loreMaxCardWriteMb: num(lore, 'max_card_write_mb', 2),
+    loreMaxAuthorScriptMb: num(lore, 'max_author_script_mb', 5),
     ttsEnabled: bool(tts, 'enabled', true),
     ttsMinLevel: num(tts, 'min_level', 0),
     ttsEngine: str(tts, 'engine', 'deepseek') === 'doubao' ? 'doubao' : 'deepseek',
@@ -334,6 +338,12 @@ export const SystemPanel = () => {
       stNetPerMinuteGet: form.stNetPerMinuteGet.trim() ? Number(form.stNetPerMinuteGet) : NaN,
       galgameLoops: Number(form.galgameLoops),
       loreMaxCardMb: form.loreMaxCardMb.trim() ? Number(form.loreMaxCardMb) : NaN,
+      loreMaxCardWriteMb: form.loreMaxCardWriteMb.trim()
+        ? Number(form.loreMaxCardWriteMb)
+        : NaN,
+      loreMaxAuthorScriptMb: form.loreMaxAuthorScriptMb.trim()
+        ? Number(form.loreMaxAuthorScriptMb)
+        : NaN,
       ttsMinLevel: Number(form.ttsMinLevel),
       ttsSampleRate: Number(form.ttsSampleRate),
       ttsSpeechRate: Number(form.ttsSpeechRate),
@@ -422,6 +432,8 @@ export const SystemPanel = () => {
       lore: {
         ...asRecord(raw.lore),
         max_card_mb: ints.loreMaxCardMb,
+        max_card_write_mb: ints.loreMaxCardWriteMb,
+        max_author_script_mb: ints.loreMaxAuthorScriptMb,
       },
       // 两项策略都是整段回传（后端 parse_obj 全量替换），先展开原值再覆盖表单字段
       st_image: {
@@ -759,6 +771,18 @@ export const SystemPanel = () => {
               hint={t('systemLoreMaxCardMbHint')}
               value={form.loreMaxCardMb}
               onChange={(value) => patch({ loreMaxCardMb: value })}
+            />
+            <NumberField
+              label={t('systemLoreMaxCardWriteMb')}
+              hint={t('systemLoreMaxCardWriteMbHint')}
+              value={form.loreMaxCardWriteMb}
+              onChange={(value) => patch({ loreMaxCardWriteMb: value })}
+            />
+            <NumberField
+              label={t('systemLoreMaxAuthorScriptMb')}
+              hint={t('systemLoreMaxAuthorScriptMbHint')}
+              value={form.loreMaxAuthorScriptMb}
+              onChange={(value) => patch({ loreMaxAuthorScriptMb: value })}
             />
           </div>
 

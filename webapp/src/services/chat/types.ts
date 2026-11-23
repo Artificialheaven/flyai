@@ -58,6 +58,8 @@ export type UserMessage = MessageBranch & {
   statData?: Record<string, unknown>
   /** 消息来源：卡片在宿主确认后发送的消息为 'card'，缺省为用户手动输入 */
   origin?: 'card'
+  /** 酒馆卡写入的 message.extra（如开场建档标记），刷新后由卡内 getChatMessages 读回 */
+  stExtra?: Record<string, unknown>
 }
 
 /** 思考块：thinking_delta 累积，签名随 signature_delta 到达；历史轮次的思考服务端会丢弃，不回传 */

@@ -13,9 +13,19 @@ import { Modal } from '../base/Modal.js'
 import { cardJsonSize, type CardIntent } from '../../services/st/cardActions.js'
 import styles from './CardActionDialog.module.css'
 
+export type CardGenerateRequest = {
+  kind: 'generate'
+  purpose: string
+  messageCount: number
+  chars: number
+  maxTokens: number
+  preview: string
+}
+
 export type CardConfirmRequest =
   | { kind: 'intent'; intent: CardIntent }
   | { kind: 'net'; method: string; url: string; bodySize: number }
+  | CardGenerateRequest
 
 const MAX_LIST_ITEMS = 20
 
@@ -28,6 +38,9 @@ const titleOf = (
 ): string => {
   if (request.kind === 'net') {
     return t('cardNetTitle')
+  }
+  if (request.kind === 'generate') {
+    return t('cardGenerateTitle')
   }
   const intent = request.intent
   if (intent.kind === 'action') {
@@ -177,6 +190,38 @@ const NetBody = ({
   )
 }
 
+const GenerateBody = ({ request }: { request: CardGenerateRequest }) => {
+  const t = useTranslate()
+  return (
+    <>
+      <div className={styles.hint}>{t('cardGenerateHint')}</div>
+      <div className={styles.row}>
+        <span className={styles.rowLabel}>{t('cardGeneratePurposeLabel')}</span>
+        <span className={styles.rowValue}>{request.purpose || 'phone'}</span>
+      </div>
+      <div className={styles.row}>
+        <span className={styles.rowLabel}>{t('cardGenerateMessagesLabel')}</span>
+        <span className={styles.rowValue}>
+          {t('cardActionCount', { count: request.messageCount })}
+        </span>
+      </div>
+      <SizeRow label={t('cardActionPayloadLabel')} size={request.chars} />
+      {request.maxTokens > 0 ? (
+        <div className={styles.row}>
+          <span className={styles.rowLabel}>{t('cardGenerateMaxTokensLabel')}</span>
+          <span className={styles.rowValue}>{request.maxTokens}</span>
+        </div>
+      ) : null}
+      {request.preview ? (
+        <>
+          <div className={styles.sectionLabel}>{t('cardGeneratePreviewLabel')}</div>
+          <pre className={styles.text}>{request.preview}</pre>
+        </>
+      ) : null}
+    </>
+  )
+}
+
 export type CardConfirmOptions = { allowAll?: boolean }
 
 export const CardActionDialog = ({
@@ -228,6 +273,8 @@ export const CardActionDialog = ({
               <span>{t('cardNetAllowAll')}</span>
             </label>
           </>
+        ) : request.kind === 'generate' ? (
+          <GenerateBody request={request} />
         ) : (
           <IntentBody intent={request.intent} />
         )}

@@ -139,6 +139,13 @@ export const zh = {
   cardActionNetTargetLabel: '目标地址',
   cardNetAllowAll: '允许本会话后续所有网络请求（不再逐个确认）',
   cardActionConfirm: '允许本次操作',
+  cardGenerateTitle: '卡片请求静默生成',
+  cardGenerateHint:
+    '手机面板请求当前会话模型生成回复；结果只回到手机面板，不写入主聊天记录。',
+  cardGeneratePurposeLabel: '用途',
+  cardGenerateMessagesLabel: '消息条数',
+  cardGenerateMaxTokensLabel: '最大输出 token',
+  cardGeneratePreviewLabel: '请求预览',
   cardActionUnavailable: '当前会话或消息状态下不允许卡片执行该操作。',
   cardActionRateLimited: '卡片操作过于频繁，请稍后再试。',
   cardActionFailed: '卡片操作失败。',
@@ -494,6 +501,7 @@ export const zh = {
   loreActionFailed: '操作失败：{message}',
   loreImportFailed: '导入失败：{message}',
   loreImported: '导入完成',
+  loreUploading: '正在上传 {name}：{percent}%',
   loreSaved: '已保存',
   loreSaving: '保存中…',
   loreSave: '保存',
@@ -1095,10 +1103,16 @@ export const zh = {
   systemImageSize: '默认尺寸',
   systemImageSizeDesc: '未指定尺寸时使用的默认分辨率',
   systemLore: '内容库导入',
-  systemLoreHint: '控制角色卡文件的上传大小；超限会在导入时直接拒绝。',
+  systemLoreHint: '控制角色卡文件的上传大小与卡内写回副本的大小。',
   systemLoreMaxCardMb: '角色卡上限（MB）',
   systemLoreMaxCardMbHint:
     'PNG 卡含内嵌头像像素，默认 50MB，可设 1–200；保存后立即生效（还需 nginx 放行同等大小）',
+  systemLoreMaxCardWriteMb: '卡内写回上限（MB）',
+  systemLoreMaxCardWriteMbHint:
+    '卡片写回角色表/世界书副本的序列化上限，默认 2MB，可设 1–5；保存后立即生效',
+  systemLoreMaxAuthorScriptMb: '作者脚本上限（MB）',
+  systemLoreMaxAuthorScriptMbHint:
+    '酒馆助手脚本单条/总量上限，默认 5MB（整页面板脚本可达 4–5MB），可设 1–5',
   systemStCard: '卡片沙箱',
   systemStCardHint:
     '整页卡片（HTML+JS）的扩展能力策略；管理员在此开启后，用户才能在个人设置里使用对应开关',

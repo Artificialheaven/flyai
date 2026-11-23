@@ -144,6 +144,13 @@ export const en = {
   cardActionNetTargetLabel: 'Target',
   cardNetAllowAll: 'Allow all later network requests in this session (stop asking)',
   cardActionConfirm: 'Allow once',
+  cardGenerateTitle: 'Card requests a quiet generation',
+  cardGenerateHint:
+    'The phone panel is asking the current session model for a reply. The result stays in the phone panel and is not written to the main chat.',
+  cardGeneratePurposeLabel: 'Purpose',
+  cardGenerateMessagesLabel: 'Messages',
+  cardGenerateMaxTokensLabel: 'Max output tokens',
+  cardGeneratePreviewLabel: 'Request preview',
   cardActionUnavailable: 'The card cannot do this in the current session or message state.',
   cardActionRateLimited: 'The card is acting too often; please wait a moment.',
   cardActionFailed: 'The card action failed.',
@@ -506,6 +513,7 @@ export const en = {
   loreActionFailed: 'Action failed: {message}',
   loreImportFailed: 'Import failed: {message}',
   loreImported: 'Import complete',
+  loreUploading: 'Uploading {name}: {percent}%',
   loreSaved: 'Saved',
   loreSaving: 'Saving…',
   loreSave: 'Save',
@@ -1115,10 +1123,16 @@ export const en = {
   systemImageSizeDesc: 'Resolution used when no size is specified',
   systemLore: 'Content imports',
   systemLoreHint:
-    'Controls the upload size of character cards; oversized files are rejected on import.',
+    'Controls character card upload size and the size of card write-backs.',
   systemLoreMaxCardMb: 'Character card limit (MB)',
   systemLoreMaxCardMbHint:
     'PNG cards embed avatar pixels. Default 50MB, range 1–200; takes effect immediately (nginx must allow the same size)',
+  systemLoreMaxCardWriteMb: 'Card write-back limit (MB)',
+  systemLoreMaxCardWriteMbHint:
+    'Serialized limit for character table / worldbook write-backs. Default 2MB, range 1–5; takes effect immediately',
+  systemLoreMaxAuthorScriptMb: 'Author script limit (MB)',
+  systemLoreMaxAuthorScriptMbHint:
+    'Per-script and total limit for TavernHelper scripts. Default 5MB (full-page panel scripts reach 4–5MB), range 1–5',
   systemStCard: 'Card sandbox',
   systemStCardHint:
     'Extension policy for full-page (HTML+JS) cards; the matching personal toggles only appear after an admin enables them here',

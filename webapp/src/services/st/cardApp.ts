@@ -16,6 +16,7 @@
 // 大量卡内应用直接 `_.get(stat_data, …)`，缺了会在 render 里直接抛错。
 import JQUERY_SOURCE from './vendor/jquery-3.6.0.min.js?raw'
 import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
+import ST_CORE_SOURCE from './compat/stCore.js?raw'
 
 /** 正则引擎在替换结果外层加的哨兵；U+0000 不会出现在正常文本里 */
 export const APP_START = '\u0000FLYAI_APP_START\u0000'
@@ -54,6 +55,24 @@ export const CARD_MSG_WRITE_CTX = 'flyai-card-write-context'
 export const CARD_MSG_DRAFT = 'flyai-card-draft'
 /** 卡 → 宿主：卡内脚本往酒馆输入框写入的文本（不直接发送） */
 export const CARD_MSG_COMPOSE = 'flyai-card-compose'
+/** 宿主 → 卡：完整聊天快照（楼层检测、createChatMessages / getChatHistoryDetail） */
+export const CARD_MSG_CHAT = 'flyai-card-chat'
+/** 宿主 → 卡：chatMetadata 快照（地图/手札存档） */
+export const CARD_MSG_METADATA = 'flyai-card-metadata'
+/** 卡 → 宿主：保存 chatMetadata */
+export const CARD_MSG_METADATA_SET = 'flyai-card-metadata-set'
+/** 宿主 → 卡：chatMetadata 保存结果 */
+export const CARD_MSG_METADATA_RESULT = 'flyai-card-metadata-result'
+/** 卡 → 宿主：按消息 id 写回正文/隐藏/变量 */
+export const CARD_MSG_MESSAGES_PATCH = 'flyai-card-messages-patch'
+/** 宿主 → 卡：消息写回结果 */
+export const CARD_MSG_MESSAGES_RESULT = 'flyai-card-messages-result'
+/** 卡 → 宿主：主聊天生成（context.generate，可带 quiet_prompt） */
+export const CARD_MSG_GENERATE = 'flyai-card-generate'
+/** 宿主 → 卡：主聊天生成结果 */
+export const CARD_MSG_GENERATE_RESULT = 'flyai-card-generate-result'
+/** 卡 → 宿主：临时提示词注入/移除 */
+export const CARD_MSG_INJECT_PROMPTS = 'flyai-card-inject-prompts'
 export const CARD_CODE_READ_ONLY = 'read-only'
 export const CARD_CODE_VARS_TOO_LARGE = 'vars-too-large'
 /** 用户取消了确认弹窗 */
@@ -79,6 +98,32 @@ export type CardAppCharacter = {
   avatar?: string | null
 }
 
+/** 宿主提供给卡内脚本的聊天快照（只读镜像；写入仍走授权动作） */
+export type CardAppChatMessage = {
+  /** 后端消息 id：卡内 setChatMessages 写回时用于定位 */
+  id?: string
+  role: 'user' | 'assistant' | 'system'
+  name?: string
+  text: string
+  statData?: Record<string, unknown> | null
+  /** 酒馆 message.extra：卡内 createChatMessages 写入，刷新后读回 */
+  extra?: Record<string, unknown> | null
+}
+
+export type CardAppChat = {
+  chatId: string
+  userName: string
+  characterName: string
+  characterAvatar?: string | null
+  messages: CardAppChatMessage[]
+  /** 会话级 chatMetadata（作者脚本/卡片存档） */
+  metadata?: Record<string, unknown> | null
+}
+
+/** 卡内聊天镜像上限：避免长会话把整段历史塞进 srcDoc */
+export const MAX_CARD_CHAT_MESSAGES = 200
+export const MAX_CARD_CHAT_MESSAGE_CHARS = 32 * 1024
+
 /**
  * 卡内可用的授权能力。缺省/全部关闭时 shim 保持 L3 的纯只读行为；
  * 每项都由用户设置开关与当前消息上下文共同决定，卡本身不能自行开启。
@@ -100,6 +145,8 @@ export type CardAppWriteContext = {
   characterWorldName?: string
   /** 角色副本的白名单字段快照 */
   character?: Record<string, unknown> | null
+  /** 会话级 chatMetadata（卡片存档） */
+  chatMetadata?: Record<string, unknown> | null
 }
 
 /** 变量快照上限；超限退化为空状态，避免把几十 MB 塞进 srcDoc */
@@ -405,7 +452,8 @@ export const contentSecurityPolicy = (
     `img-src data: blob:${remote}${originExtra}`,
     `media-src data: blob:${remote}`,
     "connect-src 'none'",
-    "frame-src 'none'",
+    // srcdoc/data/blob 供卡内嵌套地图/面板；外链帧跟随外链图片开关
+    `frame-src 'self' data: blob:${remote}`,
     "worker-src 'none'",
     "object-src 'none'",
     "base-uri 'none'",
@@ -474,12 +522,38 @@ export const buildCardAppShim = (
   message: string,
   variables?: Record<string, unknown> | null,
   character?: CardAppCharacter | null,
-  capabilities?: CardAppCapabilities | null
+  capabilities?: CardAppCapabilities | null,
+  chat?: CardAppChat | null
 ): string => {
   const state = sanitizeCardAppVariables(variables)
-  return `(function(){
+  const chatSeed = (Array.isArray(chat?.messages) ? chat.messages : [])
+    .slice(0, MAX_CARD_CHAT_MESSAGES)
+    .map((item, index) => ({
+      message_id: index,
+      id: String(item.id ?? ''),
+      name: String(
+        item.name ||
+          (item.role === 'user' ? chat?.userName : chat?.characterName) ||
+          ''
+      ),
+      is_user: item.role === 'user',
+      is_system: item.role === 'system',
+      mes: String(item.text ?? '').slice(0, MAX_CARD_CHAT_MESSAGE_CHARS),
+      swipe_id: 0,
+      extra:
+        item.extra && typeof item.extra === 'object' ? (item.extra as Record<string, unknown>) : {},
+      variables:
+        item.statData && typeof item.statData === 'object'
+          ? { stat_data: item.statData }
+          : undefined,
+    }))
+  return `${ST_CORE_SOURCE}
+(function(){
   var MESSAGE = ${escapeForScript(message)};
   var VARIABLES = JSON.parse(${escapeForScript(state.serialized)});
+  var CHAT_METADATA = JSON.parse(${escapeForScript(JSON.stringify(
+    chat?.metadata && typeof chat.metadata === 'object' ? chat.metadata : {}
+  ))});
   var CURRENT_MESSAGE = MESSAGE;
   var CHAR_NAME = ${escapeForScript(character?.name ?? '')};
   var CHAR_AVATAR = ${escapeForScript(character?.avatar ?? '')};
@@ -500,6 +574,19 @@ export const buildCardAppShim = (
   var WRITE_CTX_EVENT = ${escapeForScript(CARD_MSG_WRITE_CTX)};
   var DRAFT_EVENT = ${escapeForScript(CARD_MSG_DRAFT)};
   var COMPOSE_EVENT = ${escapeForScript(CARD_MSG_COMPOSE)};
+  var CHAT_EVENT = ${escapeForScript(CARD_MSG_CHAT)};
+  var METADATA_EVENT = ${escapeForScript(CARD_MSG_METADATA)};
+  var METADATA_SET_EVENT = ${escapeForScript(CARD_MSG_METADATA_SET)};
+  var METADATA_RESULT_EVENT = ${escapeForScript(CARD_MSG_METADATA_RESULT)};
+  var MESSAGES_PATCH_EVENT = ${escapeForScript(CARD_MSG_MESSAGES_PATCH)};
+  var MESSAGES_RESULT_EVENT = ${escapeForScript(CARD_MSG_MESSAGES_RESULT)};
+  var GENERATE_EVENT = ${escapeForScript(CARD_MSG_GENERATE)};
+  var GENERATE_RESULT_EVENT = ${escapeForScript(CARD_MSG_GENERATE_RESULT)};
+  var INJECT_PROMPTS_EVENT = ${escapeForScript(CARD_MSG_INJECT_PROMPTS)};
+  var CHAT_ID = ${escapeForScript(chat?.chatId ?? '')};
+  var USER_NAME = ${escapeForScript(chat?.userName ?? '')};
+  var CHAT = JSON.parse(${escapeForScript(JSON.stringify(chatSeed))});
+  var STCORE = globalThis.__FLYAI_ST_CORE__;
   var CODE_READ_ONLY = ${escapeForScript(CARD_CODE_READ_ONLY)};
   var CODE_NET_DENIED = ${escapeForScript(CARD_CODE_NET_DENIED)};
   var VERSION = ${CARD_APP_PROTOCOL_VERSION};
@@ -553,19 +640,76 @@ export const buildCardAppShim = (
   function clone(value){
     try { return JSON.parse(JSON.stringify(value)); } catch (e) { return { stat_data: {} }; }
   }
-  function memStorage(){
-    var data = {};
+  // 沙箱读不到真实 localStorage。这里用会话 chatMetadata 的保留键做持久化：
+  // 刷新/重开同一会话后恢复，键不与其他卡的 metadata 混用。
+  function persistentStorage(kind){
+    var metaKey = kind === 'session' ? '__flyai_storage_session' : '__flyai_storage_local';
+    var source = CHAT_METADATA[metaKey];
+    var data = source && typeof source === 'object' ? clone(source) : {};
+    var saveTimer = null;
+    function flush(){
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      if (CAP_WRITE) saveMetadata().catch(function(){});
+    }
+    function persist(immediate){
+      CHAT_METADATA[metaKey] = clone(data);
+      syncChatMetadata();
+      if (!CAP_WRITE) return;
+      // setItem 可能按每次输入写入：合并成一次 metadata 保存；
+      // removeItem/clear（清理旧草稿）必须立即落库，否则 iframe 重建会读回旧值。
+      if (immediate) { flush(); return; }
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function(){ saveTimer = null; flush(); }, 400);
+    }
+    try { window.addEventListener('pagehide', flush); } catch (e) {}
     return {
       getItem: function(k){ k = String(k); return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
-      setItem: function(k, v){ data[String(k)] = String(v); },
-      removeItem: function(k){ delete data[String(k)]; },
-      clear: function(){ data = {}; },
+      setItem: function(k, v){ data[String(k)] = String(v); persist(false); },
+      removeItem: function(k){ delete data[String(k)]; persist(true); },
+      clear: function(){ data = {}; persist(true); },
       key: function(i){ return Object.keys(data)[i] || null; },
       get length(){ return Object.keys(data).length; }
     };
   }
-  try { Object.defineProperty(window, 'localStorage', { value: memStorage(), configurable: true }); } catch (e) {}
-  try { Object.defineProperty(window, 'sessionStorage', { value: memStorage(), configurable: true }); } catch (e) {}
+  try { Object.defineProperty(window, 'localStorage', { value: persistentStorage('local'), configurable: true }); } catch (e) {}
+  try { Object.defineProperty(window, 'sessionStorage', { value: persistentStorage('session'), configurable: true }); } catch (e) {}
+  // 沙箱 iframe 是 opaque origin，navigator.locks.request 会抛
+  // “Access to the Locks API is denied in this context”。卡片的开场建档
+  // 会先探测 navigator.locks，再走锁内世界书写入；这里换成页面内串行桩，
+  // 保证同一书名不会并发写，又不会因为浏览器拒绝而中断流程。
+  function installLockShim(){
+    var chains = {};
+    var shim = {
+      request: function(name, options, callback){
+        if (typeof options === 'function') {
+          callback = options;
+          options = null;
+        }
+        var key = String(name || '');
+        var prev = chains[key] || Promise.resolve();
+        var run = function(){
+          return typeof callback === 'function'
+            ? callback({ name: key, mode: 'exclusive' })
+            : undefined;
+        };
+        var result = prev.then(run, run);
+        chains[key] = result.then(noop, noop);
+        return result;
+      },
+      query: function(){ return Promise.resolve({ held: [], pending: [] }); }
+    };
+    try {
+      Object.defineProperty(window.navigator, 'locks', { value: shim, configurable: true });
+    } catch (e) {
+      try { window.navigator.locks = shim; } catch (e2) {}
+    }
+  }
+  try {
+    if (window.navigator) installLockShim();
+  } catch (e) {}
 
   var noop = function(){};
   function toast(level, text, code){
@@ -625,10 +769,12 @@ export const buildCardAppShim = (
   } catch (e) {}
 
   var listeners = {};
-  function on(event, handler, once){
+  function on(event, handler, once, first){
     if (typeof handler !== 'function') return;
     var key = String(event);
-    (listeners[key] = listeners[key] || []).push({ fn: handler, once: !!once });
+    var list = listeners[key] = listeners[key] || [];
+    var item = { fn: handler, once: !!once };
+    if (first) list.unshift(item); else list.push(item);
   }
   function off(event, handler){
     var key = String(event);
@@ -645,18 +791,29 @@ export const buildCardAppShim = (
     var key = String(event);
     var args = Array.prototype.slice.call(arguments, 1);
     var list = (listeners[key] || []).slice();
+    var results = [];
     for (var i = 0; i < list.length; i += 1) {
       var item = list[i];
       if (item.once) off(key, item.fn);
-      try { item.fn.apply(null, args); } catch (e) { try { console.error(e); } catch (ignore) {} }
+      // 同步调用：卡内监听器常依赖“emit 后立刻可读”；
+      // 返回 Promise 供 eventEmitAndWait 等待异步处理器。
+      try { results.push(item.fn.apply(null, args)); } catch (e) { try { console.error(e); } catch (ignore) {} }
     }
+    return Promise.resolve(results);
+  }
+  function eventReturn(event, handler){
+    on(event, handler, false, false);
+    return { stop: function(){ off(event, handler); } };
   }
   var eventSource = {
-    on: function(event, handler){ on(event, handler); },
-    once: function(event, handler){ on(event, handler, true); },
+    on: function(event, handler){ return eventReturn(event, handler); },
+    once: function(event, handler){ on(event, handler, true, false); return { stop: function(){ off(event, handler); } }; },
+    makeFirst: function(event, handler){ on(event, handler, false, true); return { stop: function(){ off(event, handler); } }; },
+    makeLast: function(event, handler){ on(event, handler, false, false); return { stop: function(){ off(event, handler); } }; },
     off: function(event, handler){ off(event, handler); },
     removeListener: function(event, handler){ off(event, handler); },
-    emit: emit
+    emit: emit,
+    emitAndWait: emit
   };
 
   // 应用宿主下发的权威变量快照（只读路径；写入路径是乐观更新 + 宿主回发校正）
@@ -704,6 +861,121 @@ export const buildCardAppShim = (
     if (data.ok) { item.resolve(data.result); return; }
     item.reject(new Error(String(data.error || 'action-failed')));
   }
+
+  // chatMetadata：本地立即更新，异步落库；保存失败只回滚 Promise，不影响卡内状态。
+  var metadataSeq = 0;
+  var pendingMetadata = {};
+  function syncChatMetadata(){
+    if (typeof ST_CONTEXT !== 'undefined' && ST_CONTEXT) {
+      ST_CONTEXT.chatMetadata = CHAT_METADATA;
+    }
+  }
+  function accountStorage(){
+    function bag(){
+      if (!CHAT_METADATA.account_storage || typeof CHAT_METADATA.account_storage !== 'object') {
+        CHAT_METADATA.account_storage = {};
+      }
+      return CHAT_METADATA.account_storage;
+    }
+    return {
+      getItem: function(key){
+        var value = bag()[String(key)];
+        return value == null ? null : String(value);
+      },
+      setItem: function(key, value){
+        bag()[String(key)] = String(value);
+        if (CAP_WRITE) saveMetadata().catch(function(){});
+        return String(value);
+      },
+      removeItem: function(key){
+        delete bag()[String(key)];
+        if (CAP_WRITE) saveMetadata().catch(function(){});
+      },
+      clear: function(){
+        CHAT_METADATA.account_storage = {};
+        if (CAP_WRITE) saveMetadata().catch(function(){});
+      }
+    };
+  }
+  function updateChatMetadata(patch, reset){
+    if (!CAP_WRITE) { readOnly(); return; }
+    if (reset === true) CHAT_METADATA = {};
+    if (patch && typeof patch === 'object') {
+      for (var key in patch) {
+        if (Object.prototype.hasOwnProperty.call(patch, key)) {
+          CHAT_METADATA[key] = clone(patch[key]);
+        }
+      }
+    }
+    syncChatMetadata();
+  }
+  function saveMetadata(){
+    var id = 'm' + (++metadataSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMetadata[id];
+        reject(new Error('flyai-save-metadata-timeout'));
+      }, ACTION_TIMEOUT);
+      pendingMetadata[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: METADATA_SET_EVENT,
+          id: id,
+          metadata: clone(CHAT_METADATA)
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMetadata[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMetadata(data){
+    if (!data || data.id == null) return;
+    var item = pendingMetadata[data.id];
+    if (!item) return;
+    delete pendingMetadata[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) { item.resolve(data.result); return; }
+    item.reject(new Error(String(data.error || 'save-metadata-failed')));
+  }
+
+  // setChatMessages 已改动的镜像同步给宿主持久化；失败结果只影响 Promise。
+  var messagesSeq = 0;
+  var pendingMessages = {};
+  function requestMessagePatch(changes, creates){
+    var id = 'p' + (++messagesSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMessages[id];
+        reject(new Error('flyai-message-patch-timeout'));
+      }, ACTION_TIMEOUT);
+      pendingMessages[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: MESSAGES_PATCH_EVENT,
+          id: id,
+          changes: changes || [],
+          creates: creates || []
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMessages[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMessages(data){
+    if (!data || data.id == null) return;
+    var item = pendingMessages[data.id];
+    if (!item) return;
+    delete pendingMessages[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) { item.resolve(data.result); return; }
+    item.reject(new Error(String(data.error || 'patch-messages-failed')));
+  }
   function applyWriteContext(context){
     var data = context && typeof context === 'object' ? context : {};
     var worldbook = data.worldbook && typeof data.worldbook === 'object' ? data.worldbook : null;
@@ -713,6 +985,10 @@ export const buildCardAppShim = (
     CHARACTER_FIELDS = data.character && typeof data.character === 'object'
       ? clone(data.character)
       : {};
+    if (data.chatMetadata && typeof data.chatMetadata === 'object') {
+      CHAT_METADATA = clone(data.chatMetadata);
+      syncChatMetadata();
+    }
   }
   function jsonPointer(key){
     return '/' + String(key).replace(/~/g, '~0').replace(/\\//g, '~1');
@@ -744,15 +1020,19 @@ export const buildCardAppShim = (
     requestVars('patch', [{ op: 'add', path: jsonPointer(name), value: value }], state);
     return true;
   }
+  function jsonPointerPath(path){
+    return '/' + String(path).split('.').map(function(part){
+      return part.replace(/~/g, '~0').replace(/\\//g, '~1');
+    }).join('/');
+  }
   function deleteChatVariable(key){
     var name = String(key);
     var state = clone(VARIABLES);
     var stat = statDataOf(state);
-    if (!Object.prototype.hasOwnProperty.call(stat, name)) return true;
-    delete stat[name];
+    var existed = STCORE.deletePath(stat, name);
     state.stat_data = stat;
-    requestVars('patch', [{ op: 'remove', path: jsonPointer(name) }], state);
-    return true;
+    if (existed) requestVars('patch', [{ op: 'remove', path: jsonPointerPath(name) }], state);
+    return { variables: clone(stat), delete_occurred: existed };
   }
   function replaceChatVariables(next){
     var normalized = normalizeVariables(next);
@@ -766,15 +1046,10 @@ export const buildCardAppShim = (
     var state = clone(VARIABLES);
     var stat = statDataOf(state);
     var incoming = statDataOf(normalized);
-    var keys = Object.keys(incoming);
-    for (var i = 0; i < keys.length; i += 1) {
-      if (overwrite || !Object.prototype.hasOwnProperty.call(stat, keys[i])) {
-        stat[keys[i]] = incoming[keys[i]];
-      }
-    }
-    state.stat_data = stat;
-    requestVars('replace', clone(stat), state);
-    return true;
+    var merged = overwrite ? STCORE.merge(stat, incoming, true) : STCORE.mergeKeep(stat, incoming);
+    state.stat_data = merged;
+    requestVars('replace', clone(merged), state);
+    return merged;
   }
   function readonlyPromise(){ readOnly(); return Promise.resolve(undefined); }
   function readonlyReject(){
@@ -788,24 +1063,41 @@ export const buildCardAppShim = (
     if (typeof id === 'string') { var m = id.match(/\\d+/); if (m) return Number(m[0]); }
     return 0;
   }
-  function chatMessage(id){
-    return {
-      message_id: messageIdOf(id),
-      message: CURRENT_MESSAGE,
-      name: CHAR_NAME,
-      is_user: false,
-      is_system: false,
-      swipes: [CURRENT_MESSAGE],
-      extra: { variables: clone(VARIABLES) }
-    };
-  }
-  function getChatMessages(id){
-    if (Array.isArray(id)) {
-      var list = [];
-      for (var i = 0; i < id.length && i < 50; i += 1) list.push(chatMessage(id[i]));
-      return list;
+  function getChatMessages(range, options){
+    var messages = STCORE.getChatMessages(
+      CHAT,
+      range == null ? -1 : range,
+      options || {},
+      { charName: CHAR_NAME, userName: USER_NAME }
+    );
+    if (messages.length || CHAT.length) return messages;
+    // 没有聊天镜像时退化为当前楼层，保持旧行为；数字 id 原样带上，
+    // 让卡内按楼层号写的逻辑仍能拿到对应 message_id。
+    function fallbackIdOf(id){
+      if (typeof id === 'number' && isFinite(id) && id >= 0) return id;
+      if (typeof id === 'string') {
+        var m = id.match(/^-?(\\d+)(?:\\s*-\\s*-?\\d+)?$/);
+        if (m) return Number(m[1]);
+      }
+      return 0;
     }
-    return [chatMessage(id)];
+    function synthetic(id){
+      return {
+        message_id: fallbackIdOf(id),
+        name: CHAR_NAME,
+        role: 'assistant',
+        is_hidden: false,
+        message: CURRENT_MESSAGE,
+        swipe_id: 0,
+        swipes: [CURRENT_MESSAGE],
+        swipes_data: [{ stat_data: clone(VARIABLES) }],
+        swipes_info: [{}],
+        data: { stat_data: clone(VARIABLES) },
+        extra: { variables: clone(VARIABLES) }
+      };
+    }
+    if (Array.isArray(range)) return range.map(synthetic);
+    return [synthetic(range)];
   }
   function chatVariableValue(key){
     var name = String(key);
@@ -816,9 +1108,90 @@ export const buildCardAppShim = (
     return undefined;
   }
   window.getChatMessages = getChatMessages;
-  window.getCurrentMessageId = function(){ return 0; };
-  window.getLastMessageId = function(){ return 0; };
+  window.createChatMessages = createChatMessages;
+  window.getChatHistoryDetail = getChatHistoryDetail;
+  window.getCurrentMessageId = function(){ return Math.max(0, CHAT.length - 1); };
+  window.getLastMessageId = function(){ return Math.max(0, CHAT.length - 1); };
   window.getLastMessage = function(){ return CURRENT_MESSAGE; };
+  window.setChatMessages = function(changes, options){
+    var list = Array.isArray(changes) ? changes : (changes ? [changes] : []);
+    var patches = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var change = list[i] || {};
+      var id = Number(change.message_id);
+      if (!isFinite(id) || id < 0 || id >= CHAT.length) continue;
+      var target = CHAT[id];
+      if (!target) continue;
+      var patch = { id: String(target.id || '') };
+      if (change.message != null || change.mes != null) {
+        target.mes = String(change.message != null ? change.message : change.mes);
+        patch.message = target.mes;
+        if (id === CHAT.length - 1) CURRENT_MESSAGE = target.mes;
+      }
+      if (change.name != null) target.name = String(change.name);
+      if (change.is_hidden != null) {
+        target.is_hidden = !!change.is_hidden;
+        patch.is_hidden = target.is_hidden;
+      }
+      if (change.role != null) {
+        target.is_user = change.role === 'user';
+        target.is_system = change.role === 'system';
+      }
+      if (change.data && typeof change.data === 'object') {
+        target.variables = [clone(change.data)];
+        patch.data = clone(change.data);
+      }
+      if (change.extra && typeof change.extra === 'object') target.extra = clone(change.extra);
+      if (Array.isArray(change.swipes)) target.swipes = clone(change.swipes);
+      if (typeof change.swipe_id === 'number') target.swipe_id = change.swipe_id;
+      if (patch.id && Object.keys(patch).length > 1) patches.push(patch);
+    }
+    emit(window.tavern_events.MESSAGE_UPDATED, window.getLastMessageId());
+    if (CAP_WRITE && patches.length) {
+      return requestMessagePatch(patches).then(function(){ return undefined; });
+    }
+    return Promise.resolve();
+  };
+  window.deleteChatMessages = function(ids, options){
+    var list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(function(id){
+      return isFinite(id) && id >= 0 && id < CHAT.length;
+    }).sort(function(a, b){ return b - a; });
+    for (var i = 0; i < list.length; i += 1) CHAT.splice(list[i], 1);
+    for (var j = 0; j < CHAT.length; j += 1) CHAT[j].message_id = j;
+    return Promise.resolve();
+  };
+  window.rotateChatMessages = function(begin, middle, end, options){
+    begin = Number(begin); middle = Number(middle); end = Number(end);
+    if (!(begin >= 0 && middle >= begin && end >= middle && end <= CHAT.length)) {
+      return Promise.reject(new Error('invalid rotate range'));
+    }
+    var head = CHAT.slice(0, begin);
+    var middlePart = CHAT.slice(begin, middle);
+    var tailPart = CHAT.slice(middle, end);
+    var rest = CHAT.slice(end);
+    var next = head.concat(tailPart, middlePart, rest);
+    for (var i = 0; i < next.length; i += 1) {
+      CHAT[i] = next[i];
+      CHAT[i].message_id = i;
+    }
+    CHAT.length = next.length;
+    return Promise.resolve();
+  };
+  window.initializeGlobal = function(name, value){ window[String(name)] = value; };
+  window.getCurrentCharacterId = function(){ return CHAR_AVATAR || CHAR_NAME || null; };
+  window.getCurrentCharacterName = function(){ return CHAR_NAME || null; };
+  window.getCharacterNames = function(){ return CHAR_NAME ? [CHAR_NAME] : []; };
+  window.getCharacterIds = function(){ return CHAR_AVATAR ? [CHAR_AVATAR] : []; };
+  window.getCharacter = function(){
+    return Promise.resolve({
+      name: CHAR_NAME,
+      avatar: CHAR_AVATAR,
+      description: '',
+      first_messages: [],
+      extensions: {},
+    });
+  };
+  window.getPresetNames = function(){ return []; };
   window.getAllVariables = function(){ return clone(VARIABLES); };
   window.getVariables = function(options){
     var type = options && options.type ? String(options.type) : 'chat';
@@ -898,13 +1271,20 @@ export const buildCardAppShim = (
     return requestAction({ kind: 'character', fields: { table: clone(list) } })
       .then(function(){ return clone(list); });
   }
+  function worldEntriesArray(){
+    return STCORE.worldbookEntryList({ entries: mergedWorldEntries() });
+  }
+  function worldEntriesHost(list){
+    return STCORE.worldbookHostEntries(STCORE.worldbookFromList(list));
+  }
   function updateWorld(name, updater){
-    var current = mergedWorldEntries();
+    var current = worldEntriesArray();
     var next = current;
     if (typeof updater === 'function') {
       try { next = updater(current); } catch (e) { return Promise.reject(e); }
     }
-    return sendWorld(next);
+    if (!Array.isArray(next)) next = current;
+    return sendWorld(worldEntriesHost(next));
   }
   // SillyTavern 的这些接口是同步的（返回数组/对象），卡片会直接 names.includes(...)、
   // [...names] 使用；这里必须同样同步返回，不能包 Promise。
@@ -913,13 +1293,17 @@ export const buildCardAppShim = (
   };
   window.getCharWorldbookNames = function(){
     if (!CAP_WRITE) return { primary: null, additional: [] };
-    return { primary: CHAR_WORLD_NAME || WORLD_NAME || null, additional: [] };
+    // 卡常要求存在一个主世界书才肯写档；没有显式绑定时用稳定名称兜底
+    return { primary: primaryWorldName(), additional: [] };
   };
   window.getGlobalWorldbookNames = function(){ return []; };
+  window.getChatWorldbookName = function(){
+    return WORLD_NAME || CHAR_WORLD_NAME || null;
+  };
   window.getWorldbook = function(name){
     // 无视卡片传入的书名：直接返回角色卡世界书 + 挂载世界书的合并视图
     if (!CAP_WRITE) return [];
-    return mergedWorldEntries();
+    return worldEntriesArray();
   };
   window.updateWorldbookWith = CAP_WRITE
     ? function(name, updater){ return updateWorld(name, updater); }
@@ -929,7 +1313,8 @@ export const buildCardAppShim = (
     : function(){ readOnly(); return Promise.resolve(undefined); };
   window.replaceWorldbook = CAP_WRITE
     ? function(first, second){
-        return sendWorld(Array.isArray(first) ? first : second);
+        var list = Array.isArray(first) ? first : second;
+        return sendWorld(worldEntriesHost(Array.isArray(list) ? list : []));
       }
     : function(){ readOnly(); return Promise.resolve(undefined); };
   var WORLD_READ_ONLY_APIS = ['deleteWorldbook', 'createWorldbook', 'rebindCharWorldbooks'];
@@ -942,6 +1327,12 @@ export const buildCardAppShim = (
   window.getCharName = function(){ return CHAR_NAME; };
   window.getCurrentCharName = window.getCharName;
   window.getCharAvatar = function(){ return CHAR_AVATAR; };
+  window.getCurrentPersonaName = function(){ return USER_NAME; };
+  window.getCurrentPersonaId = function(){ return ''; };
+  window.retrieveDisplayedMessage = function(id){
+    var list = getChatMessages([id], {});
+    return list.length ? String(list[0].message || '') : '';
+  };
 
   var MUTATING_SLASH = /^\\s*\\/(setvar|setglobalvar|addvar|incvar|decvar|delvar|send|run|trigger|generate|gen|continue|regenerate|sys|user|assistant|comment)\\b/i;
   function parseSlashValue(text){
@@ -1060,11 +1451,33 @@ export const buildCardAppShim = (
   };
   // SillyTavern 里拼作 substitudeMacros（历史拼写），卡片按此名探测
   window.substitudeMacros = window.substituteParams;
-  window.eventOn = function(event, handler){ on(event, handler); };
-  window.eventOnce = function(event, handler){ on(event, handler, true); };
+  window.tavern_events = STCORE.tavernEvents;
+  window.iframe_events = STCORE.iframeEvents;
+  window.eventOn = function(event, handler){
+    on(event, handler, false, false);
+    return { stop: function(){ off(event, handler); } };
+  };
+  window.eventOnce = function(event, handler){
+    on(event, handler, true, false);
+    return { stop: function(){ off(event, handler); } };
+  };
+  window.eventMakeFirst = function(event, handler){
+    on(event, handler, false, true);
+    return { stop: function(){ off(event, handler); } };
+  };
+  window.eventMakeLast = function(event, handler){
+    on(event, handler, false, false);
+    return { stop: function(){ off(event, handler); } };
+  };
   window.eventOff = function(event, handler){ off(event, handler); };
   window.eventEmit = emit;
+  window.eventEmitAndWait = emit;
   window.eventRemoveListener = function(event, handler){ off(event, handler); };
+  window.eventClearEvent = function(event){ off(event); };
+  window.eventClearListener = function(handler){
+    for (var key in listeners) off(key, handler);
+  };
+  window.eventClearAll = function(){ listeners = {}; };
   window.toastr = {
     info: function(m){ toast('info', m); },
     success: function(m){ toast('success', m); },
@@ -1073,7 +1486,10 @@ export const buildCardAppShim = (
     clear: noop
   };
   try { window.alert = function(message){ toast('info', message); }; } catch (e) {}
-  try { window.confirm = function(){ return false; }; } catch (e) {}
+  // 卡片常用 window.confirm 做“确认覆盖”前置询问。沙箱里同步弹窗不可用，
+  // 但所有实际写入仍会经宿主确认，因此在有写权限时返回 true，让流程进入
+  // 宿主确认；只读卡片继续返回 false，保持无副作用。
+  try { window.confirm = function(){ return !!CAP_WRITE; }; } catch (e) {}
   try { window.prompt = function(){ return null; }; } catch (e) {}
   window.isEditMode = false;
   // 脚本在 body 末尾执行，DOM 已就绪；$(fn) 直接同步执行，
@@ -1221,6 +1637,372 @@ export const buildCardAppShim = (
     requestAction({ kind: 'action', action: 'send', text: value });
     return true;
   }
+
+  // ── 聊天镜像 / 楼层检测兼容层 ──────────────────────────────────────
+  // 部分卡（如约会大作战开场页）会通过 SillyTavern.getContext() 读取
+  // name1/chat/chatId，并调用 createChatMessages / getChatHistoryDetail
+  // 判断自己是否在 0 楼。这里维护一份只读镜像；真正的发送仍走
+  // requestSend → 宿主逐次确认，卡内不能绕过授权直接改会话。
+  var PENDING_SEND = '';
+  var PENDING_GENERATE = null;
+  function chatMessageFrom(raw, index){
+    var role = String(raw && raw.role || 'assistant');
+    if (role !== 'user' && role !== 'system') role = 'assistant';
+    return {
+      message_id: index,
+      name: String(raw && raw.name || (role === 'user' ? USER_NAME : CHAR_NAME)),
+      is_user: role === 'user',
+      is_system: role === 'system',
+      mes: String(raw && raw.text != null ? raw.text : ''),
+      swipe_id: 0,
+      extra: {},
+      // ST 的消息变量按 swipe 下标存放：variables[swipe_id] 是整份变量信封。
+      variables: raw && raw.statData && typeof raw.statData === 'object'
+        ? [{ stat_data: raw.statData }]
+        : undefined
+    };
+  }
+  function applyChatUpdate(list){
+    var next = [];
+    if (Array.isArray(list)) {
+      for (var i = 0; i < list.length; i += 1) next.push(chatMessageFrom(list[i], i));
+    }
+    for (var j = 0; j < next.length; j += 1) {
+      var cur = CHAT[j];
+      // 保留已有对象（尤其 chat[0]）的引用：卡的 target() 用 === 比较开场白
+      if (cur && (j === 0 || cur.is_user === next[j].is_user)) {
+        cur.name = next[j].name;
+        cur.is_user = next[j].is_user;
+        cur.is_system = next[j].is_system;
+        cur.mes = next[j].mes;
+        // 宿主只提供 stat_data，无法还原卡写入的完整变量信封
+        // （schema / initialized_lorebooks）。卡刚建立的楼层必须保留原信封，
+        // 否则开场校验会误判为“1 楼已有其他变量记录”。
+        var nextVars = next[j].variables;
+        var keepEnvelope = cur.variables && cur.variables[0] &&
+          !(nextVars && nextVars[0] && nextVars[0].schema);
+        if (!keepEnvelope) cur.variables = nextVars;
+      } else {
+        CHAT[j] = next[j];
+      }
+    }
+    CHAT.length = next.length;
+    // generate() 等待回复落地：宿主回放里出现新楼层后解除等待
+    if (PENDING_GENERATE && CHAT.length > PENDING_GENERATE.startLen) {
+      PENDING_GENERATE.finish();
+    }
+  }
+  function createChatMessages(messages){
+    var list = Array.isArray(messages) ? messages : [messages];
+    var created = [];
+    var payload = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var raw = list[i] || {};
+      var role = String(raw.role || 'user');
+      var item = {
+        message_id: CHAT.length,
+        name: String(raw.name || (role === 'user' ? USER_NAME : CHAR_NAME)),
+        is_user: role === 'user',
+        is_system: role === 'system',
+        mes: String(raw.message != null ? raw.message : (raw.mes != null ? raw.mes : '')),
+        swipe_id: 0,
+        extra: raw.extra && typeof raw.extra === 'object' ? clone(raw.extra) : {},
+        // 完整变量信封（含 schema/initialized_lorebooks）按 swipe 存入；
+        // 卡的 repair/校验逻辑会直接读取 variables[0]。
+        variables: raw.data && typeof raw.data === 'object'
+          ? [clone(raw.data)]
+          : (Array.isArray(raw.variables) ? clone(raw.variables) : undefined)
+      };
+      CHAT.push(item);
+      created.push(item);
+      payload.push({
+        role: role,
+        name: item.name,
+        message: item.mes,
+        extra: item.extra,
+        data: item.variables && item.variables[0] ? item.variables[0] : undefined,
+        is_hidden: raw.is_hidden === true
+      });
+      // 可写时新楼层已直接落库，不再交给 generate() 重复发送；
+      // 只读沙箱没有落库能力，仍保留旧的「由宿主确认发送」兜底。
+      if (!CAP_WRITE && item.is_user && item.mes.trim()) PENDING_SEND = item.mes;
+    }
+    emit(window.tavern_events.MESSAGE_SENT, window.getLastMessageId());
+    if (!CAP_WRITE) return Promise.resolve(created);
+    // 关键：新楼层必须落到宿主会话，后续 generate() 才会带上这段上下文。
+    return requestMessagePatch([], payload).then(function(result){
+      var rows = result && Array.isArray(result.created) ? result.created : [];
+      for (var j = 0; j < rows.length; j += 1) {
+        var row = rows[j] || {};
+        var target = created[j];
+        if (target && row.id) target.id = String(row.id);
+      }
+      return created;
+    });
+  }
+  function getChatHistoryDetail(files){
+    var out = {};
+    var list = Array.isArray(files) ? files : (files ? [files] : []);
+    var fallback = (CHAT_ID || 'chat') + '.jsonl';
+    if (!list.length) {
+      out[fallback] = CHAT;
+      return Promise.resolve(out);
+    }
+    for (var i = 0; i < list.length; i += 1) {
+      var name = list[i] && list[i].file_name ? String(list[i].file_name) : fallback;
+      out[name] = CHAT;
+    }
+    return Promise.resolve(out);
+  }
+  var pendingMainGenerates = {};
+  var mainGenerateSeq = 0;
+  function requestGenerateMain(quietPrompt){
+    if (!CAP_ACTIONS) { readOnly(); return Promise.resolve(false); }
+    var id = 'g' + (++mainGenerateSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingMainGenerates[id];
+        reject(new Error('flyai-generate-timeout'));
+      }, 180000);
+      pendingMainGenerates[id] = { resolve: resolve, reject: reject, timer: timer };
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: GENERATE_EVENT,
+          id: id,
+          quiet_prompt: String(quietPrompt == null ? '' : quietPrompt),
+          automatic_trigger: true
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingMainGenerates[id];
+        reject(e);
+      }
+    });
+  }
+  function settleMainGenerate(data){
+    if (!data || data.id == null) return;
+    var item = pendingMainGenerates[data.id];
+    if (!item) return;
+    delete pendingMainGenerates[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(true);
+    else item.reject(new Error(String(data.error || 'generate-failed')));
+  }
+  function uninjectPrompts(ids){
+    var list = Array.isArray(ids) ? ids.map(String) : [];
+    try {
+      HOST.postMessage({
+        v: VERSION, type: INJECT_PROMPTS_EVENT, prompts: [], remove: list
+      }, '*');
+    } catch (e) {}
+  }
+  function injectPrompts(prompts, options){
+    var list = Array.isArray(prompts) ? clone(prompts) : [];
+    try {
+      HOST.postMessage({
+        v: VERSION, type: INJECT_PROMPTS_EVENT, prompts: list, remove: []
+      }, '*');
+    } catch (e) {}
+    var deleted = false;
+    var ids = list.map(function(p){ return String((p && p.id) || ''); }).filter(Boolean);
+    function uninject(){
+      if (deleted) return;
+      deleted = true;
+      uninjectPrompts(ids);
+    }
+    if (options && options.once) {
+      on(window.tavern_events.GENERATION_ENDED, uninject, true, false);
+      on(window.tavern_events.GENERATION_STOPPED, uninject, true, false);
+      on(window.iframe_events.GENERATION_ENDED, uninject, true, false);
+    }
+    return { uninject: uninject };
+  }
+  window.injectPrompts = injectPrompts;
+  window.uninjectPrompts = uninjectPrompts;
+
+  function generateFromComposer(type, options){
+    // 酒馆 context.generate('normal', { quiet_prompt })：走主聊天生成，
+    // 不产生可见 user 楼层；没有 quiet_prompt 时退回旧的输入框发送路径。
+    if (options && typeof options === 'object' &&
+        typeof options.quiet_prompt === 'string' && options.quiet_prompt) {
+      return requestGenerateMain(options.quiet_prompt);
+    }
+    var text = PENDING_SEND;
+    PENDING_SEND = '';
+    if (!text) text = composer ? composer.value : '';
+    text = String(text == null ? '' : text);
+    if (!text.trim()) {
+      // 纯 generate()（常见于先 createChatMessages 再 generate）：按酒馆语义
+      // 基于已落库的历史生成回复，不额外追加 user 楼层。
+      if (!CAP_ACTIONS) { readOnly(); return Promise.resolve(false); }
+      if (type === 'normal' || type == null) return requestGenerateMain('');
+      return Promise.resolve(false);
+    }
+    if (!CAP_ACTIONS) { readOnly(); return Promise.resolve(false); }
+    // ST 的 generate() 在 AI 回复落地后才 resolve；卡会据此检查聊天楼层。
+    // 宿主只负责批准发送，这里继续等聊天镜像出现新楼层（或超时兜底）。
+    var startLen = CHAT.length;
+    var settle = null;
+    var promise = new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){ finish(true); }, 120000);
+      function finish(ok, err){
+        if (!settle) return;
+        settle = null;
+        PENDING_GENERATE = null;
+        clearTimeout(timer);
+        if (err) reject(err); else resolve(ok);
+      }
+      settle = finish;
+    });
+    PENDING_GENERATE = {
+      startLen: startLen,
+      finish: function(){ if (settle) settle(true); }
+    };
+    requestAction({ kind: 'action', action: 'send', text: text }).catch(function(err){
+      if (settle) settle(false, err);
+    });
+    return promise;
+  }
+
+  // ── 酒馆世界书 HTTP / context 兼容层 ──────────────────────────────
+  // 约会大作战等卡直接调用 /api/worldinfo/get + saveWorldInfo 同步世界书。
+  // 这里用本地对象模拟读写；保存时仍通过 requestAction(world) 交给宿主确认。
+  var WORLDBOOKS = {};
+  function primaryWorldName(){
+    return CHAR_WORLD_NAME || WORLD_NAME || CHAR_NAME || 'FlyAI';
+  }
+  // 角色卡自带世界书（CC character_book）被导入到 character.table，但酒馆
+  // 卡常按 uid 读取「主世界书」条目。部分卡（如约会大作战）会在脚本里声明
+  // slots（uid + title），这里按标题把 table 映射成 uid→entry 的 ST 形状，
+  // 让 /api/worldinfo/get 能返回这些条目；没有 manifest 时用稳定序号兜底。
+  function characterWorldSlots(){
+    try {
+      var manifest = window.DALOpeningWorldbook;
+      var slots = manifest && Array.isArray(manifest.slots) ? manifest.slots : [];
+      var out = {};
+      for (var i = 0; i < slots.length; i += 1) {
+        var slot = slots[i] || {};
+        if (slot.title && slot.uid != null) out[String(slot.title)] = slot;
+      }
+      return out;
+    } catch (e) {
+      return {};
+    }
+  }
+  function worldbookFromCharacter(){
+    var table = CHARACTER_FIELDS && Array.isArray(CHARACTER_FIELDS.table)
+      ? CHARACTER_FIELDS.table
+      : [];
+    if (!table.length) return { entries: {} };
+    var named = characterWorldSlots();
+    var entries = {};
+    for (var i = 0; i < table.length; i += 1) {
+      var item = table[i] || {};
+      var title = String(item.title == null ? '' : item.title);
+      var slot = named[title];
+      var uid = slot ? Number(slot.uid) : i + 1;
+      if (!isFinite(uid) || uid < 0) uid = i + 1;
+      while (entries[uid]) uid += 1;
+      entries[uid] = {
+        uid: uid,
+        comment: title || String(uid),
+        key: Array.isArray(item.keys) ? item.keys.slice() : [],
+        content: String(item.content == null ? '' : item.content),
+        constant: slot ? !!slot.constant : !!item.pinned,
+        disable: false,
+        position: 0,
+        depth: Number(item.depth == null ? 4 : item.depth),
+        order: Number(item.insert_order == null ? 100 : item.insert_order),
+        probability: 100
+      };
+    }
+    return { entries: entries };
+  }
+  function worldbookOf(name){
+    var key = String(name || primaryWorldName());
+    var book = WORLDBOOKS[key];
+    var hasEntries = book && book.entries && Object.keys(book.entries).length > 0;
+    if (!book || (!hasEntries && key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table)) {
+      book = key === primaryWorldName() && CHARACTER_FIELDS && CHARACTER_FIELDS.table
+        ? worldbookFromCharacter()
+        : (book || { entries: {} });
+      WORLDBOOKS[key] = book;
+    }
+    return book;
+  }
+  function worldbookEntries(data){
+    return STCORE.worldbookHostEntries(data);
+  }
+  function saveWorldbook(name, data){
+    if (!CAP_WRITE) {
+      readOnly();
+      return Promise.reject(new Error('flyai-card-read-only'));
+    }
+    var key = String(name || primaryWorldName());
+    var book;
+    if (Array.isArray(data)) {
+      book = STCORE.worldbookFromList(data, key);
+    } else if (data && typeof data === 'object') {
+      book = clone(data);
+      if (!book.entries || typeof book.entries !== 'object') book.entries = {};
+    } else {
+      book = { entries: {} };
+    }
+    WORLDBOOKS[key] = book;
+    var list = worldEntriesHost(STCORE.worldbookEntryList(book));
+    if (WORLD_NAME) WORLD_ENTRIES = clone(list);
+    // 始终按“世界书写回”提交：后端在未绑定世界书时会 fork/派生世界副本，
+    // 不再把 /api/worldinfo/edit 误写成角色卡 table。
+    return requestAction({ kind: 'world', entries: list }).then(function(result){
+      if (result && Array.isArray(result.entries)) {
+        if (WORLD_NAME) WORLD_ENTRIES = clone(result.entries);
+        return clone(result.entries);
+      }
+      return clone(list);
+    });
+  }
+  function jsonResponse(data){
+    var text = JSON.stringify(data == null ? {} : data);
+    try {
+      return new Response(text, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (e) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: function(){ return Promise.resolve(data); },
+        text: function(){ return Promise.resolve(text); }
+      };
+    }
+  }
+  function worldinfoFetch(url, init){
+    var path = String(url || '');
+    if (path.indexOf('/api/worldinfo/') < 0) return null;
+    var body = init && init.body;
+    var data = {};
+    try {
+      if (typeof body === 'string') data = JSON.parse(body);
+      else if (body && typeof body === 'object' && !(body instanceof ArrayBuffer)) data = body;
+    } catch (e) {}
+    if (path.indexOf('/api/worldinfo/get') >= 0) {
+      return Promise.resolve(jsonResponse(worldbookOf(data.name)));
+    }
+    if (path.indexOf('/api/worldinfo/edit') >= 0 || path.indexOf('/api/worldinfo/create') >= 0) {
+      var name = data.name || data.world || '';
+      var payload = data.data || data.world_info || data;
+      return saveWorldbook(name, payload).then(function(){ return jsonResponse({ ok: true }); });
+    }
+    if (path.indexOf('/api/worldinfo/delete') >= 0) {
+      delete WORLDBOOKS[String(data.name || '')];
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    return Promise.resolve(jsonResponse({}));
+  }
+
   function ensureSendButton(){
     if (sendButton) return sendButton;
     try {
@@ -1287,16 +2069,18 @@ export const buildCardAppShim = (
   }
 
   window.SillyTavern = window.SillyTavern || {};
-  window.SillyTavern.getContext = function(){
-    return {
+  var ST_CONTEXT = {
       extensionSettings: extensionSettings,
       saveSettingsDebounced: function(){},
-      generate: function(){
-        return requestSend(composer ? composer.value : '');
-      },
+      saveChat: function(){ return Promise.resolve(true); },
+      generate: generateFromComposer,
       variables: clone(VARIABLES),
-      chat: [],
-      chatMetadata: {},
+      chat: CHAT,
+      chatMetadata: CHAT_METADATA,
+      updateChatMetadata: updateChatMetadata,
+      saveMetadata: saveMetadata,
+      accountStorage: accountStorage(),
+      chatId: CHAT_ID,
       characters: (CHAR_NAME || CHAR_AVATAR)
         ? [{
             name: CHAR_NAME,
@@ -1308,18 +2092,31 @@ export const buildCardAppShim = (
           }]
         : [],
       characterId: 0,
-      name1: '',
-      name2: '',
+      name1: USER_NAME,
+      name2: CHAR_NAME,
+      groupId: null,
       groups: [],
       eventSource: eventSource,
-      getCurrentMessageId: function(){ return 0; }
-    };
+      getCurrentMessageId: function(){ return 0; },
+      getRequestHeaders: function(){ return {}; },
+      loadWorldInfo: function(name){ return Promise.resolve(worldbookOf(name)); },
+      saveWorldInfo: function(name, data){ return saveWorldbook(name, data); }
   };
+  window.SillyTavern.getContext = function(){ return ST_CONTEXT; };
 
   var helper = window.TavernHelper || window.tavernHelper || {};
   helper.getChatMessages = getChatMessages;
+  helper.createChatMessages = createChatMessages;
+  helper.setChatMessages = window.setChatMessages;
+  helper.deleteChatMessages = window.deleteChatMessages;
+  helper.rotateChatMessages = window.rotateChatMessages;
+  helper.getChatHistoryDetail = getChatHistoryDetail;
   helper.getCurrentMessageId = window.getCurrentMessageId;
   helper.getLastMessageId = window.getLastMessageId;
+  helper.updateChatMetadata = updateChatMetadata;
+  helper.saveMetadata = saveMetadata;
+  window.updateChatMetadata = updateChatMetadata;
+  window.saveMetadata = saveMetadata;
   helper.getAllVariables = window.getAllVariables;
   helper.getVariables = window.getVariables;
   helper.getChatVariable = window.getChatVariable;
@@ -1330,14 +2127,30 @@ export const buildCardAppShim = (
   helper.substituteParams = window.substituteParams;
   helper.eventOn = window.eventOn;
   helper.eventOnce = window.eventOnce;
+  helper.eventMakeFirst = window.eventMakeFirst;
+  helper.eventMakeLast = window.eventMakeLast;
   helper.eventOff = window.eventOff;
   helper.eventEmit = window.eventEmit;
+  helper.eventEmitAndWait = window.eventEmitAndWait;
   helper.eventRemoveListener = window.eventRemoveListener;
+  helper.eventClearEvent = window.eventClearEvent;
+  helper.eventClearListener = window.eventClearListener;
+  helper.eventClearAll = window.eventClearAll;
+  helper.initializeGlobal = window.initializeGlobal;
+  helper.getCurrentCharacterId = window.getCurrentCharacterId;
+  helper.getCurrentCharacterName = window.getCurrentCharacterName;
+  helper.getCharacterNames = window.getCharacterNames;
+  helper.getCharacterIds = window.getCharacterIds;
+  helper.getCharacter = window.getCharacter;
+  helper.getPresetNames = window.getPresetNames;
+  helper.getChatWorldbookName = window.getChatWorldbookName;
   var HELPER_SHARED = [
     'getLastMessage', 'setVariables', 'insertVariables', 'insertOrAssignVariables',
     'deleteVariable', 'getWorldbookNames', 'getCharWorldbookNames',
     'getGlobalWorldbookNames', 'getWorldbook', 'updateWorldbookWith',
-    'replaceWorldbook', 'getCharName', 'getCurrentCharName', 'getCharAvatar'
+    'replaceWorldbook', 'getCharName', 'getCurrentCharName', 'getCharAvatar',
+    'getCurrentPersonaName', 'getCurrentPersonaId', 'retrieveDisplayedMessage',
+    'injectPrompts', 'uninjectPrompts'
   ];
   for (var hi = 0; hi < HELPER_SHARED.length; hi += 1) {
     var helperName = HELPER_SHARED[hi];
@@ -1361,6 +2174,7 @@ export const buildCardAppShim = (
   // 受控网络：只在宿主授予 net 能力时替换 fetch/XHR，所有请求经宿主逐跳校验后代理。
   // CSP 仍是 connect-src 'none'，即使 shim 被盗用也不会真正直连外网。
   var settleFetch = null;
+  var proxyFetch = null;
   if (CAP_NET) {
     var fetchSeq = 0;
     var pendingFetches = {};
@@ -1511,7 +2325,7 @@ export const buildCardAppShim = (
         item.reject(new TypeError('Failed to fetch'));
       }
     };
-    window.fetch = function(input, init){
+    proxyFetch = function(input, init){
       var options = init || {};
       if (typeof Request !== 'undefined' && input instanceof Request) {
         return input.clone().arrayBuffer().then(function(buffer){
@@ -1651,17 +2465,121 @@ export const buildCardAppShim = (
     window.XMLHttpRequest = CardXHR;
   }
 
+  // /api/worldinfo/* 是酒馆的本地世界书接口，不应走外网代理；
+  // 其余 URL 仅在宿主授予 net 能力时交给受控代理，否则直接拒绝。
+  function chatFileData(){
+    var out = [{
+      user_name: USER_NAME,
+      character_name: CHAR_NAME,
+      create_date: '',
+      chat_metadata: clone(CHAT_METADATA)
+    }];
+    for (var i = 0; i < CHAT.length; i += 1) {
+      var item = CHAT[i] || {};
+      var text = String(item.mes == null ? '' : item.mes);
+      out.push({
+        name: item.name || (item.is_user ? USER_NAME : CHAR_NAME),
+        is_user: !!item.is_user,
+        is_system: !!item.is_system,
+        send_date: '',
+        mes: text,
+        extra: item.extra && typeof item.extra === 'object' ? clone(item.extra) : {},
+        swipe_id: typeof item.swipe_id === 'number' ? item.swipe_id : 0,
+        swipes: Array.isArray(item.swipes) ? clone(item.swipes) : [text],
+        swipes_info: [{}],
+        variables: Array.isArray(item.variables) ? clone(item.variables) : [{}]
+      });
+    }
+    return out;
+  }
+  function chatApiFetch(url, init){
+    var path = String(url || '');
+    var data = {};
+    try {
+      var body = init && init.body;
+      if (typeof body === 'string') data = JSON.parse(body);
+      else if (body && typeof body === 'object') data = body;
+    } catch (e) { data = {}; }
+    if (path.indexOf('/api/chats/get') >= 0) {
+      return Promise.resolve(jsonResponse(chatFileData()));
+    }
+    if (path.indexOf('/api/chats/save') >= 0) {
+      var chat = data.chat;
+      if (Array.isArray(chat) && chat[0] && chat[0].chat_metadata &&
+          typeof chat[0].chat_metadata === 'object') {
+        CHAT_METADATA = clone(chat[0].chat_metadata);
+        syncChatMetadata();
+        if (CAP_WRITE) saveMetadata().catch(function(){});
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    if (path.indexOf('/api/chats/rename') >= 0 ||
+        path.indexOf('/api/chats/delete') >= 0) {
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
+    if (path.indexOf('/api/users/me') >= 0) {
+      return Promise.resolve(jsonResponse({
+        handle: USER_NAME || 'flyai-user',
+        name: USER_NAME || 'User',
+        admin: false
+      }));
+    }
+    if (path.indexOf('/api/files/sanitize-filename') >= 0) {
+      var fname = String(data.fileName || data.file_name || '');
+      fname = fname.replace(/[\\\\/:*?"<>|]/g, '_').replace(/^\\s+|\\s+$/g, '');
+      return Promise.resolve(jsonResponse({ fileName: fname }));
+    }
+    return null;
+  }
+  window.fetch = function(input, init){
+    var url = typeof input === 'string'
+      ? input
+      : (input && input.url ? String(input.url) : String(input));
+    var local = worldinfoFetch(url, init);
+    if (local) return local;
+    var chatApi = chatApiFetch(url, init);
+    if (chatApi) return chatApi;
+    if (proxyFetch) return proxyFetch(input, init);
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+
   // 只接受真实父窗口的合法消息；变量未变化时忽略（ready/load 重放去重）。
   window.addEventListener('message', function(e){
     if (!e || e.source !== HOST) return;
     var data = e.data;
     if (!data || typeof data !== 'object' || data.v !== VERSION) return;
     if (data.type === VARS) { applyVariables(data.variables); return; }
+    if (data.type === CHAT_EVENT) {
+      if (data.chat && typeof data.chat === 'object') {
+        if (typeof data.chat.userName === 'string') USER_NAME = data.chat.userName;
+        if (typeof data.chat.chatId === 'string') CHAT_ID = data.chat.chatId;
+        if (ST_CONTEXT) {
+          ST_CONTEXT.chatId = CHAT_ID;
+          ST_CONTEXT.name1 = USER_NAME;
+          if (data.chat.metadata && typeof data.chat.metadata === 'object') {
+            CHAT_METADATA = clone(data.chat.metadata);
+          }
+          ST_CONTEXT.chatMetadata = CHAT_METADATA;
+        }
+        applyChatUpdate(data.chat.messages);
+      }
+      return;
+    }
     if (data.type === MESSAGE_EVENT) {
       CURRENT_MESSAGE = data.message == null ? '' : String(data.message);
       return;
     }
     if (data.type === ACTION_RESULT_EVENT) { settleAction(data); return; }
+    if (data.type === METADATA_EVENT) {
+      if (data.metadata && typeof data.metadata === 'object') {
+        CHAT_METADATA = clone(data.metadata);
+        syncChatMetadata();
+      }
+      return;
+    }
+    if (data.type === METADATA_RESULT_EVENT) { settleMetadata(data); return; }
+    if (data.type === MESSAGES_RESULT_EVENT) { settleMessages(data); return; }
+    if (data.type === GENERATE_RESULT_EVENT) { settleMainGenerate(data); return; }
     if (data.type === WRITE_CTX_EVENT) { applyWriteContext(data.context); return; }
     if (data.type === DRAFT_EVENT) {
       var area = ensureComposer();
@@ -1718,6 +2636,8 @@ export type CardAppDocOptions = {
   externalMedia?: boolean
   /** 角色信息：shim 暴露名称，头像源加入 CSP img-src */
   character?: CardAppCharacter | null
+  /** 聊天快照：SillyTavern.getContext().chat / 楼层检测 */
+  chat?: CardAppChat | null
   /** 用户授权能力；缺省全部关闭，保持只读 shim */
   capabilities?: CardAppCapabilities | null
 }
@@ -1766,7 +2686,8 @@ export const buildCardAppDoc = (
       options.message,
       options.variables,
       options.character,
-      options.capabilities
+      options.capabilities,
+      options.chat
     )}</script>`
 
   const head = /<head\b[^>]*>/i.exec(doc)

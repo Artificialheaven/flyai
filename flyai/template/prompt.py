@@ -157,6 +157,8 @@ class PromptTemplateBridge:
         return value if isinstance(value, dict) else {}
 
     def _context(self) -> Dict[str, Any]:
+        author = (getattr(self.session, "attributes", None) or {}).get("author") or {}
+        phone_mainline = author.get("phone_mainline")
         return {
             # 深拷贝：事件会缓存在 run 里供断线重放，不能在 apply_ops 时被改掉
             "scopes": {
@@ -171,6 +173,8 @@ class PromptTemplateBridge:
             "user": self._user,
             "group": self._group,
             "chat": _chat_view(self.history),
+            # 卡片手机模块通过 DALPhoneMainline.read() 注入主线往来
+            "phoneMainline": phone_mainline if isinstance(phone_mainline, str) else "",
         }
 
     def _version(self) -> str:

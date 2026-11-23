@@ -326,3 +326,31 @@ def test_parse_mes_example_substitutes_macros():
     assert rounds[1] == "你：嗨\n鲁迪：再见"
     assert parse_mes_example("", "鲁迪") == []
     assert parse_mes_example("<START>  <start>", "鲁迪") == []
+
+def test_build_prompt_honors_st_worldbook_positions():
+    from flyai.lore.models import Character, LoreEntry
+    from flyai.lore.query import build_system_prompt
+
+    character = Character(
+        name="甲",
+        intro="角色简介正文",
+        mes_example="{{char}}：范例对白",
+        table=[
+            LoreEntry("前", "前块", pinned=True, position_type="before"),
+            LoreEntry("后", "后块", pinned=True, position_type="after"),
+            LoreEntry("范前", "范例前块", pinned=True, position_type="EMTop"),
+            LoreEntry("范后", "范例后块", pinned=True, position_type="EMBottom"),
+            LoreEntry("深", "深度块", pinned=True, position="depth",
+                      position_type="at_depth"),
+            LoreEntry("禁用", "禁用块", pinned=True, enabled=False),
+        ],
+    )
+    prompt = build_system_prompt(character, None, "")
+    assert "前块" in prompt
+    assert prompt.index("前块") < prompt.index("角色简介正文")
+    assert prompt.index("后块") > prompt.index("角色简介正文")
+    assert prompt.index("范例前块") < prompt.index("范例对白")
+    assert prompt.index("范例后块") > prompt.index("范例对白")
+    # depth 条目交给 @depth 注入，禁用条目不注入
+    assert "深度块" not in prompt
+    assert "禁用块" not in prompt
