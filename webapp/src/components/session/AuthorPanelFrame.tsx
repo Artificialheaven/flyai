@@ -48,7 +48,10 @@ import {
   CardActionDialog,
   type CardConfirmRequest,
 } from '../messages/CardActionDialog.js'
-import { CardBusyBar } from '../base/CardBusyBar.js'
+import {
+  beginCardActivity,
+  endCardActivity,
+} from '../../services/st/cardActivity.js'
 
 const MIN_HEIGHT = 160
 const MAX_HEIGHT = 2400
@@ -103,13 +106,12 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const [height, setHeight] = useState(INITIAL_HEIGHT)
   const [confirmRequest, setConfirmRequest] = useState<CardConfirmRequest | null>(null)
-  // 卡内写入世界书/变量/角色字段的并发计数；>0 时显示非阻塞进度条
-  const [busyOps, setBusyOps] = useState(0)
-  const beginBusy = useCallback(() => setBusyOps((count) => count + 1), [])
-  const endBusy = useCallback(
-    () => setBusyOps((count) => Math.max(0, count - 1)),
-    []
+  // 卡内写入世界书/变量/角色字段：头部下沿的全局进度条
+  const beginBusy = useCallback(
+    () => beginCardActivity(t('cardSyncProgress')),
+    [t]
   )
+  const endBusy = endCardActivity
   const confirmResolve = useRef<((ok: boolean) => void) | null>(null)
   // 消息/变量变化不重建 iframe：作者脚本的标签页、主题与滚动位置要保留。
   const initialMessages = useRef(messages)
@@ -601,7 +603,6 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   return (
     <>
     <div style={{ position: 'relative' }}>
-      {busyOps > 0 ? <CardBusyBar label={t('cardSyncProgress')} /> : null}
       <iframe
         ref={iframeRef}
         title="酒馆助手脚本面板"

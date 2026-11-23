@@ -110,7 +110,10 @@ import {
   IconTrashOutline16,
 } from '../base/icons.js'
 import { CardActionDialog, type CardConfirmRequest } from '../messages/CardActionDialog.js'
-import { CardBusyBar } from '../base/CardBusyBar.js'
+import {
+  beginCardActivity,
+  endCardActivity,
+} from '../../services/st/cardActivity.js'
 import styles from './CardAppFrame.module.css'
 
 const MIN_HEIGHT = 120
@@ -253,8 +256,6 @@ export const CardAppFrame = memo(function CardAppFrame({
     count: 0,
     last: '',
   })
-  // 正在把卡内写入同步到会话副本的请求数；>0 时显示非阻塞进度条
-  const [busyOps, setBusyOps] = useState(0)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const hostRef = useRef<HTMLDivElement | null>(null)
   const cardHostRef = useRef<CardAppHost | undefined>(host)
@@ -497,8 +498,8 @@ export const CardAppFrame = memo(function CardAppFrame({
           }
           return { ok: true }
         }
-        // 大卡片的世界书/变量写入 + 会话重载可能要几秒：显示非阻塞进度条
-        setBusyOps((count) => count + 1)
+        // 大卡片的世界书/变量写入可能要几秒：头部下沿显示非阻塞进度条
+        beginCardActivity(t('cardSyncProgress'))
         try {
           if (intent.kind === 'vars') {
             await writeSessionMvu(
@@ -518,7 +519,7 @@ export const CardAppFrame = memo(function CardAppFrame({
           // 同步 GET 会卡住卡片的连续写入（开场写 2 个槽位就要两次），
           // 卡内读侧以自身缓存为准，界面在下次正常刷新/生成时对齐。
         } finally {
-          setBusyOps((count) => Math.max(0, count - 1))
+          endCardActivity()
         }
         return { ok: true }
       } catch (err) {
@@ -597,7 +598,7 @@ export const CardAppFrame = memo(function CardAppFrame({
         reply({ ok: true, result: { updated: [], created: [] } })
         return
       }
-      setBusyOps((count) => count + 1)
+      beginCardActivity(t('cardSyncProgress'))
       try {
         const result = await request<{
           updated?: string[]
@@ -638,10 +639,10 @@ export const CardAppFrame = memo(function CardAppFrame({
           error: status === 403 || status === 409 ? CARD_CODE_UNAVAILABLE : CARD_CODE_ACTION_FAILED,
         })
       } finally {
-        setBusyOps((count) => Math.max(0, count - 1))
+        endCardActivity()
       }
     },
-    [postToCard]
+    [postToCard, t]
   )
 
   /**
@@ -1063,7 +1064,6 @@ export const CardAppFrame = memo(function CardAppFrame({
         fullscreen && styles.fullscreen
       )}
     >
-      {busyOps > 0 ? <CardBusyBar label={t('cardSyncProgress')} /> : null}
       {showToolbar && !chromeless ? (
         <div className={styles.toolbar}>
           <span className={styles.labelRow}>

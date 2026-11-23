@@ -17,6 +17,7 @@ import { MobileHeader } from './MobileHeader.js'
 import { SessionSettingsDialog } from './SessionSettingsDialog.js'
 import { StatusPanelDrawer, statusPanelAvailable } from './StatusPanel.js'
 import { ThreadTabs } from './ThreadTabs.js'
+import { CardSyncBar } from '../base/CardSyncBar.js'
 import { TokenMeter } from './TokenMeter.js'
 import styles from './SessionView.module.css'
 
@@ -84,6 +85,8 @@ export const SessionView = ({
         </div>
       )}
       <ThreadTabs sessionId={session.id} />
+      {/* 卡片写回进度条挂在头部（含标签栏）下沿，而不是会话内容里 */}
+      <CardSyncBar />
       {membersOpen ? (
         <RoomMembersDialog sessionId={session.id} onClose={() => setMembersOpen(false)} />
       ) : null}
