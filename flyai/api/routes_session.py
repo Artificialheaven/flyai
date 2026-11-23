@@ -32,6 +32,7 @@ from ..sessions.resolve import (
     room_base_signatures,
     set_character_override,
     set_world_override,
+    strip_heavy_extensions,
     user_seat,
 )
 
@@ -339,8 +340,8 @@ def session_fork(sid: str, request: Request):
             if base is None:
                 raise ValueError("当前会话没有绑定角色，无法派生副本")
             copy = Character.from_dict(base.to_dict())
-            m.override = copy.to_dict()
-            s.character_override = copy.to_dict()
+            m.override = strip_heavy_extensions(copy.to_dict())
+            s.character_override = strip_heavy_extensions(copy.to_dict())
         else:
             copy = fork_character(s, sc.lore)
     except ValueError as exc:
@@ -369,7 +370,7 @@ def session_set_character(sid: str, body: CharacterBody, request: Request):
     char.extensions = incoming
     m = _single_ai_seat(s)
     if m is not None:
-        m.override = char.to_dict()
+        m.override = strip_heavy_extensions(char.to_dict())
     set_character_override(s, char)
     sc.store.save(s)
     eff = effective_character(s, sc.lore)
@@ -992,7 +993,8 @@ def st_write_character(sid: str, body: StCharacterBody, request: Request):
         ]
     data.update(patch)
     char = Character.from_dict(data)
-    m.override = char.to_dict()
+    # 酒馆助手脚本只存库主卡一份；会话副本剥离，读取时再补回
+    m.override = strip_heavy_extensions(char.to_dict())
     # 顶层仅作镜像（导出/effective_character 与座位保持一致）
     s.character_override = copy.deepcopy(m.override)
     # 不能用 save_merged：character_override 在 MERGED_FIELDS 里，回填会抹掉镜像

@@ -31,6 +31,7 @@ from flyai.api.routes_session import (
     st_write_world,
 )
 from flyai.lore.models import Character, LoreEntry, World
+from flyai.sessions.resolve import effective_character
 from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore
 from flyai.sessions.models import RoomMember, Session, Thread
@@ -405,8 +406,10 @@ def test_character_override_put_keeps_stripped_tavern_helper(tmp_path):
 
     s2 = store.get(s.id)
     assert s2.character_override["name"] == "新名"
-    kept = s2.character_override["extensions"]["tavern_helper"]["scripts"]
-    assert kept[0]["id"] == "s1"
+    # 落盘副本不带十几 MB 的脚本，读取时从库主卡补回
+    assert "tavern_helper" not in s2.character_override["extensions"]
+    eff = effective_character(s2, _lore)
+    assert eff.extensions["tavern_helper"]["scripts"][0]["id"] == "s1"
 
 
 def test_character_write_normalizes_table(tmp_path):
