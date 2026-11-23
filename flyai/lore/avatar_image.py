@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from ..ids import InvalidName, safe_child
+
+logger = logging.getLogger(__name__)
 
 MAX_AVATAR_BYTES = 8 * 1024 * 1024
 
@@ -109,3 +112,50 @@ def materialize_avatar(
     except (InvalidName, OSError):
         return None
     return f"/uploads/{uid}/{fname}"
+
+
+# ---- 列表缩略图：内容库不能直接加载几十 MB 的原图 ----
+
+THUMB_MAX_SIDE = 256
+
+
+def _avatar_local_path(upload_dir: Optional[Path], avatar_url: str) -> Optional[Path]:
+    if not upload_dir or not avatar_url:
+        return None
+    m = _UPLOAD_RE.match(str(avatar_url))
+    if not m or m.group(1) != upload_dir.name:
+        return None
+    try:
+        return safe_child(upload_dir, m.group(2))
+    except InvalidName:
+        return None
+
+
+def ensure_avatar_thumb(
+    upload_dir: Optional[Path], avatar_url: str, max_side: int = THUMB_MAX_SIDE
+) -> str:
+    """生成/复用 256px WebP 缩略图，返回其 URL；失败返回空串。
+
+    原图保持不动（导出、详情页、模型视觉仍用原图），只有列表接口下发缩略图。
+    """
+    src = _avatar_local_path(upload_dir, avatar_url)
+    if src is None or not src.is_file():
+        return ""
+    dst = src.with_suffix(".thumb.webp")
+    try:
+        if dst.is_file() and dst.stat().st_mtime_ns >= src.stat().st_mtime_ns:
+            return f"/uploads/{upload_dir.name}/{dst.name}"
+        from PIL import Image
+
+        with Image.open(src) as im:
+            im.seek(0)
+            has_alpha = im.mode in ("RGBA", "LA") or (
+                im.mode == "P" and "transparency" in im.info
+            )
+            im = im.convert("RGBA" if has_alpha else "RGB")
+            im.thumbnail((max_side, max_side))
+            im.save(dst, "WEBP", quality=80, method=4)
+    except Exception:  # 损坏图片/缺 Pillow：缩略图是附属信息，不能影响列表
+        logger.warning("生成头像缩略图失败：%s", avatar_url, exc_info=True)
+        return ""
+    return f"/uploads/{upload_dir.name}/{dst.name}"

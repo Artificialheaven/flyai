@@ -259,6 +259,8 @@ export type CharacterSummary = Pick<
   table_size?: number
   /** 整卡文件 md5：本地整卡缓存的校验令牌（旧后端不返回） */
   md5?: string
+  /** 256px WebP 缩略图；列表优先用它，避免下载十几 MB 的原图 */
+  avatar_thumb?: string
 }
 
 /** 内容库列表用轻量世界观 */

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..ids import InvalidName, check_safe_name
-from ..lore.avatar_image import embed_avatar, materialize_avatar
+from ..lore.avatar_image import embed_avatar, ensure_avatar_thumb, materialize_avatar
 from ..lore.models import Character, LoreEntry, World
 from ..user import ADMIN_UID
 
@@ -172,9 +172,16 @@ def list_characters(request: Request, summary: bool = False):
     lore = _state(request).lore
     chars = lore.list_characters()
     if summary:
-        return {
-            "characters": [c.summary(lore.character_digest(c.id)) for c in chars]
-        }
+        upload_dir = getattr(_state(request), "upload_dir", None)
+        out = []
+        for c in chars:
+            item = c.summary(lore.character_digest(c.id))
+            thumb = ensure_avatar_thumb(upload_dir, c.avatar)
+            if thumb:
+                # 列表只下发 256px WebP；原图仍走 /uploads 供详情/导出使用
+                item["avatar_thumb"] = thumb
+            out.append(item)
+        return {"characters": out}
     return {"characters": [c.to_dict() for c in chars]}
 
 
@@ -222,6 +229,8 @@ def update_character(cid: str, payload: CharacterPayload, request: Request):
     c.author = cur.author  # 作者不可改
     c.public = cur.public
     sc.lore.save_character(c)
+    if c.avatar:
+        ensure_avatar_thumb(getattr(sc, "upload_dir", None), c.avatar)
     # 已发布的卡：改动同步到共享目录
     if cur.public and source == "own":
         sc.lore.publish_character(c)
@@ -363,6 +372,8 @@ def import_character(payload: LoreImportPayload, request: Request):
         # 内嵌头像损坏/非法时丢弃图片，但不能留一个指向导出者目录的坏 URL
         c.avatar = materialize_avatar(
             getattr(sc, "upload_dir", None), sc.uid, blob) or ""
+        if c.avatar:
+            ensure_avatar_thumb(getattr(sc, "upload_dir", None), c.avatar)
     sc.lore.save_character(c)
     body = c.to_dict()
     # 前端上传后立即把整卡写进本地缓存，下次打开靠 md5 命中直接读本地
@@ -456,6 +467,7 @@ async def import_character_card(request: Request, file: UploadFile = File(...)):
         fname = f"{uuid.uuid4().hex}.png"
         (sc.upload_dir / fname).write_bytes(raw)
         c.avatar = f"/uploads/{sc.uid}/{fname}"
+        ensure_avatar_thumb(sc.upload_dir, c.avatar)
     sc.lore.save_character(c)
     report = card_import.import_report(c)
     # 增量双形态：保留旧顶层字段（旧前端/旧调用方直接读 name/id），
@@ -528,4 +540,6 @@ async def upload_avatar(request: Request, file: UploadFile = File(...)):
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(400, "图片过大（>5MB）")
     dest.write_bytes(content)
-    return {"url": f"/uploads/{state.uid}/{fname}"}
+    url = f"/uploads/{state.uid}/{fname}"
+    ensure_avatar_thumb(state.upload_dir, url)
+    return {"url": url}

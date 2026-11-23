@@ -467,7 +467,7 @@ const LoreContent = () => {
   const renderCharacterCard = (character: CharacterSummary, shared: boolean) => (
     <div className={styles.card} key={character.id}>
       {character.avatar ? (
-        <img className={styles.avatar} src={assetUrl(character.avatar)} alt="" />
+        <img className={styles.avatar} src={assetUrl(character.avatar_thumb || character.avatar)} alt="" />
       ) : (
         <div className={styles.avatarFallback}>{(character.name || '?').slice(0, 1)}</div>
       )}
