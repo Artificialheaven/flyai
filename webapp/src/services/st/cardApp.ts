@@ -17,6 +17,11 @@
 import JQUERY_SOURCE from './vendor/jquery-3.6.0.min.js?raw'
 import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
 import ST_CORE_SOURCE from './compat/stCore.js?raw'
+import { buildEjsTemplateSource } from './native/ejsRuntime.js'
+import {
+  buildNativeImportMapEntries,
+  ST_NATIVE_SNAPSHOT_SOURCE,
+} from './native/stNative.js'
 
 /** 正则引擎在替换结果外层加的哨兵；U+0000 不会出现在正常文本里 */
 export const APP_START = '\u0000FLYAI_APP_START\u0000'
@@ -71,6 +76,10 @@ export const CARD_MSG_MESSAGES_RESULT = 'flyai-card-messages-result'
 export const CARD_MSG_GENERATE = 'flyai-card-generate'
 /** 宿主 → 卡：主聊天生成结果 */
 export const CARD_MSG_GENERATE_RESULT = 'flyai-card-generate-result'
+/** 卡 → 宿主：按显式 messages 静默生成（ST chat-completions 兼容） */
+export const CARD_MSG_GENERATE_TEXT = 'flyai-card-generate-text'
+/** 宿主 → 卡：静默生成文本 `{id, ok, text?, error?}` */
+export const CARD_MSG_GENERATE_TEXT_RESULT = 'flyai-card-generate-text-result'
 /** 卡 → 宿主：临时提示词注入/移除 */
 export const CARD_MSG_INJECT_PROMPTS = 'flyai-card-inject-prompts'
 export const CARD_CODE_READ_ONLY = 'read-only'
@@ -582,6 +591,8 @@ export const buildCardAppShim = (
   var MESSAGES_RESULT_EVENT = ${escapeForScript(CARD_MSG_MESSAGES_RESULT)};
   var GENERATE_EVENT = ${escapeForScript(CARD_MSG_GENERATE)};
   var GENERATE_RESULT_EVENT = ${escapeForScript(CARD_MSG_GENERATE_RESULT)};
+  var GENERATE_TEXT_EVENT = ${escapeForScript(CARD_MSG_GENERATE_TEXT)};
+  var GENERATE_TEXT_RESULT_EVENT = ${escapeForScript(CARD_MSG_GENERATE_TEXT_RESULT)};
   var INJECT_PROMPTS_EVENT = ${escapeForScript(CARD_MSG_INJECT_PROMPTS)};
   var CHAT_ID = ${escapeForScript(chat?.chatId ?? '')};
   var USER_NAME = ${escapeForScript(chat?.userName ?? '')};
@@ -1863,6 +1874,53 @@ export const buildCardAppShim = (
     if (data.ok) item.resolve(true);
     else item.reject(new Error(String(data.error || 'generate-failed')));
   }
+  var pendingTextGenerates = {};
+  var textGenerateSeq = 0;
+  // ST chat-completions 兼容：按显式 messages 请求模型，不落主聊天楼层。
+  function requestGenerateText(messages, maxTokens, signal){
+    if (!CAP_ACTIONS) {
+      return Promise.reject(new Error(CODE_READ_ONLY));
+    }
+    var id = 't' + (++textGenerateSeq);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete pendingTextGenerates[id];
+        reject(new Error('flyai-generate-timeout'));
+      }, 180000);
+      pendingTextGenerates[id] = { resolve: resolve, reject: reject, timer: timer };
+      if (signal && typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', function(){
+          var pending = pendingTextGenerates[id];
+          if (!pending) return;
+          delete pendingTextGenerates[id];
+          clearTimeout(timer);
+          reject(new Error('aborted'));
+        }, { once: true });
+      }
+      try {
+        HOST.postMessage({
+          v: VERSION,
+          type: GENERATE_TEXT_EVENT,
+          id: id,
+          messages: clone(Array.isArray(messages) ? messages : []),
+          max_tokens: Number(maxTokens) || 0
+        }, '*');
+      } catch (e) {
+        clearTimeout(timer);
+        delete pendingTextGenerates[id];
+        reject(e);
+      }
+    });
+  }
+  function settleTextGenerate(data){
+    if (!data || data.id == null) return;
+    var item = pendingTextGenerates[data.id];
+    if (!item) return;
+    delete pendingTextGenerates[data.id];
+    clearTimeout(item.timer);
+    if (data.ok) item.resolve(String(data.text || ''));
+    else item.reject(new Error(String(data.error || 'generate-failed')));
+  }
   function uninjectPrompts(ids){
     var list = Array.isArray(ids) ? ids.map(String) : [];
     try {
@@ -2568,6 +2626,39 @@ export const buildCardAppShim = (
     }
     return out;
   }
+  // ST chat-completions 响应；卡运行时只读 choices[0].message.content。
+  function chatCompletionResponse(text, data){
+    var model = String((data && data.model) || '');
+    var payload = {
+      id: 'flyai-' + Date.now(),
+      object: 'chat.completion',
+      model: model,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: text },
+        text: text,
+        finish_reason: 'stop'
+      }]
+    };
+    if (!data || data.stream !== true) return jsonResponse(payload);
+    var chunk = function(delta, finish){
+      return 'data: ' + JSON.stringify({
+        id: payload.id,
+        object: 'chat.completion.chunk',
+        model: model,
+        choices: [{ index: 0, delta: delta, finish_reason: finish || null }]
+      }) + '\\n\\n';
+    };
+    var body = chunk({ role: 'assistant', content: text }, null) +
+      chunk({}, 'stop') + 'data: [DONE]\\n\\n';
+    if (typeof Response === 'function') {
+      return new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' }
+      });
+    }
+    return jsonResponse(payload);
+  }
   function chatApiFetch(url, init){
     var path = String(url || '');
     var data = {};
@@ -2576,6 +2667,26 @@ export const buildCardAppShim = (
       if (typeof body === 'string') data = JSON.parse(body);
       else if (body && typeof body === 'object') data = body;
     } catch (e) { data = {}; }
+    if (path.indexOf('/api/backends/chat-completions/generate') >= 0) {
+      var chatMessages = Array.isArray(data.messages) ? data.messages : [];
+      var maxTokens = Number(data.max_tokens || data.max_completion_tokens || 0) || 0;
+      var signal = init && init.signal ? init.signal : null;
+      return requestGenerateText(chatMessages, maxTokens, signal).then(function(text){
+        return chatCompletionResponse(text, data);
+      });
+    }
+    if (path.indexOf('/api/backends/chat-completions/status') >= 0) {
+      return Promise.resolve(jsonResponse([{
+        id: 'flyai',
+        name: 'FlyAI',
+        object: 'model',
+        owned_by: 'flyai'
+      }]));
+    }
+    if (path.indexOf('/api/backends/chat-completions/process') >= 0 ||
+        path.indexOf('/api/backends/chat-completions/bias') >= 0) {
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
     if (path.indexOf('/api/chats/get') >= 0) {
       return Promise.resolve(jsonResponse(chatFileData()));
     }
@@ -2656,6 +2767,7 @@ export const buildCardAppShim = (
     if (data.type === METADATA_RESULT_EVENT) { settleMetadata(data); return; }
     if (data.type === MESSAGES_RESULT_EVENT) { settleMessages(data); return; }
     if (data.type === GENERATE_RESULT_EVENT) { settleMainGenerate(data); return; }
+    if (data.type === GENERATE_TEXT_RESULT_EVENT) { settleTextGenerate(data); return; }
     if (data.type === WRITE_CTX_EVENT) { applyWriteContext(data.context); return; }
     if (data.type === DRAFT_EVENT) {
       var area = ensureComposer();
@@ -2703,6 +2815,42 @@ export const buildCardAppShim = (
 })();`
 }
 
+/**
+ * 卡文档已有 import map 时把原生模块条目并进去，避免出现第二张 map 覆盖
+ * 卡片自己的 CDN 映射。返回 `merged=false` 表示应由调用方新注入一张 map。
+ */
+const mergeNativeImportMap = (
+  doc: string,
+  entries: Record<string, string>
+): { doc: string; merged: boolean } => {
+  const re = /<script\b[^>]*\btype\s*=\s*["']importmap["'][^>]*>([\s\S]*?)<\/script>/i
+  const match = re.exec(doc)
+  if (!match) {
+    return { doc, merged: false }
+  }
+  try {
+    const parsed = JSON.parse(match[1]) as Record<string, unknown> & {
+      imports?: Record<string, string>
+    }
+    const imports: Record<string, string> = { ...(parsed.imports ?? {}) }
+    for (const [key, value] of Object.entries(entries)) {
+      if (!(key in imports)) {
+        imports[key] = value
+      }
+    }
+    const tag = `<script type="importmap">${JSON.stringify({
+      ...parsed,
+      imports,
+    }).replace(/<\//g, '<\\/')}</script>`
+    return {
+      doc: doc.slice(0, match.index) + tag + doc.slice(match.index + match[0].length),
+      merged: true,
+    }
+  } catch {
+    return { doc, merged: false }
+  }
+}
+
 export type CardAppDocOptions = {
   /** 当前消息原文（卡内脚本用 getChatMessages 读取） */
   message: string
@@ -2744,6 +2892,15 @@ export const buildCardAppDoc = (
   }
   const avatar = options.character?.avatar || ''
   const avatarOrigin = avatar ? normalizeMediaOrigin(avatar) : null
+  // 原生宿主面：卡片运行时 import 的 ST 模块走 import map；已有 map 时并入。
+  const nativeImports = buildNativeImportMapEntries()
+  const mergedMap = mergeNativeImportMap(doc, nativeImports)
+  doc = mergedMap.doc
+  const nativeImportMap = mergedMap.merged
+    ? ''
+    : `<script type="importmap">${JSON.stringify({
+        imports: nativeImports,
+      }).replace(/<\//g, '<\\/')}</script>`
   const inject =
     `<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(
       options.externalMedia === true,
@@ -2764,7 +2921,10 @@ export const buildCardAppDoc = (
       options.character,
       options.capabilities,
       options.chat
-    )}</script>`
+    )}</script>` +
+    inlineScript(ST_NATIVE_SNAPSHOT_SOURCE) +
+    inlineScript(buildEjsTemplateSource()) +
+    nativeImportMap
 
   const head = /<head\b[^>]*>/i.exec(doc)
   if (head) {

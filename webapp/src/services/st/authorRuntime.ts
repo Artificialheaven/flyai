@@ -28,6 +28,11 @@ import JQUERY_SOURCE from './vendor/jquery-3.6.0.min.js?raw'
 import LODASH_SOURCE from './vendor/lodash-4.18.1.min.js?raw'
 import ZOD_SOURCE from './vendor/zod-4.6.7.min.js?raw'
 import ST_CORE_SOURCE from './compat/stCore.js?raw'
+import { buildEjsTemplateSource } from './native/ejsRuntime.js'
+import {
+  buildNativeImportMapEntries,
+  ST_NATIVE_SNAPSHOT_SOURCE,
+} from './native/stNative.js'
 
 /** 宿主 → 卡：变量/消息快照更新 */
 export const AUTHOR_MSG_VARS = 'flyai-author-vars'
@@ -400,8 +405,11 @@ export const DAL_PHONE_RUNTIME_SOURCE = String.raw`
 })();
 `
 
-const buildImportMap = (source: string): string => {
-  const imports: Record<string, string> = {}
+const buildImportMap = (
+  source: string,
+  extras?: Record<string, string>
+): string => {
+  const imports: Record<string, string> = { ...(extras ?? {}) }
   const mvu = `data:text/javascript,${encodeURIComponent(
     'export const Mvu = globalThis.Mvu; export default Mvu;'
   )}`
@@ -1151,6 +1159,40 @@ const buildShim = ({
     }
     return out;
   }
+  // ST chat-completions 的响应形状。卡运行时（约会大作战手机）直接读
+  // choices[0].message.content；stream:true 时合成为一段完整 SSE，P1 再接真实流。
+  function chatCompletionResponse(text, data){
+    var model = String((data && data.model) || '');
+    var payload = {
+      id: 'flyai-' + Date.now(),
+      object: 'chat.completion',
+      model: model,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: text },
+        text: text,
+        finish_reason: 'stop'
+      }]
+    };
+    if (!data || data.stream !== true) return jsonResponse(payload);
+    var chunk = function(delta, finish){
+      return 'data: ' + JSON.stringify({
+        id: payload.id,
+        object: 'chat.completion.chunk',
+        model: model,
+        choices: [{ index: 0, delta: delta, finish_reason: finish || null }]
+      }) + '\\n\\n';
+    };
+    var body = chunk({ role: 'assistant', content: text }, null) +
+      chunk({}, 'stop') + 'data: [DONE]\\n\\n';
+    if (typeof Response === 'function') {
+      return new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' }
+      });
+    }
+    return jsonResponse(payload);
+  }
   function chatApiFetch(url, init){
     var path = String(url || '');
     var data = {};
@@ -1159,6 +1201,29 @@ const buildShim = ({
       if (typeof body === 'string') data = JSON.parse(body);
       else if (body && typeof body === 'object') data = body;
     } catch (e) { data = {}; }
+    if (path.indexOf('/api/backends/chat-completions/generate') >= 0) {
+      var chatMessages = Array.isArray(data.messages) ? data.messages : [];
+      var maxTokens = Number(data.max_tokens || data.max_completion_tokens || 0) || 0;
+      return requestGenerate({
+        purpose: 'phone',
+        messages: chatMessages,
+        maxTokens: maxTokens
+      }).then(function(text){
+        return chatCompletionResponse(text, data);
+      });
+    }
+    if (path.indexOf('/api/backends/chat-completions/status') >= 0) {
+      return Promise.resolve(jsonResponse([{
+        id: 'flyai',
+        name: 'FlyAI',
+        object: 'model',
+        owned_by: 'flyai'
+      }]));
+    }
+    if (path.indexOf('/api/backends/chat-completions/process') >= 0 ||
+        path.indexOf('/api/backends/chat-completions/bias') >= 0) {
+      return Promise.resolve(jsonResponse({ ok: true }));
+    }
     if (path.indexOf('/api/chats/get') >= 0) {
       return Promise.resolve(jsonResponse(chatFileData()));
     }
@@ -1196,19 +1261,6 @@ const buildShim = ({
     if (local) return local;
     var chatApi = chatApiFetch(url, init);
     if (chatApi) return chatApi;
-    // 手机作者模块通过这个酒馆内部地址请求模型；改成宿主静默生成桥。
-    if (url.indexOf('/api/backends/chat-completions/generate') >= 0) {
-      var body = {};
-      try { body = JSON.parse(String((init && init.body) || '{}')); } catch (e) { body = {}; }
-      var messages = Array.isArray(body.messages) ? body.messages : [];
-      var maxTokens = Number(body.max_tokens || body.max_completion_tokens || 0) || 0;
-      return requestGenerate({ purpose: 'phone', messages: messages, maxTokens: maxTokens }).then(function(text){
-        return jsonResponse({
-          choices: [{ message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
-          model: String(body.model || '')
-        });
-      });
-    }
     // 其余外网请求仍保持禁止（CSP connect-src 'none'）。
     if (nativeFetch) {
       try { return nativeFetch(input, init); } catch (e) { return Promise.reject(e); }
@@ -2212,7 +2264,7 @@ export const buildAuthorDoc = (options: AuthorRuntimeOptions): string => {
     canWrite: options.canWrite,
     canAct: options.canAct,
   })
-  const importMap = buildImportMap(source)
+  const importMap = buildImportMap(source, buildNativeImportMapEntries())
   const chineseFallback =
     '<div class="mes" mesid="0"><div class="mes_text"><div class="yzdj-boot">面板脚本未启动</div></div></div>'
   return `<!DOCTYPE html>
@@ -2244,11 +2296,16 @@ ${chatMarkup(options.messages, options.html) || chineseFallback}
 <script>${ZOD_SOURCE.replace(/<\/script/gi, '<\\/script')}</script>
 <script>${escapeScriptBody(ST_CORE_SOURCE)}</script>
 <script>${shim}</script>
+<script>${escapeScriptBody(ST_NATIVE_SNAPSHOT_SOURCE)}</script>
+<script>${escapeScriptBody(buildEjsTemplateSource())}</script>
 ${importMap}
 ${sources
   .map((body) => `<script type="module">${escapeScriptBody(body)}</script>`)
   .join('\n')}
-<script type="module">${escapeScriptBody(DAL_PHONE_RUNTIME_SOURCE)}</script>
+<script type="module">${escapeScriptBody(
+    // 原生宿主可用时让卡自带的运行时生效；缺失时保留卡特定覆盖做回退。
+    `if (!(window.__FLYAI_NATIVE_HOST__ && window.DALPhoneRuntime)) {\n${DAL_PHONE_RUNTIME_SOURCE}\n}`
+  )}</script>
 </body>
 </html>`
 }

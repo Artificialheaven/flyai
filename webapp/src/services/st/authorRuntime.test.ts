@@ -159,6 +159,30 @@ describe('buildAuthorDoc', () => {
     expect(() => new Function(shim as string)).not.toThrow()
   })
 
+  it('注入 ST 原生宿主面、EJS 与 import map', () => {
+    const doc = buildAuthorDoc({
+      html: '<div data-yzdj></div>',
+      author: AUTHOR,
+      messages: [{ role: 'assistant', text: 'hi' }],
+    })
+    expect(doc).toContain('__FLYAI_ST_NATIVE__')
+    expect(doc).toContain('window.EjsTemplate')
+    expect(doc).toContain('"null/script.js"')
+    expect(doc).toContain('"null/scripts/world-info.js"')
+    expect(doc).toContain('"null/scripts/openai.js"')
+    // 原生宿主可用时不安装卡特定覆盖，保留回退路径。
+    expect(doc).toContain('window.__FLYAI_NATIVE_HOST__ && window.DALPhoneRuntime')
+    const scripts = [...doc.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+      (match) => match[1]
+    )
+    const snapshot = scripts.find((source) => source.includes('__FLYAI_ST_NATIVE__'))
+    const ejs = scripts.find((source) => source.includes('window.EjsTemplate'))
+    expect(snapshot).toBeTruthy()
+    expect(ejs).toBeTruthy()
+    expect(() => new Function(snapshot as string)).not.toThrow()
+    expect(() => new Function(ejs as string)).not.toThrow()
+  })
+
   it('$(fn) 的 ready 回调同步执行（变量结构注册早于 MVU ready 事件）', () => {
     const doc = buildAuthorDoc({
       html: '<div data-yzdj></div>',

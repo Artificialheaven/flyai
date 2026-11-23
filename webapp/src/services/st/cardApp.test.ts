@@ -306,6 +306,28 @@ describe('buildCardAppDoc', () => {
     expect(doc.indexOf('getChatMessages')).toBeLessThan(doc.indexOf('textContent = "ok"'))
   })
 
+  it('注入 ST 原生快照、EJS 与 import map', () => {
+    const doc = buildCardAppDoc(APP, { message: 'hello' })
+    expect(doc).toContain('__FLYAI_ST_NATIVE__')
+    expect(doc).toContain('window.EjsTemplate')
+    expect(doc).toContain('"null/script.js"')
+    expect(doc).toContain('"null/scripts/tokenizers.js"')
+    expect(doc.indexOf('flyai-card-resize')).toBeLessThan(
+      doc.indexOf('__FLYAI_ST_NATIVE__')
+    )
+  })
+
+  it('已有 import map 时并入原生模块，不新增第二张', () => {
+    const html =
+      '<html><head><script type="importmap">' +
+      '{"imports":{"https://example.com/x.js":"data:text/javascript,export default 1"}}' +
+      '</script></head><body><div id="app"></div></body></html>'
+    const doc = buildCardAppDoc(html, { message: '' })
+    expect(doc.match(/type="importmap"/g)).toHaveLength(1)
+    expect(doc).toContain('https://example.com/x.js')
+    expect(doc).toContain('"null/script.js"')
+  })
+
   it('缺少 head 时补在 html 之后', () => {
     const doc = buildCardAppDoc('<html><body><script>1</script></body></html>', {
       message: '',

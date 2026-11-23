@@ -67,6 +67,8 @@ import {
   CARD_MSG_FETCH_RESULT,
   CARD_MSG_GENERATE,
   CARD_MSG_GENERATE_RESULT,
+  CARD_MSG_GENERATE_TEXT,
+  CARD_MSG_GENERATE_TEXT_RESULT,
   CARD_MSG_INJECT_PROMPTS,
   CARD_MSG_MESSAGE,
   CARD_MSG_MESSAGES_PATCH,
@@ -633,6 +635,65 @@ export const CardAppFrame = memo(function CardAppFrame({
     [postToCard]
   )
 
+  /**
+   * ST `/api/backends/chat-completions/generate` 兼容：卡内运行时给显式
+   * messages，宿主复用作者静默生成接口，返回文本但不写主聊天楼层。
+   */
+  const handleGenerateText = useCallback(
+    async (data: { id?: unknown; messages?: unknown; max_tokens?: unknown }) => {
+      const id = data.id
+      if (typeof id !== 'string') {
+        return
+      }
+      const reply = (payload: Record<string, unknown>) =>
+        postToCard({ type: CARD_MSG_GENERATE_TEXT_RESULT, id, ...payload })
+      const target = cardHostRef.current
+      if (!target) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const resolved = resolveCapabilities(target.features, target)
+      if (!resolved.actions) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const messages = (Array.isArray(data.messages) ? data.messages : [])
+        .filter(
+          (item): item is { role: string; content: string } =>
+            !!item &&
+            typeof item === 'object' &&
+            typeof (item as { role?: unknown }).role === 'string' &&
+            typeof (item as { content?: unknown }).content === 'string'
+        )
+        .map((item) => ({ role: item.role, content: item.content }))
+      if (messages.length === 0) {
+        reply({ ok: false, error: CARD_CODE_UNAVAILABLE })
+        return
+      }
+      const maxTokens = Math.max(0, Math.min(Number(data.max_tokens) || 0, 8192))
+      try {
+        const result = await request<{ text?: string }>(
+          `/api/sessions/${encodeURIComponent(target.sessionId)}/author/generate`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              purpose: 'phone',
+              messages,
+              max_tokens: maxTokens,
+            }),
+          }
+        )
+        reply({ ok: true, text: String(result.text ?? '') })
+      } catch (error) {
+        reply({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+    [postToCard]
+  )
+
   /** 卡片 context.generate('normal', {quiet_prompt})：生成一条 AI 楼层。 */
   const handleGenerateMain = useCallback(
     (data: { id?: unknown; quiet_prompt?: unknown }) => {
@@ -902,6 +963,10 @@ export const CardAppFrame = memo(function CardAppFrame({
         handleGenerateMain(data)
         return
       }
+      if (data.type === CARD_MSG_GENERATE_TEXT) {
+        void handleGenerateText(data)
+        return
+      }
       if (data.type === CARD_MSG_INJECT_PROMPTS) {
         const target = cardHostRef.current
         if (target) {
@@ -932,6 +997,7 @@ export const CardAppFrame = memo(function CardAppFrame({
     handleAction,
     handleFetch,
     handleGenerateMain,
+    handleGenerateText,
     handleMessagesPatch,
     handleMetadataSet,
     sendContext,
