@@ -1,7 +1,9 @@
+import vm from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import type { Message } from '../chat/types.js'
 import type { StAuthorPayload } from '../flyai/types.js'
 import {
+  DAL_PHONE_RUNTIME_SOURCE,
   adaptAuthorSource,
   adaptHtmlScripts,
   authorRuntimeMessages,
@@ -237,6 +239,85 @@ describe('buildAuthorDoc', () => {
     )
     expect(doc).toContain(
       `https://cdn.jsdelivr.net/gh/StageDog/tavern_resource@${zodSha}/dist/util/mvu_zod.js`
+    )
+  })
+})
+
+type PhoneRuntimeLike = {
+  prepareFromHost: (args: unknown) => Promise<{ messages: Array<{ role: string; content: string }> }>
+  sendPrepared: (prepared: unknown, options: unknown) => Promise<unknown>
+  responseText: (value: unknown) => string
+  capabilities: { source?: string }
+}
+
+const loadPhoneRuntime = () => {
+  const sandbox: Record<string, unknown> = {}
+  sandbox.window = sandbox
+  const context = vm.createContext(sandbox)
+  vm.runInContext(DAL_PHONE_RUNTIME_SOURCE, context)
+  return sandbox as {
+    DALPhoneRuntime: PhoneRuntimeLike
+    __flyaiGenerate?: (purpose: string, options: unknown) => Promise<string>
+  }
+}
+
+describe('DALPhoneRuntime 兼容实现', () => {
+  it('按手机预设顺序拼提示，并通过作者模型桥生成', async () => {
+    const sandbox = loadPhoneRuntime()
+    const calls: Array<{ purpose: string; messages: Array<{ role: string; content: string }> }> = []
+    sandbox.__flyaiGenerate = (purpose, options) => {
+      calls.push({
+        purpose,
+        messages: (options as { messages: Array<{ role: string; content: string }> }).messages,
+      })
+      return Promise.resolve('你好，我在。')
+    }
+    const runtime = sandbox.DALPhoneRuntime
+    expect(runtime.capabilities.source).toBe('flyai-author-bridge')
+    const prepared = await runtime.prepareFromHost({
+      preset: {
+        prompts: [
+          { id: 'main', enabled: true, role: 'system', content: '你是 {{char}}，和 {{user}} 聊天。' },
+          { id: 'charDescription', enabled: true, role: 'system', source: 'charDescription' },
+          { id: 'chatHistory', enabled: true, role: 'system', source: 'chatHistory' },
+          { id: 'replyProtocol', enabled: true, role: 'system', content: '格式 <dal_phone_reply>' },
+        ],
+      },
+      contact: { name: '十香', userName: '玩家', description: '十香资料' },
+      mainline: [],
+      phoneMessages: [{ role: 'user', content: '在吗' }],
+      currentInput: '吃了吗',
+    })
+    expect(prepared.messages.map((m) => m.content)).toEqual([
+      '你是 十香，和 玩家 聊天。',
+      '十香资料',
+      '在吗',
+      '吃了吗',
+      '格式 <dal_phone_reply>',
+    ])
+    const raw = await runtime.sendPrepared(prepared, {})
+    expect(calls).toHaveLength(1)
+    expect(calls[0].purpose).toBe('phone')
+    expect(calls[0].messages).toHaveLength(5)
+    expect(runtime.responseText(raw)).toBe(
+      '<dal_phone_reply><msg>你好，我在。</msg></dal_phone_reply>'
+    )
+  })
+
+  it('模型已返回 dal_phone_reply 时不再重复包裹', async () => {
+    const sandbox = loadPhoneRuntime()
+    sandbox.__flyaiGenerate = () =>
+      Promise.resolve('<dal_phone_reply><msg>好</msg></dal_phone_reply>')
+    const runtime = sandbox.DALPhoneRuntime
+    const prepared = await runtime.prepareFromHost({
+      preset: null,
+      contact: { name: '十香', userName: '玩家' },
+      phoneMessages: [],
+      currentInput: '在吗',
+    })
+    const raw = await runtime.sendPrepared(prepared, {})
+    expect(runtime.responseText(raw)).toBe(
+      '<dal_phone_reply><msg>好</msg></dal_phone_reply>'
     )
   })
 })

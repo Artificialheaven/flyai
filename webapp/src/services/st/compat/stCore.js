@@ -499,5 +499,223 @@
     GENERATION_ENDED: 'js_generation_ended'
   };
 
+  // ---- 沙箱 IndexedDB 桩 ----
+  // 不透明源 iframe 里 indexedDB.open 会抛 SecurityError。酒馆助手扩展常以
+  // “indexedDB 存在”作为启用日志/媒体库的条件（约会大作战小手机），之后整个
+  // 流程卡在 rejected promise 上。这里提供进程内实现（open/createObjectStore/
+  // transaction/get/put/delete/clear 常用子集），数据只在当前 iframe 生命周期内
+  // 有效；扩展刷新后会重新从聊天文件（chat_metadata.variables）回读权威状态。
+  ST.installIndexedDbShim = function (win) {
+    if (!win || !win.indexedDB) return false;
+    var databases = {};
+    var nextId = 0;
+    function defer(fn) {
+      if (typeof win.setTimeout === 'function') win.setTimeout(fn, 0);
+      else fn();
+    }
+    function abortError(message) {
+      var err = new Error(message);
+      try { err.name = 'UnknownError'; } catch (e) {}
+      return err;
+    }
+    function newRequest() {
+      return {
+        result: undefined,
+        error: null,
+        readyState: 'pending',
+        onsuccess: null,
+        onerror: null
+      };
+    }
+    function succeed(req, value) {
+      req.result = value;
+      req.readyState = 'done';
+      if (typeof req.onsuccess === 'function') req.onsuccess({ target: req });
+    }
+    function fail(req, err) {
+      req.error = err;
+      req.readyState = 'done';
+      if (typeof req.onerror === 'function') req.onerror({ target: req });
+    }
+    function cloneValue(value) {
+      if (value == null || typeof value !== 'object') return value;
+      if (typeof win.Blob === 'function' && value instanceof win.Blob) return value;
+      if (typeof win.ArrayBuffer === 'function' && value instanceof win.ArrayBuffer) {
+        return value.slice(0);
+      }
+      try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+    }
+    function storeMap(db, name) {
+      if (!db.stores[name]) db.stores[name] = {};
+      return db.stores[name];
+    }
+    function makeStore(map, queue) {
+      function op(run) {
+        var req = newRequest();
+        queue(function () {
+          try { run(req); } catch (e) { fail(req, e); }
+        });
+        return req;
+      }
+      return {
+        get: function (key) {
+          return op(function (req) {
+            var k = String(key);
+            succeed(req, Object.prototype.hasOwnProperty.call(map, k)
+              ? cloneValue(map[k])
+              : undefined);
+          });
+        },
+        put: function (value, key) {
+          return op(function (req) {
+            var k = key == null ? String(++nextId) : String(key);
+            map[k] = cloneValue(value);
+            succeed(req, k);
+          });
+        },
+        add: function (value, key) {
+          return op(function (req) {
+            var k = key == null ? String(++nextId) : String(key);
+            if (Object.prototype.hasOwnProperty.call(map, k)) {
+              fail(req, abortError('Key already exists in the object store.'));
+              return;
+            }
+            map[k] = cloneValue(value);
+            succeed(req, k);
+          });
+        },
+        delete: function (key) {
+          return op(function (req) {
+            delete map[String(key)];
+            succeed(req, undefined);
+          });
+        },
+        clear: function () {
+          return op(function (req) {
+            for (var k in map) {
+              if (Object.prototype.hasOwnProperty.call(map, k)) delete map[k];
+            }
+            succeed(req, undefined);
+          });
+        }
+      };
+    }
+    function makeTransaction(db, storeName) {
+      var tx = {
+        mode: 'readonly',
+        error: null,
+        oncomplete: null,
+        onabort: null,
+        onerror: null
+      };
+      var tasks = [];
+      var running = false;
+      var closed = false;
+      function drain() {
+        if (running || closed) return;
+        if (!tasks.length) {
+          closed = true;
+          defer(function () { if (typeof tx.oncomplete === 'function') tx.oncomplete({ target: tx }); });
+          return;
+        }
+        running = true;
+        var task = tasks.shift();
+        defer(function () {
+          try { task(); } catch (e) {}
+          running = false;
+          drain();
+        });
+      }
+      function queue(task) {
+        if (closed) return;
+        tasks.push(task);
+        drain();
+      }
+      tx.abort = function () {
+        if (closed) return;
+        closed = true;
+        tx.error = abortError('Transaction aborted.');
+        if (typeof tx.onabort === 'function') tx.onabort({ target: tx });
+      };
+      tx.objectStore = function (name) {
+        return makeStore(storeMap(db, String(name)), queue);
+      };
+      return tx;
+    }
+    function makeDatabase(name) {
+      var db = { name: name, version: 0, stores: {}, onversionchange: null };
+      db.objectStoreNames = {
+        contains: function (storeName) {
+          return !!db.stores[String(storeName)];
+        },
+        item: function (index) {
+          var keys = [];
+          for (var k in db.stores) {
+            if (Object.prototype.hasOwnProperty.call(db.stores, k)) keys.push(k);
+          }
+          return keys[index] || null;
+        }
+      };
+      db.createObjectStore = function (storeName) {
+        storeMap(db, String(storeName));
+        return {};
+      };
+      db.transaction = function (storeName) {
+        return makeTransaction(db, String(storeName));
+      };
+      db.close = function () {};
+      return db;
+    }
+    var factory = {
+      open: function (name, version) {
+        var req = newRequest();
+        var dbName = String(name);
+        var wanted = Number(version) || 1;
+        defer(function () {
+          var db = databases[dbName];
+          var created = !db;
+          if (!db) db = databases[dbName] = makeDatabase(dbName);
+          var oldVersion = db.version;
+          req.result = db;
+          if (created || oldVersion < wanted) {
+            db.version = wanted;
+            if (typeof req.onupgradeneeded === 'function') {
+              try {
+                req.onupgradeneeded({
+                  target: req,
+                  oldVersion: oldVersion,
+                  newVersion: wanted
+                });
+              } catch (e) {
+                fail(req, e);
+                return;
+              }
+            }
+          }
+          succeed(req, db);
+        });
+        return req;
+      },
+      deleteDatabase: function (name) {
+        var req = newRequest();
+        defer(function () {
+          delete databases[String(name)];
+          succeed(req, undefined);
+        });
+        return req;
+      },
+      cmp: function (a, b) {
+        if (a === b) return 0;
+        return a < b ? -1 : 1;
+      }
+    };
+    try {
+      Object.defineProperty(win, 'indexedDB', { value: factory, configurable: true });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
   globalThis.__FLYAI_ST_CORE__ = ST;
 })();

@@ -665,6 +665,8 @@ class StMessagePatch(BaseModel):
     is_hidden: Optional[bool] = None
     role: Optional[str] = None
     name: Optional[str] = None
+    # ST message.extra（如小手机的 dal_phone_source 楼层身份），saveChat 落库
+    extra: Optional[Dict] = None
 
 
 class StMessageCreate(BaseModel):
@@ -718,6 +720,12 @@ def st_patch_messages(sid: str, body: StMessagesBody, request: Request):
                 if isinstance(change.data.get("stat_data"), dict)
                 else change.data
             )
+        if change.extra is not None:
+            if not isinstance(change.extra, dict):
+                raise HTTPException(400, "extra 必须是对象")
+            if _json_size(change.extra) > _ST_MVU_MAX_BYTES:
+                raise HTTPException(413, "extra 超过 128KB 上限")
+            target.st_extra = copy.deepcopy(change.extra)
         updated.append(change.id)
     for create in body.creates:
         role = create.role if create.role in ("user", "assistant", "system") else "user"

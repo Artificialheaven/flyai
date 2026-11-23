@@ -545,6 +545,28 @@ def test_patch_messages_by_backend_id(tmp_path):
     assert msg.hidden is True
 
 
+def test_patch_messages_extra_roundtrip(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, t = _dm(store)
+    first = _append(t, "剧情楼层")
+    store.save(s)
+    out = st_patch_messages(
+        s.id,
+        StMessagesBody(changes=[
+            StMessagePatch(
+                id=first.id,
+                extra={"dal_phone_source": {"messageId": "m-a", "replyId": "r-b"}},
+            ),
+        ]),
+        request,
+    )
+    assert out["updated"] == [first.id]
+    saved = store.get(s.id)
+    assert saved.threads[0].messages[0].st_extra == {
+        "dal_phone_source": {"messageId": "m-a", "replyId": "r-b"}
+    }
+
+
 def test_create_messages_appends_extra_and_variables(tmp_path):
     _state, _sc, request, _lore, store = _env(tmp_path)
     s, _m, _t = _dm(store)

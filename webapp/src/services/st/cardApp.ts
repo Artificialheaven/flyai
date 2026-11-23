@@ -585,6 +585,17 @@ export const buildCardAppShim = (
   var INJECT_PROMPTS_EVENT = ${escapeForScript(CARD_MSG_INJECT_PROMPTS)};
   var CHAT_ID = ${escapeForScript(chat?.chatId ?? '')};
   var USER_NAME = ${escapeForScript(chat?.userName ?? '')};
+  // 酒馆每个聊天文件的 chat_metadata.integrity 是扩展识别「同一存档」的凭据
+  // （约会大作战小手机用它派生 IndexedDB 房间键）。宿主会话没有这个字段，
+  // 用稳定的会话 id 兜底，保证刷新/重建 iframe 后身份不变。
+  function ensureChatIntegrity(meta){
+    if (meta && typeof meta === 'object' && CHAT_ID &&
+        (!meta.integrity || typeof meta.integrity !== 'string')) {
+      meta.integrity = CHAT_ID;
+    }
+    return meta;
+  }
+  CHAT_METADATA = ensureChatIntegrity(CHAT_METADATA);
   var CHAT = JSON.parse(${escapeForScript(JSON.stringify(chatSeed))});
   var STCORE = globalThis.__FLYAI_ST_CORE__;
   var CODE_READ_ONLY = ${escapeForScript(CARD_CODE_READ_ONLY)};
@@ -676,6 +687,9 @@ export const buildCardAppShim = (
   }
   try { Object.defineProperty(window, 'localStorage', { value: persistentStorage('local'), configurable: true }); } catch (e) {}
   try { Object.defineProperty(window, 'sessionStorage', { value: persistentStorage('session'), configurable: true }); } catch (e) {}
+  // 沙箱内原生 indexedDB.open 抛 SecurityError；扩展只要探测到 indexedDB 存在就
+  // 启用日志/媒体库，随后整个手机流程卡死。换成进程内桩，刷新后由聊天文件回读。
+  try { if (STCORE.installIndexedDbShim) STCORE.installIndexedDbShim(window); } catch (e) {}
   // 沙箱 iframe 是 opaque origin，navigator.locks.request 会抛
   // “Access to the Locks API is denied in this context”。卡片的开场建档
   // 会先探测 navigator.locks，再走锁内世界书写入；这里换成页面内串行桩，
@@ -907,11 +921,12 @@ export const buildCardAppShim = (
         }
       }
     }
+    ensureChatIntegrity(CHAT_METADATA);
     syncChatMetadata();
   }
   function saveMetadata(){
     var id = 'm' + (++metadataSeq);
-    return new Promise(function(resolve, reject){
+    var saving = new Promise(function(resolve, reject){
       var timer = setTimeout(function(){
         delete pendingMetadata[id];
         reject(new Error('flyai-save-metadata-timeout'));
@@ -929,6 +944,12 @@ export const buildCardAppShim = (
         delete pendingMetadata[id];
         reject(e);
       }
+    });
+    return saving.then(function(value){
+      return persistChatExtras().then(
+        function(){ return value; },
+        function(){ return value; }
+      );
     });
   }
   function settleMetadata(data){
@@ -976,6 +997,40 @@ export const buildCardAppShim = (
     if (data.ok) { item.resolve(data.result); return; }
     item.reject(new Error(String(data.error || 'patch-messages-failed')));
   }
+  // 酒馆 context.saveChat/saveMetadata：扩展（小手机）会把 dal_phone_source 等
+  // 楼层身份写进 message.extra 后保存。宿主没有 jsonl 文件，这里把变化过的
+  // extra 逐条回写会话，刷新/重建 iframe 后仍能按同一分支身份对上。
+  var persistedExtras = {};
+  function persistChatExtras(){
+    if (!CAP_WRITE) return Promise.resolve(false);
+    var patches = [];
+    var staged = {};
+    for (var i = 0; i < CHAT.length; i += 1) {
+      var item = CHAT[i];
+      if (!item || !item.id) continue;
+      var extra = item.extra;
+      if (!extra || typeof extra !== 'object') continue;
+      var json;
+      try { json = JSON.stringify(extra); } catch (e) { continue; }
+      if (!json || json === '{}') continue;
+      staged[item.id] = json;
+      if (persistedExtras[item.id] === json) continue;
+      patches.push({ id: String(item.id), extra: clone(extra) });
+    }
+    if (!patches.length) return Promise.resolve(false);
+    if (patches.length > 200) patches = patches.slice(patches.length - 200);
+    return requestMessagePatch(patches).then(function(){
+      for (var id in staged) {
+        if (Object.prototype.hasOwnProperty.call(staged, id)) {
+          persistedExtras[id] = staged[id];
+        }
+      }
+      return true;
+    });
+  }
+  function saveChat(){
+    return persistChatExtras().then(function(){ return true; }, function(){ return true; });
+  }
   function applyWriteContext(context){
     var data = context && typeof context === 'object' ? context : {};
     var worldbook = data.worldbook && typeof data.worldbook === 'object' ? data.worldbook : null;
@@ -986,7 +1041,7 @@ export const buildCardAppShim = (
       ? clone(data.character)
       : {};
     if (data.chatMetadata && typeof data.chatMetadata === 'object') {
-      CHAT_METADATA = clone(data.chatMetadata);
+      CHAT_METADATA = ensureChatIntegrity(clone(data.chatMetadata));
       syncChatMetadata();
     }
   }
@@ -1650,12 +1705,14 @@ export const buildCardAppShim = (
     if (role !== 'user' && role !== 'system') role = 'assistant';
     return {
       message_id: index,
+      id: raw && raw.id ? String(raw.id) : '',
       name: String(raw && raw.name || (role === 'user' ? USER_NAME : CHAR_NAME)),
       is_user: role === 'user',
       is_system: role === 'system',
       mes: String(raw && raw.text != null ? raw.text : ''),
       swipe_id: 0,
-      extra: {},
+      extra: raw && raw.extra && typeof raw.extra === 'object' ? clone(raw.extra) : {},
+      swipe_info: Array.isArray(raw && raw.swipe_info) ? clone(raw.swipe_info) : [],
       // ST 的消息变量按 swipe 下标存放：variables[swipe_id] 是整份变量信封。
       variables: raw && raw.statData && typeof raw.statData === 'object'
         ? [{ stat_data: raw.statData }]
@@ -1671,10 +1728,27 @@ export const buildCardAppShim = (
       var cur = CHAT[j];
       // 保留已有对象（尤其 chat[0]）的引用：卡的 target() 用 === 比较开场白
       if (cur && (j === 0 || cur.is_user === next[j].is_user)) {
+        if (!cur.id && next[j].id) cur.id = next[j].id;
         cur.name = next[j].name;
         cur.is_user = next[j].is_user;
         cur.is_system = next[j].is_system;
         cur.mes = next[j].mes;
+        // ensureSourceIds 写入的楼层身份（dal_phone_source）不能因宿主快照
+        // 没有对应字段而被清掉；宿主带来的新键优先，旧键补缺。
+        var mergedExtra = next[j].extra && typeof next[j].extra === 'object'
+          ? next[j].extra : {};
+        var oldExtra = cur.extra && typeof cur.extra === 'object' ? cur.extra : {};
+        for (var ek in oldExtra) {
+          if (Object.prototype.hasOwnProperty.call(oldExtra, ek) &&
+              mergedExtra[ek] === undefined) {
+            mergedExtra[ek] = clone(oldExtra[ek]);
+          }
+        }
+        cur.extra = mergedExtra;
+        if ((!Array.isArray(cur.swipe_info) || !cur.swipe_info.length) &&
+            Array.isArray(next[j].swipe_info)) {
+          cur.swipe_info = next[j].swipe_info;
+        }
         // 宿主只提供 stat_data，无法还原卡写入的完整变量信封
         // （schema / initialized_lorebooks）。卡刚建立的楼层必须保留原信封，
         // 否则开场校验会误判为“1 楼已有其他变量记录”。
@@ -2072,7 +2146,7 @@ export const buildCardAppShim = (
   var ST_CONTEXT = {
       extensionSettings: extensionSettings,
       saveSettingsDebounced: function(){},
-      saveChat: function(){ return Promise.resolve(true); },
+      saveChat: saveChat,
       generate: generateFromComposer,
       variables: clone(VARIABLES),
       chat: CHAT,
@@ -2486,7 +2560,9 @@ export const buildCardAppShim = (
         extra: item.extra && typeof item.extra === 'object' ? clone(item.extra) : {},
         swipe_id: typeof item.swipe_id === 'number' ? item.swipe_id : 0,
         swipes: Array.isArray(item.swipes) ? clone(item.swipes) : [text],
-        swipes_info: [{}],
+        swipe_info: Array.isArray(item.swipe_info) && item.swipe_info.length
+          ? clone(item.swipe_info)
+          : [{}],
         variables: Array.isArray(item.variables) ? clone(item.variables) : [{}]
       });
     }
@@ -2507,7 +2583,7 @@ export const buildCardAppShim = (
       var chat = data.chat;
       if (Array.isArray(chat) && chat[0] && chat[0].chat_metadata &&
           typeof chat[0].chat_metadata === 'object') {
-        CHAT_METADATA = clone(chat[0].chat_metadata);
+        CHAT_METADATA = ensureChatIntegrity(clone(chat[0].chat_metadata));
         syncChatMetadata();
         if (CAP_WRITE) saveMetadata().catch(function(){});
       }
@@ -2557,7 +2633,7 @@ export const buildCardAppShim = (
           ST_CONTEXT.chatId = CHAT_ID;
           ST_CONTEXT.name1 = USER_NAME;
           if (data.chat.metadata && typeof data.chat.metadata === 'object') {
-            CHAT_METADATA = clone(data.chat.metadata);
+            CHAT_METADATA = ensureChatIntegrity(clone(data.chat.metadata));
           }
           ST_CONTEXT.chatMetadata = CHAT_METADATA;
         }
@@ -2572,7 +2648,7 @@ export const buildCardAppShim = (
     if (data.type === ACTION_RESULT_EVENT) { settleAction(data); return; }
     if (data.type === METADATA_EVENT) {
       if (data.metadata && typeof data.metadata === 'object') {
-        CHAT_METADATA = clone(data.metadata);
+        CHAT_METADATA = ensureChatIntegrity(clone(data.metadata));
         syncChatMetadata();
       }
       return;

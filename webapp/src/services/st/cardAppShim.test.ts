@@ -712,6 +712,22 @@ describe('buildCardAppShim', () => {
     await expect(generated).resolves.toBe(true)
   })
 
+  it('chat_metadata.integrity：缺失时用 chatId 兜底，供扩展识别存档身份', () => {
+    const { sandbox } = makeSandbox('开场白', null, null, null, {
+      chatId: 'chat-1',
+      userName: '玩家',
+      characterName: '角色甲',
+      messages: [],
+      metadata: {},
+    })
+    const context = (
+      sandbox.SillyTavern as {
+        getContext: () => { chatMetadata: Record<string, unknown> | null }
+      }
+    ).getContext()
+    expect(context.chatMetadata?.integrity).toBe('chat-1')
+  })
+
   it('聊天镜像：宿主更新保留 chat[0] 引用与 extra 标记', () => {
     const { sandbox, emitMessage } = makeSandbox(
       '开场白',
@@ -1233,12 +1249,13 @@ describe('L4 授权能力', () => {
     const context = (
       sandbox.SillyTavern as { getContext: () => { chatMetadata: unknown } }
     ).getContext()
-    expect(context.chatMetadata).toEqual({ map: { a: 1 } })
+    // integrity 由 shim 用 chatId 兜底注入，扩展据此识别同一聊天存档
+    expect(context.chatMetadata).toEqual({ map: { a: 1 }, integrity: 'c1' })
 
     const saveMetadata = sandbox.saveMetadata as () => Promise<unknown>
     const saving = saveMetadata()
     const metadataMessage = posted.find((item) => item.type === 'flyai-card-metadata-set')
-    expect(metadataMessage?.metadata).toEqual({ map: { a: 1 } })
+    expect(metadataMessage?.metadata).toEqual({ map: { a: 1 }, integrity: 'c1' })
     emitMessage({
       source: sandbox.host,
       data: {
@@ -1267,6 +1284,43 @@ describe('L4 授权能力', () => {
       },
     })
     await pending
+  })
+
+  it('write：saveChat 回写楼层 extra，未变化时不重复提交', async () => {
+    const { sandbox, posted, emitMessage } = makeSandbox('x', null, null, writeOnly, {
+      chatId: 'c1',
+      userName: '你',
+      characterName: '甲',
+      messages: [
+        { id: 'm1', role: 'assistant', text: '0 楼' },
+        { id: 'm2', role: 'user', text: '1 楼' },
+      ],
+    })
+    type Context = {
+      chat: Array<Record<string, unknown>>
+      saveChat: () => Promise<boolean>
+    }
+    const context = (sandbox.SillyTavern as { getContext: () => Context }).getContext()
+    context.chat[0].extra = { dal_phone_source: { messageId: 'a', replyId: 'b' } }
+    const first = context.saveChat()
+    const patches = posted.filter((item) => item.type === 'flyai-card-messages-patch')
+    expect(patches).toHaveLength(1)
+    expect(patches[0].changes).toEqual([
+      { id: 'm1', extra: { dal_phone_source: { messageId: 'a', replyId: 'b' } } },
+    ])
+    emitMessage({
+      source: sandbox.host,
+      data: {
+        v: 1,
+        type: 'flyai-card-messages-result',
+        id: patches[0].id,
+        ok: true,
+        result: { updated: ['m1'] },
+      },
+    })
+    await expect(first).resolves.toBe(true)
+    await expect(context.saveChat()).resolves.toBe(true)
+    expect(posted.filter((item) => item.type === 'flyai-card-messages-patch')).toHaveLength(1)
   })
 
   it('write：localStorage 写入落到 chatMetadata 保留键', () => {

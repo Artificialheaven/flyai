@@ -605,7 +605,21 @@ export const CardAppFrame = memo(function CardAppFrame({
           ok: true,
           result: { updated: result.updated ?? [], created: result.created ?? [] },
         })
-        if (changes.length > 0) {
+        // saveChat 只回写楼层 extra（如 dal_phone_source），不需要重建会话；
+        // 重建 iframe 会打断扩展紧接着的发送/校验流程。
+        const needsReload = changes.some((change) => {
+          if (!change || typeof change !== 'object') {
+            return false
+          }
+          const record = change as Record<string, unknown>
+          return (
+            record.message !== undefined ||
+            record.is_hidden !== undefined ||
+            record.data !== undefined ||
+            record.role !== undefined
+          )
+        })
+        if (needsReload) {
           void reloadSession(target.sessionId).catch(() => undefined)
         }
       } catch (err) {

@@ -256,6 +256,150 @@ const escapeScriptBody = (source: string): string =>
  *   'https://cdn.jsdelivr.net/gh/' + MVU_PATH
  * 所以除了字面量 URL，还要从 SHA 常量与 CDN 基础前缀还原出最终 URL。
  */
+/**
+ * 小手机（约会大作战）的 DALPhoneRuntime 需要真实酒馆的 `TavernHelper`、
+ * `EjsTemplate` 以及 `/script.js`、`/scripts/world-info.js` 等原生模块，
+ * 还会把请求发到 `/api/backends/chat-completions/generate`。这些在沙箱里都无法
+ * 提供，所以用同一套接口的轻量实现覆盖：按手机预设拼系统提示 + 手机历史，再走
+ * FlyAI 作者模型桥，回复统一包成 `<dal_phone_reply>` 供卡片解析。
+ */
+export const DAL_PHONE_RUNTIME_SOURCE = String.raw`
+(function(){
+  var PROTOCOL = '用当前联系人的口吻发消息，格式为 <dal_phone_reply><msg>一条消息</msg></dal_phone_reply>。每个 <msg> 是一个气泡，可用 sticker 属性发目录里的表情，可配文。不写旁白、动作或代码围栏。字面 <、>、& 转义为 &lt;、&gt;、&amp;。暂不回复就留空外层，打了字又删掉用 <typing/>。实收照片时按该次要求另附说明。';
+  var RULES = '你正在扮演 {{char}}，通过手机与 {{user}} 私聊。只依据 {{char}} 本人亲历、当场目睹、{{user}} 已告知或公开传播的事实发言，不泄露场外秘密或他人私聊。结合联系人当前的所在地、在场、活动、心情及对玩家关系，用平时的口吻与长短句节奏自然回复；不替玩家发消息。';
+  function text(value){
+    return typeof value === 'string' ? value : (value == null ? '' : String(value));
+  }
+  function fill(value, char, user){
+    return text(value).replace(/\{\{char\}\}/g, char).replace(/\{\{user\}\}/g, user);
+  }
+  function escapeXml(value){
+    return text(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function historyMessages(args){
+    var list = Array.isArray(args.phoneMessages) ? args.phoneMessages : [];
+    return list.map(function(item){
+      return {
+        role: item && item.role === 'assistant' ? 'assistant' : 'user',
+        content: text(item && (item.content != null ? item.content : item.text))
+      };
+    }).filter(function(item){ return item.content; });
+  }
+  function currentUser(args){
+    var outgoing = Array.isArray(args.outgoing) ? args.outgoing : [];
+    if (outgoing.length) {
+      return outgoing.map(function(item){ return text(item && item.text); })
+        .filter(Boolean).join('\n');
+    }
+    return text(args.currentInput);
+  }
+  function buildMessages(args){
+    args = args || {};
+    var contact = args.contact || {};
+    var char = text(contact.name);
+    var user = text(contact.userName);
+    var sources = {
+      charDescription: text(contact.description),
+      charPersonality: text(contact.personality),
+      scenario: text(contact.scenario),
+      personaDescription: text(contact.persona),
+      dialogueExamples: text(contact.examples),
+      contactMemo: text(contact.memo),
+      mainlineReference: (Array.isArray(args.mainline) ? args.mainline : []).map(function(item){
+        return text(item && (item.content != null ? item.content : item.text || item));
+      }).filter(Boolean).join('\n')
+    };
+    var history = historyMessages(args);
+    var lastUser = currentUser(args);
+    var preset = args.preset && Array.isArray(args.preset.prompts) ? args.preset : null;
+    var messages = [];
+    var inserted = false;
+    function pushHistory(){
+      if (inserted) return;
+      inserted = true;
+      for (var i = 0; i < history.length; i += 1) messages.push(history[i]);
+      if (lastUser) messages.push({ role: 'user', content: lastUser });
+    }
+    if (preset) {
+      preset.prompts.forEach(function(prompt){
+        if (!prompt || prompt.enabled === false) return;
+        var source = prompt.source || (prompt.marker ? prompt.id : null);
+        if (source === 'chatHistory') { pushHistory(); return; }
+        var body = prompt.content;
+        if (source && Object.prototype.hasOwnProperty.call(sources, source)) {
+          body = sources[source];
+        }
+        if (source === 'replyProtocol' && !body) body = PROTOCOL;
+        if (typeof body !== 'string' || !body.trim()) return;
+        messages.push({
+          role: prompt.role === 'user' ? 'user'
+            : (prompt.role === 'assistant' ? 'assistant' : 'system'),
+          content: fill(body, char, user)
+        });
+      });
+    }
+    if (!preset || !messages.length) {
+      messages.push({ role: 'system', content: fill(RULES, char, user) });
+      messages.push({ role: 'system', content: PROTOCOL });
+    }
+    if (!inserted) pushHistory();
+    if (!messages.some(function(item){ return item.role === 'user' && item.content; })) {
+      messages.push({ role: 'user', content: lastUser || '……' });
+    }
+    return messages;
+  }
+  function normalizeReply(value){
+    var body = text(value);
+    if (/<dal_phone_reply[\s>]/i.test(body)) return body;
+    var plain = body.replace(/<[^>]+>/g, '').trim();
+    return '<dal_phone_reply><msg>' + escapeXml(plain) + '</msg></dal_phone_reply>';
+  }
+  function generate(messages){
+    var run = window.__flyaiGenerate;
+    if (typeof run !== 'function') {
+      return Promise.reject(new Error('FlyAI 作者模型接口不可用，请重新打开面板。'));
+    }
+    return run('phone', { messages: messages }).then(function(value){
+      return { choices: [{ message: { role: 'assistant', content: normalizeReply(value) } }] };
+    });
+  }
+  var runtime = {
+    prepareFromHost: function(args){
+      return Promise.resolve({ messages: buildMessages(args), sentPhotos: [] });
+    },
+    prepareMemoryFromHost: function(args){
+      return Promise.resolve({
+        messages: Array.isArray(args && args.messages) ? args.messages : []
+      });
+    },
+    prepareSocialFromHost: function(args){
+      return Promise.resolve({
+        messages: Array.isArray(args && args.messages) ? args.messages : []
+      });
+    },
+    sendPrepared: function(prepared, options){
+      if (options && typeof options.guard === 'function') options.guard();
+      return generate(prepared && Array.isArray(prepared.messages) ? prepared.messages : []);
+    },
+    responseText: function(value){
+      if (typeof value === 'string') return value;
+      var choice = value && value.choices && value.choices[0];
+      if (choice) {
+        return text(choice.message && choice.message.content != null
+          ? choice.message.content : choice.text);
+      }
+      return text(value && (value.content || value.text));
+    },
+    capabilities: { phone: true, source: 'flyai-author-bridge' }
+  };
+  window.DALPhoneRuntime = runtime;
+  try {
+    window.__DAL_PHONE_RUNTIME_SHA__ =
+      '51f20c76a4d5f9a6d541e1ffc2613f0ba7962e8f9c5954053831a9f9577b0148';
+  } catch (e) {}
+})();
+`
+
 const buildImportMap = (source: string): string => {
   const imports: Record<string, string> = {}
   const mvu = `data:text/javascript,${encodeURIComponent(
@@ -434,6 +578,10 @@ const buildShim = ({
   var MSG_GENERATE_MAIN = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN)};
   var MSG_GENERATE_MAIN_RESULT = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN_RESULT)};
   var MESSAGES = JSON.parse(${escapeForScript(messageData)});
+  // 酒馆 context().chat 必须是稳定、可原地修改的数组：扩展（小手机）会把
+  // dal_phone_source 等楼层身份写进 message.extra/swipe_info，再靠 keys() 读回。
+  // 如果每次 getContext() 都重新 map 一份，赋值会丢失，发送时报“剧情楼层尚未就绪”。
+  var CHAT = [];
   var CHAT_VARIABLES = JSON.parse(${escapeForScript(chatVariables)});
   var CHARACTER = JSON.parse(${escapeForScript(characterData)});
   var WORLD = JSON.parse(${escapeForScript(worldbookData)});
@@ -441,11 +589,69 @@ const buildShim = ({
   var CHARACTER_FIELDS = WORLD.character && typeof WORLD.character === 'object' ? WORLD.character : {};
   var SESSION_ID = ${escapeForScript(sessionId ?? '')};
   var CHAT_ID = ${escapeForScript(chatId ?? sessionId ?? '')};
+  // 酒馆 chat_metadata.integrity：扩展用它识别同一聊天存档（约会大作战小手机）。
+  // 宿主没有该字段，用稳定的会话 id 兜底，刷新后保持一致。
+  function ensureChatIntegrity(meta){
+    if (meta && typeof meta === 'object' && CHAT_ID &&
+        (!meta.integrity || typeof meta.integrity !== 'string')) {
+      meta.integrity = CHAT_ID;
+    }
+    return meta;
+  }
   var USER_NAME = ${escapeForScript(userName ?? '')};
   var CAN_WRITE = ${canWrite === true};
   var CAN_ACT = ${canAct === true};
   function clone(value){
     try { return JSON.parse(JSON.stringify(value)); } catch (e) { return {}; }
+  }
+  // ST 形状的聊天镜像：保持对象引用，供 ensureSourceIds / branchKeys 原地写入。
+  function ensureChatMirror(){
+    var total = MESSAGES.length;
+    for (var i = 0; i < total; i += 1) {
+      var message = MESSAGES[i] || {};
+      var role = message.role === 'user' ? 'user'
+        : (message.role === 'system' ? 'system' : 'assistant');
+      var item = CHAT[i];
+      var text = String(message.text == null ? '' : message.text);
+      var stat = message.statData && typeof message.statData === 'object'
+        ? message.statData : null;
+      if (!item) {
+        item = CHAT[i] = {
+          message_id: i,
+          id: message.id ? String(message.id) : '',
+          name: String(message.name || (role === 'user' ? USER_NAME : CHARACTER.name)),
+          is_user: role === 'user',
+          is_system: role === 'system',
+          mes: text,
+          message: text,
+          swipe_id: 0,
+          extra: message.extra && typeof message.extra === 'object' ? clone(message.extra) : {},
+          swipe_info: [],
+          variables: [{ stat_data: clone(stat || {}) }]
+        };
+      } else {
+        item.message_id = i;
+        if (!item.id && message.id) item.id = String(message.id);
+        if (message.name) item.name = String(message.name);
+        item.is_user = role === 'user';
+        item.is_system = role === 'system';
+        item.mes = text;
+        item.message = text;
+        if (!item.extra || typeof item.extra !== 'object') item.extra = {};
+        if (message.extra && typeof message.extra === 'object') {
+          for (var k in message.extra) {
+            if (Object.prototype.hasOwnProperty.call(message.extra, k) &&
+                item.extra[k] === undefined) {
+              item.extra[k] = clone(message.extra[k]);
+            }
+          }
+        }
+        if (!Array.isArray(item.swipe_info)) item.swipe_info = [];
+        if (stat) item.variables = [{ stat_data: clone(stat) }];
+      }
+    }
+    if (CHAT.length > total) CHAT.splice(total);
+    return CHAT;
   }
   // 与卡片侧同一套：会话 chatMetadata 保留键持久化，刷新后恢复。
   function storage(kind){
@@ -485,6 +691,9 @@ const buildShim = ({
   }
   try { Object.defineProperty(window, 'localStorage', { value: storage('local'), configurable: true }); } catch (e) {}
   try { Object.defineProperty(window, 'sessionStorage', { value: storage('session'), configurable: true }); } catch (e) {}
+  // 沙箱内原生 indexedDB.open 抛 SecurityError；扩展只要探测到 indexedDB 存在就
+  // 启用日志/媒体库，随后整个手机流程卡死。换成进程内桩，刷新后由聊天文件回读。
+  try { if (STCORE.installIndexedDbShim) STCORE.installIndexedDbShim(window); } catch (e) {}
   // 沙箱 iframe 里 navigator.locks.request 会抛 SecurityError；换成页面内串行桩
   try {
     var lockChains = {};
@@ -902,27 +1111,41 @@ const buildShim = ({
   // 酒馆聊天文件接口：约会大作战手机用它核对 chat_metadata 是否真的落盘。
   // 本地没有 jsonl 文件，按 ST 形状把当前聊天镜像 + CHAT_METADATA 拼回去。
   function chatFileData(){
+    var mirror = ensureChatMirror();
+    var metadata = clone(CHAT_METADATA);
+    // 酒馆的 chat_metadata.variables 是扩展（小手机）存放 dal_phone 等存档的位置；
+    // 宿主把聊天变量映射在 MVU stat_data 上，这里合并成同一份读侧快照。
+    var flatVars = currentVariables({ type: 'chat' });
+    var storedVars = metadata.variables && typeof metadata.variables === 'object'
+      ? clone(metadata.variables) : {};
+    metadata.variables = Object.assign(
+      {},
+      flatVars && typeof flatVars === 'object' ? clone(flatVars) : {},
+      storedVars
+    );
     var out = [{
       user_name: USER_NAME,
       character_name: CHARACTER.name,
       create_date: '',
-      chat_metadata: clone(CHAT_METADATA)
+      chat_metadata: metadata
     }];
-    for (var i = 0; i < MESSAGES.length; i += 1) {
-      var item = MESSAGES[i] || {};
-      var text = String(item.text == null ? '' : item.text);
+    for (var i = 0; i < mirror.length; i += 1) {
+      var item = mirror[i] || {};
+      var text = String(item.mes == null ? '' : item.mes);
       out.push({
-        name: item.name || (item.role === 'user' ? USER_NAME : CHARACTER.name),
-        is_user: item.role === 'user',
-        is_system: item.role === 'system',
+        name: item.name || (item.is_user ? USER_NAME : CHARACTER.name),
+        is_user: !!item.is_user,
+        is_system: !!item.is_system,
         send_date: '',
         mes: text,
-        extra: {},
-        swipe_id: 0,
+        extra: item.extra && typeof item.extra === 'object' ? clone(item.extra) : {},
+        swipe_id: typeof item.swipe_id === 'number' ? item.swipe_id : 0,
         swipes: [text],
-        swipes_info: [{}],
-        variables: item.statData && typeof item.statData === 'object'
-          ? [{ stat_data: clone(item.statData) }]
+        swipe_info: Array.isArray(item.swipe_info) && item.swipe_info.length
+          ? clone(item.swipe_info)
+          : [{}],
+        variables: Array.isArray(item.variables) && item.variables.length
+          ? clone(item.variables)
           : [{}]
       });
     }
@@ -943,7 +1166,7 @@ const buildShim = ({
       var chat = data.chat;
       if (Array.isArray(chat) && chat[0] && chat[0].chat_metadata &&
           typeof chat[0].chat_metadata === 'object') {
-        CHAT_METADATA = clone(chat[0].chat_metadata);
+        CHAT_METADATA = ensureChatIntegrity(clone(chat[0].chat_metadata));
         saveMetadata().catch(function(){});
       }
       return Promise.resolve(jsonResponse({ ok: true }));
@@ -1057,7 +1280,7 @@ const buildShim = ({
       add: function(key, delta){ return this.inc(key, delta); }
     };
   }
-  var CHAT_METADATA = ${chatMetadataData};
+  var CHAT_METADATA = ensureChatIntegrity(${chatMetadataData});
   // accountStorage：跨刷新保留账号 handle 等少量用户级键；存进会话 chatMetadata，
   // 通过 saveMetadata 落库（容量小，不做大数据缓存）。
   function accountStorage(){
@@ -1172,19 +1395,7 @@ const buildShim = ({
       characterId: 0,
       chatId: CHAT_ID,
       groupId: null,
-      chat: MESSAGES.map(function(message, index){
-        return {
-          message_id: index,
-          mes: String(message.text || ''),
-          message: String(message.text || ''),
-          name: message.name || (message.role === 'user' ? USER_NAME : CHARACTER.name),
-          is_user: message.role === 'user',
-          is_system: false,
-          swipe_id: 0,
-          extra: {},
-          variables: [{ stat_data: clone(message.statData || {}) }]
-        };
-      }),
+      chat: ensureChatMirror(),
       chatMetadata: CHAT_METADATA,
       updateChatMetadata: updateChatMetadata,
       name1: USER_NAME,
@@ -1213,7 +1424,7 @@ const buildShim = ({
       },
       loadWorldInfo: function(name){ return Promise.resolve(clone(worldbookOf(name))); },
       saveWorldInfo: function(name, data){ return saveWorldbook(name, data); },
-      saveChat: function(){ return Promise.resolve(true); },
+      saveChat: saveChat,
       generate: contextGenerate,
       generateRaw: generateRaw,
       stopGenerationById: stopGenerationById,
@@ -1224,16 +1435,17 @@ const buildShim = ({
   function getChatHistoryDetail(files){
     var out = {};
     var name = (CHAT_ID || 'chat') + '.jsonl';
-    var list = MESSAGES.map(function(message, index){
+    var list = ensureChatMirror().map(function(item, index){
       return {
         message_id: index,
-        name: message.name || (message.role === 'user' ? USER_NAME : CHARACTER.name),
-        is_user: message.role === 'user',
-        is_system: false,
-        mes: String(message.text || ''),
-        swipe_id: 0,
-        extra: clone(message.extra || {}),
-        variables: [{ stat_data: clone(message.statData || {}) }]
+        name: item.name,
+        is_user: !!item.is_user,
+        is_system: !!item.is_system,
+        mes: String(item.mes || ''),
+        swipe_id: typeof item.swipe_id === 'number' ? item.swipe_id : 0,
+        extra: clone(item.extra || {}),
+        swipe_info: Array.isArray(item.swipe_info) ? clone(item.swipe_info) : [],
+        variables: Array.isArray(item.variables) ? clone(item.variables) : [{}]
       };
     });
     if (Array.isArray(files) && files.length) {
@@ -1284,6 +1496,7 @@ const buildShim = ({
         is_hidden: raw.is_hidden === true
       });
     }
+    ensureChatMirror();
     emit(window.tavern_events.MESSAGE_SENT, MESSAGES.length - 1);
     if (!CAN_WRITE) return Promise.resolve(created);
     // 与卡片侧一致：先把新楼层落到宿主会话，再让 generate() 基于这段上下文生成。
@@ -1293,6 +1506,7 @@ const buildShim = ({
         var row = rows[j] || {};
         if (created[j] && row.id) created[j].id = String(row.id);
         if (MESSAGES[base + j] && row.id) MESSAGES[base + j].id = String(row.id);
+        if (CHAT[base + j] && row.id) CHAT[base + j].id = String(row.id);
       }
       return created;
     });
@@ -1320,8 +1534,13 @@ const buildShim = ({
           : clone(change.data);
         patch.data = clone(change.data);
       }
+      if (change.extra && typeof change.extra === 'object') {
+        target.extra = clone(change.extra);
+        patch.extra = clone(change.extra);
+      }
       if (patch.id && Object.keys(patch).length > 1) patches.push(patch);
     }
+    ensureChatMirror();
     emit(window.tavern_events.MESSAGE_UPDATED, lastIndex());
     if (patches.length) return requestMessagePatch(patches).then(function(){ return undefined; });
     return Promise.resolve();
@@ -1330,7 +1549,11 @@ const buildShim = ({
     var list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(function(id){
       return isFinite(id) && id >= 0 && id < MESSAGES.length;
     }).sort(function(a, b){ return b - a; });
-    for (var i = 0; i < list.length; i += 1) MESSAGES.splice(list[i], 1);
+    for (var i = 0; i < list.length; i += 1) {
+      MESSAGES.splice(list[i], 1);
+      CHAT.splice(list[i], 1);
+    }
+    ensureChatMirror();
     return Promise.resolve();
   };
   window.rotateChatMessages = function(begin, middle, end, options){
@@ -1342,6 +1565,8 @@ const buildShim = ({
       .concat(MESSAGES.slice(middle, end), MESSAGES.slice(begin, middle), MESSAGES.slice(end));
     for (var i = 0; i < next.length; i += 1) MESSAGES[i] = next[i];
     MESSAGES.length = next.length;
+    CHAT.length = 0;
+    ensureChatMirror();
     return Promise.resolve();
   };
   function injectPrompts(prompts, options){
@@ -1557,7 +1782,7 @@ const buildShim = ({
 
   function saveMetadata(){
     var id = 'm' + (++metadataSeq);
-    return new Promise(function(resolve, reject){
+    var saving = new Promise(function(resolve, reject){
       var timer = setTimeout(function(){
         delete pendingMetadata[id];
         reject(new Error('flyai-save-metadata-timeout'));
@@ -1575,6 +1800,13 @@ const buildShim = ({
         delete pendingMetadata[id];
         reject(e);
       }
+    });
+    // 小手机保存手机状态时只调 saveMetadata；顺带把消息 extra（楼层身份）落库。
+    return saving.then(function(value){
+      return persistChatExtras().then(
+        function(){ return value; },
+        function(){ return value; }
+      );
     });
   }
   function settleMetadata(data){
@@ -1619,6 +1851,47 @@ const buildShim = ({
     clearTimeout(item.timer);
     if (data.ok) item.resolve(data.result);
     else item.reject(new Error(String(data.error || 'patch-messages-failed')));
+  }
+  // 扩展原地写入 message.extra（如 dal_phone_source）后，通过 saveChat /
+  // saveMetadata 落库；只提交变化过的 extra，避免每次保存都整表回写。
+  var persistedExtras = {};
+  function collectExtraPatches(){
+    var mirror = ensureChatMirror();
+    var patches = [];
+    var staged = {};
+    for (var i = 0; i < mirror.length; i += 1) {
+      var item = mirror[i];
+      if (!item || !item.id) continue;
+      var extra = item.extra;
+      if (!extra || typeof extra !== 'object') continue;
+      var json;
+      try { json = JSON.stringify(extra); } catch (e) { continue; }
+      if (!json || json === '{}') continue;
+      staged[item.id] = json;
+      if (MESSAGES[i]) MESSAGES[i].extra = clone(extra);
+      if (persistedExtras[item.id] === json) continue;
+      patches.push({ id: String(item.id), extra: clone(extra) });
+    }
+    return { patches: patches, staged: staged };
+  }
+  function persistChatExtras(){
+    if (!CAN_WRITE) return Promise.resolve(false);
+    var job = collectExtraPatches();
+    if (!job.patches.length) return Promise.resolve(false);
+    var list = job.patches.length > 200
+      ? job.patches.slice(job.patches.length - 200)
+      : job.patches;
+    return requestMessagePatch(list).then(function(){
+      for (var id in job.staged) {
+        if (Object.prototype.hasOwnProperty.call(job.staged, id)) {
+          persistedExtras[id] = job.staged[id];
+        }
+      }
+      return true;
+    });
+  }
+  function saveChat(){
+    return persistChatExtras().then(function(){ return true; }, function(){ return true; });
   }
   var pendingMainGenerates = {};
   var mainGenerateSeq = 0;
@@ -1670,6 +1943,7 @@ const buildShim = ({
       // 酒馆语义：默认按顶层键合并，未提及的命名空间保持不变。
       Object.keys(next).forEach(function(key){ CHAT_METADATA[key] = next[key]; });
     }
+    ensureChatIntegrity(CHAT_METADATA);
     var context = window.SillyTavern && window.SillyTavern.getContext
       ? window.SillyTavern.getContext() : null;
     if (context) context.chatMetadata = CHAT_METADATA;
@@ -1974,6 +2248,7 @@ ${importMap}
 ${sources
   .map((body) => `<script type="module">${escapeScriptBody(body)}</script>`)
   .join('\n')}
+<script type="module">${escapeScriptBody(DAL_PHONE_RUNTIME_SOURCE)}</script>
 </body>
 </html>`
 }

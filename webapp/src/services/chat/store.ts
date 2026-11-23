@@ -737,6 +737,20 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
     characterExtensions && typeof characterExtensions.world === 'string'
       ? characterExtensions.world.trim()
       : ''
+  // 酒馆每个聊天文件都有 chat_metadata.integrity；约会大作战小手机用它派生
+  // IndexedDB 房间键。宿主会话没有该字段，用稳定的会话 id 补上，刷新后不变。
+  const stAuthor =
+    detail.st && typeof detail.st.author === 'object'
+      ? (detail.st.author as { chat_metadata?: Record<string, unknown> | null })
+      : null
+  if (stAuthor?.chat_metadata && typeof stAuthor.chat_metadata === 'object') {
+    if (
+      typeof stAuthor.chat_metadata.integrity !== 'string' ||
+      !stAuthor.chat_metadata.integrity
+    ) {
+      stAuthor.chat_metadata.integrity = detail.id
+    }
+  }
   const writeContext = detail.st
     ? {
         worldbook: detail.world
