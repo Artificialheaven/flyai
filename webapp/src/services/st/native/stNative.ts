@@ -13,7 +13,41 @@
  * 下是 `undefined`，会以具体属性名在卡内报错，便于 P1 按卡补齐。
  */
 
+import CHEVROTAIN_SOURCE from '../vendor/chevrotain-11.0.3.min.js?raw'
+
 export const ST_NATIVE_SNAPSHOT_GLOBAL = '__FLYAI_ST_NATIVE__'
+
+/**
+ * 把 Chevrotain 的 ESM 导出子句改写成同模块内的命名空间对象。
+ *
+ * 卡内原生宏引擎要求 `lib.js` 导出真实的 `chevrotain`。若 lib 模块再静态
+ * import 一个大体积 `data:` 模块，Chrome 在沙箱 srcdoc 里动态 import lib 时
+ * 会一直挂起（静态 import 正常），所以把 Chevrotain 直接拼进 lib 模块，
+ * 只保留一层模块解析。导出子句 `export{a as A,...}` 在这里变成
+ * `const __chevrotain={A:a,...}`。
+ */
+const inlineChevrotain = (): string => {
+  const start = CHEVROTAIN_SOURCE.lastIndexOf('export{')
+  const end = start < 0 ? -1 : CHEVROTAIN_SOURCE.indexOf('}', start)
+  if (start < 0 || end < 0) {
+    throw new Error('chevrotain bundle: missing export clause')
+  }
+  const clause = CHEVROTAIN_SOURCE.slice(start + 'export{'.length, end)
+  const entries = clause
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [local, exported] = entry.split(/\s+as\s+/)
+      const name = (exported ?? local).trim()
+      return `${name}:${local.trim()}`
+    })
+  return (
+    CHEVROTAIN_SOURCE.slice(0, start) +
+    `const __chevrotain={${entries.join(',')}};` +
+    CHEVROTAIN_SOURCE.slice(end + 1)
+  )
+}
 
 const DATA_URL_PREFIX = 'data:text/javascript,'
 
@@ -344,6 +378,8 @@ export function searchCharByName() {
 
 // ── lib.js ───────────────────────────────────────────────────────────────
 const LIB_SOURCE =
+  inlineChevrotain() +
+  '\n' +
   MODULE_HEADER +
   String.raw`function minimalLodash() {
   const isObject = (v) => v != null && typeof v === 'object';
@@ -528,7 +564,8 @@ export const showdown = globalThis.showdown || null;
 export const localforage = globalThis.localforage || null;
 export const Fuse = globalThis.Fuse || null;
 export const hljs = globalThis.hljs || null;
-export const chevrotain = null;
+// 卡内原生宏引擎要求真实 Chevrotain（Lexer/CstParser/createToken）。
+export const chevrotain = __chevrotain;
 export const sha256 = null;
 export const gzipSync = null;
 export const gzip = null;

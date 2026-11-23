@@ -78,6 +78,17 @@ describe('ST 原生模块 import map', () => {
     expect(ST_NATIVE_MODULE_PATHS).toHaveLength(10)
   })
 
+  it('lib.js 内联真实 Chevrotain 供原生宏解析器使用', () => {
+    const source = decodeURIComponent(
+      buildNativeModuleUrl('lib.js').slice('data:text/javascript,'.length)
+    )
+    expect(source).toContain('const __chevrotain={')
+    expect(source).toContain('CstParser:')
+    expect(source).toContain('Lexer:')
+    expect(source).toContain('createToken:')
+    expect(source).toContain('export const chevrotain = __chevrotain')
+  })
+
   it('script.js 模块从快照读状态并实现预算函数', () => {
     const url = buildNativeModuleUrl('script.js')
     expect(url).toMatch(/^data:text\/javascript,/)
