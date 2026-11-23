@@ -865,6 +865,29 @@ class ChatRequest(BaseModel):
 _SAFE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+
+def _prompt_anchor(history) -> str:
+    for msg in reversed(history or []):
+        if getattr(msg, "role", "") == "user" and getattr(msg, "id", ""):
+            return str(msg.id)
+    return ""
+
+
+def _make_prompt_capture(state, sc, session_id: str, history):
+    """真实提示词归档：把本轮每次 provider 请求按锚点用户消息落盘。"""
+    anchor = _prompt_anchor(history)
+    if not anchor:
+        return None
+    from ..prompt_archive import append_call
+
+    def capture(kind, messages, tools, params):
+        append_call(
+            getattr(state, "data_dir", None), sc.uid, session_id,
+            anchor, kind, messages, tools, params,
+        )
+
+    return capture
+
 def _claim_user_message_id(req, messages) -> str:
     """取客户端预生成的消息 id；非法或已存在时退回服务端随机 id。
 
@@ -1580,6 +1603,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
             done_data = None
             async for (ev, data) in run_agent_loop(
                 history=session.messages,
+                prompt_capture=_make_prompt_capture(state, sc, session.id, session.messages),
                 provider=provider,
                 registry=state.registry,
                 settings=eff_tools,
@@ -2490,6 +2514,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     before = len(history)
                     async for (ev, data) in run_agent_loop(
                         history=history,
+                        prompt_capture=_make_prompt_capture(state, sc, session.id, history),
                         provider=spk_provider,
                         registry=state.registry,
                         settings=loop_settings,
@@ -2977,6 +3002,7 @@ async def memory_snapshot(rid: str, request: Request,
             done_data = None
             async for (ev, data) in run_agent_loop(
                 history=snap_history,
+                prompt_capture=_make_prompt_capture(state, sc, session.id, snap_history),
                 provider=spk_provider,
                 registry=state.registry,
                 settings=snap_tools,

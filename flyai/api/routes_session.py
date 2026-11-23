@@ -226,6 +226,42 @@ def get_session(sid: str, request: Request):
     return JSONResponse(payload, headers=headers)
 
 
+@router.get("/sessions/{sid}/messages/{mid}/prompt")
+def get_message_prompt(sid: str, mid: str, request: Request):
+    """查看某条回复实际发给模型的提示词（system/history/tools/参数）。"""
+    sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
+    s = sc.store.get(sid)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    anchor = ""
+    for thread in s.threads or []:
+        ids = [m.id for m in thread.messages]
+        if mid not in ids:
+            continue
+        for msg in reversed(thread.messages[: ids.index(mid) + 1]):
+            if msg.role == "user" and msg.id:
+                anchor = msg.id
+                break
+        break
+    if not anchor:
+        for msg in reversed(s.messages or []):
+            if msg.id == mid:
+                continue
+            if msg.role == "user" and msg.id:
+                anchor = msg.id
+                break
+    from .. import prompt_archive
+
+    data = prompt_archive.load_turn(
+        getattr(request.app.state.flyai, "data_dir", None),
+        sc.uid, sid, anchor or mid,
+    )
+    if data is None:
+        raise HTTPException(404, "该消息没有提示词记录（功能上线前的历史消息不回填）")
+    return data
+
+
 @router.delete("/sessions/{sid}")
 def delete_session(sid: str, request: Request):
     sc = request.app.state.flyai.user(request)

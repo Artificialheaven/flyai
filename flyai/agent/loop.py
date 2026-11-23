@@ -324,6 +324,7 @@ async def run_agent_loop(
     macro_ctx: Optional[Dict[str, Any]] = None,
     template_prompt: Optional[Any] = None,
     quiet_prompt: str = "",
+    prompt_capture: Optional[Any] = None,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """执行 agentic 循环。history 会被原地追加 assistant/tool 消息。
 
@@ -609,6 +610,15 @@ async def run_agent_loop(
         ):
             report_msgs, _ = await build_request(loop_notice)
             report_msgs.append(Message(role="system", content=_REPORT_NUDGE))
+            if prompt_capture is not None:
+                try:
+                    prompt_capture("report", report_msgs, [], {
+                        "deep_thinking": deep_thinking,
+                        "max_tokens": max_tokens,
+                        "extra_params": extra_params,
+                    })
+                except Exception:
+                    pass
             report_parts: List[str] = []
             async for ev in provider.stream_chat(
                 report_msgs, [],
@@ -641,6 +651,15 @@ async def run_agent_loop(
         think_secs = 0.0
         think_since: Optional[float] = None
         while True:
+            if prompt_capture is not None:
+                try:
+                    prompt_capture("main", request_messages, tool_specs, {
+                        "deep_thinking": deep_thinking,
+                        "max_tokens": max_tokens,
+                        "extra_params": extra_params,
+                    })
+                except Exception:
+                    pass
             try:
                 async for ev in provider.stream_chat(
                     request_messages, tool_specs,

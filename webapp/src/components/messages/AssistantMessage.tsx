@@ -1,10 +1,11 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
 import { memo, useMemo, useState } from 'react'
-import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
+import { IconDataOutline16, IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
 import { continueReply, regenerateReply } from '../../services/chat/store.js'
+import { getMessagePrompt, type PromptArchive } from '../../services/flyai/sessions.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
 import type { RegexScript, StPanel } from '../../services/flyai/types.js'
@@ -36,6 +37,7 @@ import {
   type MessageVersions,
   type SelectMessageVersion,
 } from './BranchSwitcher.js'
+import { PromptDialog } from './PromptDialog.js'
 import styles from './AssistantMessage.module.css'
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -161,6 +163,19 @@ export const AssistantMessage = memo(function AssistantMessage({
         : []
     )
   )
+  const [promptData, setPromptData] = useState<PromptArchive | null>(null)
+  const [promptLoading, setPromptLoading] = useState(false)
+  const openPrompt = async () => {
+    if (promptLoading) return
+    setPromptLoading(true)
+    try {
+      setPromptData(await getMessagePrompt(sessionId, message.id))
+    } catch {
+      window.alert(t('promptDialogEmpty'))
+    } finally {
+      setPromptLoading(false)
+    }
+  }
   const [viewerImage, setViewerImage] = useState<ToolImage | null>(null)
   return (
     <CardAppHostContext.Provider value={cardHost}>
@@ -291,6 +306,15 @@ export const AssistantMessage = memo(function AssistantMessage({
             ) : null}
             {editable ? (
               <IconButton
+                icon={<IconDataOutline16 />}
+                tooltip={t('viewPrompt')}
+                tooltipPlacement="bottom"
+                disabled={promptLoading}
+                onClick={openPrompt}
+              />
+            ) : null}
+            {editable ? (
+              <IconButton
                 icon={<IconRefreshOutline16 />}
                 tooltip={t('regenerate')}
                 tooltipPlacement="bottom"
@@ -321,6 +345,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       {viewerImage ? (
         <ImageViewer image={viewerImage} onClose={() => setViewerImage(null)} />
       ) : null}
+      <PromptDialog data={promptData} onClose={() => setPromptData(null)} />
     </div>
     </CardAppHostContext.Provider>
   )

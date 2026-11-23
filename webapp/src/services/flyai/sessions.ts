@@ -122,3 +122,21 @@ export const switchTurnVersion = async (
     `/api/rooms/${encodeURIComponent(rid)}/threads/${encodeURIComponent(tid)}/turns/${encodeURIComponent(anchor)}`,
     { method: 'PATCH', body: JSON.stringify(index) }
   )
+export type PromptArchiveCall = {
+  kind: string
+  messages: Array<{ role: string; content?: string; name?: string; tool_calls?: unknown }>
+  tools?: Array<{ name?: string; description?: string }>
+  params?: Record<string, unknown>
+}
+
+export type PromptArchive = {
+  session_id: string
+  anchor_id: string
+  calls: PromptArchiveCall[]
+}
+
+/** 某条回复实际发给模型的 system/history/tools 快照 */
+export const getMessagePrompt = async (sid: string, mid: string): Promise<PromptArchive> =>
+  request<PromptArchive>(
+    `/api/sessions/${encodeURIComponent(sid)}/messages/${encodeURIComponent(mid)}/prompt`
+  )
