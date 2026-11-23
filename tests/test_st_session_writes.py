@@ -646,6 +646,39 @@ def test_create_messages_appends_extra_and_variables(tmp_path):
     assert msg.st_extra == {"dal_opening": {"version": 2, "id": "m1", "mode": "body"}}
     assert msg.stat_data == {"hp": 3}
     assert msg.origin == "card"
+    # 开场信封要成为会话级当前状态：面板/下一轮提示词立刻可见
+    assert saved.mvu["stat_data"] == {"hp": 3}
+
+
+def test_patch_last_message_data_updates_session_mvu(tmp_path):
+    _state, _sc, request, _lore, store = _env(tmp_path)
+    s, _m, t = _dm(store)
+    first = _append(t, "第一条")
+    first.stat_data = {"hp": 1}
+    second = _append(t, "第二条")
+    second.stat_data = {"hp": 2}
+    s.mvu = {"stat_data": {"hp": 2}}
+    store.save(s)
+
+    # 改历史楼层：只更新该楼层快照，不动会话级状态
+    st_patch_messages(
+        s.id,
+        StMessagesBody(changes=[
+            StMessagePatch(id=first.id, data={"stat_data": {"hp": 9}}),
+        ]),
+        request,
+    )
+    assert store.get(s.id).mvu["stat_data"] == {"hp": 2}
+
+    # 改最后一条：同步为当前状态
+    st_patch_messages(
+        s.id,
+        StMessagesBody(changes=[
+            StMessagePatch(id=second.id, data={"stat_data": {"hp": 5}}),
+        ]),
+        request,
+    )
+    assert store.get(s.id).mvu["stat_data"] == {"hp": 5}
 
 
 def test_create_messages_rejects_bad_extra(tmp_path):

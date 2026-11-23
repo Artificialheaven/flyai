@@ -739,6 +739,10 @@ def st_patch_messages(sid: str, body: StMessagesBody, request: Request):
                 if isinstance(change.data.get("stat_data"), dict)
                 else change.data
             )
+            # 只有最后一条楼层代表当前状态；改历史楼层不能覆盖会话级变量
+            if t.messages and target is t.messages[-1]:
+                s.mvu = dict(getattr(s, "mvu", None) or {})
+                s.mvu["stat_data"] = copy.deepcopy(target.stat_data)
         if change.extra is not None:
             if not isinstance(change.extra, dict):
                 raise HTTPException(400, "extra 必须是对象")
@@ -775,6 +779,11 @@ def st_patch_messages(sid: str, body: StMessagesBody, request: Request):
             origin="card",
         )
         t.messages.append(msg)
+        # 新建的最后一条楼层带 MVU 信封（如开场初始化）：同步会话级状态，
+        # 面板与下一轮提示词立即可见，不必等 AI 回复再写一次 UpdateVariable。
+        if stat_data is not None:
+            s.mvu = dict(getattr(s, "mvu", None) or {})
+            s.mvu["stat_data"] = copy.deepcopy(stat_data)
         created.append(
             {
                 "id": msg.id,
