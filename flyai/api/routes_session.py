@@ -89,35 +89,24 @@ def search_sessions(request: Request, q: str = "", limit: int = 50):
     except (TypeError, ValueError):
         limit = 50
     sc = request.app.state.flyai.user(request)
+    # 标题命中来自轻量摘要；消息正文由 store 的正文索引扫描（摘要里没有 messages）
+    message_hits = sc.store.message_search(query, limit * 4)
     hits = []
     for s in sc.store.list():
-        count = 0
-        snippet = ""
         title_hit = needle in (s.title or "").casefold()
-        if title_hit:
-            count += 1
-            snippet = s.title or ""
-        for m in s.messages:
-            texts = [m.content or ""]
-            if m.tombstone and m.tombstone.content:
-                texts.append(m.tombstone.content)
-            if m.name:
-                texts.append(m.name)
-            for text in texts:
-                low = text.casefold()
-                pos = low.find(needle)
-                if pos < 0:
-                    continue
-                count += low.count(needle)
-                if not snippet:
-                    start = max(0, pos - 40)
-                    end = min(len(text), pos + len(query) + 40)
-                    snippet = text[start:end].replace("\n", " ").strip()
-        if count:
-            d = _session_dict(s)
-            d["match_count"] = count
-            d["snippet"] = snippet
-            hits.append(d)
+        count = 1 if title_hit else 0
+        snippet = (s.title or "") if title_hit else ""
+        hit = message_hits.get(s.id)
+        if hit is not None:
+            count += hit[0]
+            if hit[1]:
+                snippet = hit[1]
+        if not count:
+            continue
+        d = _session_dict(s)
+        d["match_count"] = count
+        d["snippet"] = snippet
+        hits.append(d)
     # 最近更新优先（updated_at 为 ISO 字符串），再让置顶项浮到最前
     hits.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
     hits.sort(key=lambda item: bool(item.get("pinned")), reverse=True)

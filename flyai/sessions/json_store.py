@@ -160,6 +160,13 @@ class JsonSessionStore(SessionStore):
         # 只缓存列表用的轻量摘要，正文与图片每次仍从磁盘读（get 必须是最新）。
         self._summary_lock = threading.RLock()
         self._summary_cache: Dict[str, Tuple[Tuple[int, int], Optional[Dict]]] = {}
+        # 正文搜索缓存：路径 -> ((mtime_ns, size), [(原文, casefold 文本)])。
+        # 标题列表是摘要，不能做全文搜索；这里按文件缓存消息正文，首次搜索
+        # 解析一次，之后只走内存。
+        self._text_lock = threading.RLock()
+        self._text_cache: Dict[
+            str, Tuple[Tuple[int, int], Optional[List[Tuple[str, str]]]]
+        ] = {}
 
     def _path(self, sid: str) -> Path:
         # 外部 id 直接拼文件名：穿越/分隔符/.. 在这里收口（路由层另有 400 预检）
@@ -293,6 +300,83 @@ class JsonSessionStore(SessionStore):
     def _forget(self, path: Path) -> None:
         with self._summary_lock:
             self._summary_cache.pop(str(path), None)
+        with self._text_lock:
+            self._text_cache.pop(str(path), None)
+
+    @staticmethod
+    def _message_texts_from(data: Dict) -> List[Tuple[str, str]]:
+        """提取可搜索的消息文本（正文 / 墓碑 / 发言者名）。"""
+        texts: List[Tuple[str, str]] = []
+        messages = []
+        for thread in data.get("threads") or []:
+            if isinstance(thread, dict):
+                messages.extend(thread.get("messages") or [])
+        messages.extend(data.get("messages") or [])
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            candidates = [msg.get("content") or ""]
+            tombstone = msg.get("tombstone")
+            if isinstance(tombstone, dict) and tombstone.get("content"):
+                candidates.append(tombstone.get("content"))
+            if msg.get("name"):
+                candidates.append(msg.get("name"))
+            for text in candidates:
+                text = str(text)
+                if text:
+                    texts.append((text, text.casefold()))
+        return texts
+
+    def _session_texts(self, p: Path, stamp: Tuple[int, int]):
+        key = str(p)
+        with self._text_lock:
+            cached = self._text_cache.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            texts = self._message_texts_from(data)
+        except Exception:
+            texts = None
+        with self._text_lock:
+            self._text_cache[key] = (stamp, texts)
+        return texts
+
+    def message_search(self, query: str, limit: int = 200) -> Dict[str, Tuple[int, str]]:
+        needle = (query or "").casefold()
+        out: Dict[str, Tuple[int, str]] = {}
+        if not needle:
+            return out
+        live = set()
+        for p in self._dir.glob("*.json"):
+            key = str(p)
+            live.add(key)
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            texts = self._session_texts(p, (st.st_mtime_ns, st.st_size))
+            if not texts:
+                continue
+            count = 0
+            snippet = ""
+            for text, low in texts:
+                pos = low.find(needle)
+                if pos < 0:
+                    continue
+                count += low.count(needle)
+                if not snippet:
+                    start = max(0, pos - 40)
+                    end = min(len(text), pos + len(query) + 40)
+                    snippet = text[start:end].replace("\n", " ").strip()
+            if count:
+                out[p.stem] = (count, snippet)
+                if len(out) >= limit:
+                    break
+        with self._text_lock:
+            for key in [k for k in self._text_cache if k not in live]:
+                del self._text_cache[key]
+        return out
 
     def clear(self, sid: str) -> None:
         s = self.get(sid)

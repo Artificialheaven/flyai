@@ -57,11 +57,38 @@ logger = logging.getLogger("flyai")
 WEB_DIR = Path(__file__).resolve().parent / "web" / "static"
 
 
+# 已压缩/二进制类型：gzip 只会白烧 CPU，体积几乎不降
+_UNCOMPRESSIBLE_PREFIXES = (
+    "image/",
+    "audio/",
+    "video/",
+    "font/",
+    "application/zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/pdf",
+    "application/vnd.android.package-archive",
+    "application/octet-stream",
+    "application/x-7z",
+    "application/x-rar",
+)
+
+
+def _is_compressible(content_type: str) -> bool:
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    if not ct:
+        return True
+    if ct == "image/svg+xml":
+        return True
+    return not ct.startswith(_UNCOMPRESSIBLE_PREFIXES)
+
+
 class _SSESafeGZipResponder(GZipResponder):
-    """流式事件（text/event-stream）原样直通。
+    """流式事件（text/event-stream）与图片/音视频等二进制原样直通。
 
     starlette 0.41 的 GZip 会把 SSE 也压进 gzip 缓冲（GZipFile 内部要攒满一块才
     吐数据），逐帧输出会被延迟甚至憋到流结束。聊天/后台任务都靠 SSE，必须跳过。
+    图片/字体/压缩包等本身已压缩，再压一遍纯浪费 CPU。
     """
 
     _passthrough = False
@@ -69,7 +96,11 @@ class _SSESafeGZipResponder(GZipResponder):
     async def send_with_gzip(self, message):  # type: ignore[override]
         if message["type"] == "http.response.start":
             headers = Headers(raw=message["headers"])
-            if headers.get("content-type", "").startswith("text/event-stream"):
+            content_type = headers.get("content-type", "")
+            if (
+                content_type.startswith("text/event-stream")
+                or not _is_compressible(content_type)
+            ):
                 self._passthrough = True
                 await self.send(message)
                 return
@@ -609,8 +640,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         expose_headers=["X-Run-Id", "Retry-After"],
     )
 
-    # 大 JSON（会话详情、内容库列表）走 gzip；SSE 由上面的响应器跳过
-    app.add_middleware(SSEAwareGZipMiddleware, minimum_size=1024)
+    # 大 JSON（会话详情、内容库列表）走 gzip；SSE/二进制由上面的响应器跳过。
+    # level 5：对文本压缩率与 L9 几乎相同，大响应的 CPU 少一半以上。
+    app.add_middleware(
+        SSEAwareGZipMiddleware, minimum_size=1024, compresslevel=5
+    )
 
     @app.middleware("http")
     async def no_cache_app_shell(request, call_next):

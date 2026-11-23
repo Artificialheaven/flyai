@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List, Tuple
 
 from .models import Session
 
@@ -33,6 +33,13 @@ class SessionStore(ABC):
     @abstractmethod
     def save(self, session: Session) -> None:
         raise NotImplementedError
+
+    def message_search(self, query: str, limit: int = 200) -> Dict[str, Tuple[int, str]]:
+        """按消息正文/墓碑/发言者名搜索；返回 {sid: (命中数, 片段)}。
+
+        基类默认不支持（只按标题搜）；JsonSessionStore 覆盖实现。
+        """
+        return {}
 
     def save_merged(self, session: Session) -> None:
         """并发安全落盘：长跑执行期间用户的改名/置顶/改绑等元数据可能已被
