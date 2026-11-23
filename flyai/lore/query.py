@@ -218,6 +218,7 @@ class LoreQuerier:
             self.world.table if self.world else [],
         ]
         specs: List[Dict[str, Any]] = []
+        seen = set()
         from .trigger import entry_constant, entry_enabled
 
         for table in tables:
@@ -228,8 +229,13 @@ class LoreQuerier:
                     continue
                 if not (e.content or "").strip():
                     continue
+                # 角色表与世界副本可能有同一段条目：@depth 只注入一次
+                key = ((e.title or "").strip(), (e.content or "").strip())
+                if key in seen:
+                    continue
                 if r.random() * 100 >= e.probability:
                     continue
+                seen.add(key)
                 specs.append({
                     "title": e.title,
                     "content": e.content,
@@ -343,6 +349,10 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
     parts: List[str] = []
     render = _prompt_renderer(character, opts)
 
+    # 角色卡内嵌世界书与绑定世界/会话世界副本常常包含同一批条目：
+    # 常驻块按「标题+内容」只注入一次，避免同一段模板（如 let 声明）重复出现。
+    seen_pinned: set = set()
+
     def _pin(table: List[LoreEntry], label: str, *types: str) -> Optional[str]:
         return _pinned_block(
             table, label, rp,
@@ -351,6 +361,7 @@ def build_prompt(character: Optional[Character], world: Optional[World], opts: P
             user_name=(opts.user_character.name if opts.user_character else ""),
             group_names=opts.audience or [],
             position_types=set(types),
+            seen=seen_pinned,
         )
 
     if character:
@@ -494,6 +505,7 @@ def _pinned_block(
     user_name: str = "",
     group_names: Optional[List[str]] = None,
     position_types: Optional[set] = None,
+    seen: Optional[set] = None,
 ) -> Optional[str]:
     """渲染钉选条目为常驻块；无钉选返回 None。
 
@@ -521,9 +533,19 @@ def _pinned_block(
             return True
         return e.resolved_position_type in position_types
 
+    selected: List[LoreEntry] = []
+    for entry in table or []:
+        if not _selected(entry):
+            continue
+        key = ((entry.title or "").strip(), (entry.content or "").strip())
+        if seen is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        selected.append(entry)
     blocks = [
         f"『{e.title or '(无标题)'}』\n{_render(e.content or '(空内容)')}"
-        for e in (table or []) if _selected(e)
+        for e in selected
     ]
     if not blocks:
         return None

@@ -354,3 +354,39 @@ def test_build_prompt_honors_st_worldbook_positions():
     # depth 条目交给 @depth 注入，禁用条目不注入
     assert "深度块" not in prompt
     assert "禁用块" not in prompt
+
+
+def test_build_prompt_dedupes_entries_shared_by_character_and_world():
+    """角色内嵌世界书与绑定世界重复同一段模板时只能注入一次。
+
+    否则同一个常驻模板里的 `let xxx` 会在一个单元格里声明两次，
+    客户端 EJS 直接报 Identifier has already been declared。
+    """
+    from flyai.lore.models import Character, LoreEntry, World
+    from flyai.lore.query import build_system_prompt
+
+    content = "重复模板段-DEDUP"
+    entry = LoreEntry("通讯", content, pinned=True, position_type="before")
+    character = Character(name="甲", table=[entry])
+    world = World(name="书", table=[
+        LoreEntry("通讯", content, pinned=True, position_type="before"),
+    ])
+    prompt = build_system_prompt(character, world, "")
+    assert prompt.count("重复模板段-DEDUP") == 1
+
+
+def test_depth_specs_dedupe_shared_entries():
+    from flyai.lore.models import Character, LoreEntry, World
+    from flyai.lore.query import LoreQuerier
+
+    content = "深度模板-DEDUP"
+    character = Character(name="甲", table=[
+        LoreEntry("深", content, pinned=True, position="depth",
+                  position_type="at_depth"),
+    ])
+    world = World(name="书", table=[
+        LoreEntry("深", content, pinned=True, position="depth",
+                  position_type="at_depth"),
+    ])
+    specs = LoreQuerier(character, world).depth_block_specs()
+    assert len(specs) == 1
