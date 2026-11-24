@@ -7,6 +7,9 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -16,7 +19,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -146,6 +153,7 @@ public class BootService extends Service {
             } else {
                 stage("rootfs 已安装，跳过解压");
             }
+            prepareDns(rootfs);
             notify("正在启动 FlyAI…");
             stage("启动 Python 服务（PRoot）…");
             startServer(files, rootfs, prootDir);
@@ -158,6 +166,46 @@ public class BootService extends Service {
             stage("启动失败：" + error);
         } finally {
             starting = false;
+        }
+    }
+
+    /**
+     * 把设备当前 DNS 写进 rootfs 的 /etc/resolv.conf。
+     * Android 没有 glibc 可用的 resolv.conf，PRoot 里的 Ubuntu 必须自带一份；
+     * 构建机上的集群 DNS（如 10.x）在手机上不可达，会导致 httpx 名称解析失败。
+     */
+    private void prepareDns(File rootfs) {
+        List<String> servers = new ArrayList<>();
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            Network network = cm == null ? null : cm.getActiveNetwork();
+            LinkProperties props = network == null ? null : cm.getLinkProperties(network);
+            if (props != null) {
+                for (InetAddress address : props.getDnsServers()) {
+                    String ip = address.getHostAddress();
+                    if (ip != null && !ip.isEmpty() && !servers.contains(ip)) servers.add(ip);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        if (servers.isEmpty()) {
+            servers.add("223.5.5.5");
+            servers.add("119.29.29.29");
+        }
+        try {
+            File etc = new File(rootfs, "etc");
+            if (!etc.isDirectory()) etc.mkdirs();
+            try (PrintWriter out = new PrintWriter(new File(new File(rootfs, "etc"), "resolv.conf"), "UTF-8")) {
+                for (String server : servers) out.println("nameserver " + server);
+                out.println("options timeout:2 attempts:2");
+            }
+            try (PrintWriter out = new PrintWriter(new File(etc, "hosts"), "UTF-8")) {
+                out.println("127.0.0.1 localhost");
+                out.println("::1 localhost");
+            }
+            stage("DNS 已写入：" + String.join(", ", servers));
+        } catch (Exception e) {
+            stage("写入 DNS 失败：" + e);
         }
     }
 

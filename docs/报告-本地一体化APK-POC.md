@@ -102,3 +102,13 @@ APK (top.eastcloud.flyai.poc, targetSdk 28)
   进入 Web 后切换浅色状态栏与导航栏
 - 启动即申请通知权限（Android 13+），前台服务配合 PARTIAL_WAKE_LOCK 提升后台存活
 - `versionCode=5 / versionName=1.4`
+
+
+### v1.5（2026-11-24）
+
+- 修复聊天名称解析失败：构建机写入的 `/etc/resolv.conf` 是集群 DNS（10.247.3.10），
+  手机不可达。现在每次启动前从 `ConnectivityManager` 读取当前网络 DNS 写入 rootfs，
+  取不到时回退 `223.5.5.5 / 119.29.29.29`，并同步生成 `/etc/hosts`。
+- 新增 `ACCESS_NETWORK_STATE` 权限；启动控制台会打印实际写入的 DNS。
+- 已有 rootfs 无需重新解包，升级后下次启动即生效。
+- `versionCode=6 / versionName=1.5`。
