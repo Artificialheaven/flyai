@@ -101,6 +101,16 @@ jobs:
           sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/lib/libandroid-shmem.so" .poc-cache/proot/libandroid-shmem.so
           sudo chown -R "$USER:$USER" .poc-cache
 
+      # 构建完立即落缓存：后续步骤失败时也不至于白跑 30 分钟
+      - name: Save base rootfs cache
+        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .poc-cache/base
+            .poc-cache/proot
+          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v1
+
       - name: Install mobile dependencies
         run: cd mobile && npm ci
 
