@@ -279,14 +279,25 @@ public class BootService extends Service {
     private void stopServer() {
         Process current = server;
         server = null;
-        if (current != null) {
-            current.destroy();
+        if (current == null) {
+            return;
+        }
+        current.destroy();
+        try {
+            Thread.sleep(800);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (current.isAlive()) current.destroyForcibly();
+        // 等旧 proot 真正退出，避免新实例启动时还占着 proot 可执行文件
+        long deadline = System.currentTimeMillis() + 3000;
+        while (current.isAlive() && System.currentTimeMillis() < deadline) {
             try {
-                Thread.sleep(800);
+                Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                break;
             }
-            if (current.isAlive()) current.destroyForcibly();
         }
     }
 
@@ -613,12 +624,41 @@ public class BootService extends Service {
         String[] names = {"proot", "loader", "libtalloc.so.2", "libandroid-shmem.so"};
         for (String name : names) {
             File out = new File(dir, name);
+            long expected = assetSize("proot/" + name);
+            // 更新重启时旧 proot 可能仍在执行，直接写会 ETXTBSY；
+            // 大小一致就保留，否则写临时文件后 rename 原子替换。
+            if (out.isFile() && expected >= 0 && out.length() == expected) {
+                out.setExecutable(true, true);
+                continue;
+            }
+            File tmp = new File(dir, name + ".tmp");
             try (InputStream in = getAssets().open("proot/" + name);
-                 FileOutputStream os = new FileOutputStream(out)) {
+                 FileOutputStream os = new FileOutputStream(tmp)) {
                 copy(in, os);
+            }
+            if (!tmp.renameTo(out)) {
+                try (InputStream in = new java.io.FileInputStream(tmp);
+                     FileOutputStream os = new FileOutputStream(out)) {
+                    copy(in, os);
+                }
+                if (!tmp.delete()) tmp.deleteOnExit();
             }
             out.setReadable(true, true);
             out.setExecutable(true, true);
+        }
+    }
+
+    private long assetSize(String asset) {
+        try (InputStream in = getAssets().open(asset)) {
+            long total = 0;
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                total += read;
+            }
+            return total;
+        } catch (Exception e) {
+            return -1;
         }
     }
 
