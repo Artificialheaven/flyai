@@ -18,6 +18,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "config.example.json"
+# POC：config.json 不随 APK/overlay 分发；首次启动由 example 生成，
+# 升级与增量更新都保留设备上的原文件。
 
 
 class PricePeriod(BaseModel):
