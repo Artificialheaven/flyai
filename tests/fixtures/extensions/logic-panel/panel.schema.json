@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "enabled": { "type": "boolean", "title": "启用", "default": true },
+    "greeting": { "type": "string", "title": "问候语", "maxLength": 200 },
+    "limit": { "type": "integer", "title": "上限", "minimum": 1, "maximum": 100, "default": 10 },
+    "mode": { "type": "string", "title": "模式", "enum": ["a", "b"] }
+  }
+}

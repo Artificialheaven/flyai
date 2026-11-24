@@ -3,9 +3,11 @@ import clsx from 'clsx'
 import { Button } from '../base/Button.js'
 import { showToast } from '../base/toastState.js'
 import { useTranslate } from '../../i18n/index.js'
-import type { ExtensionDetail } from '../../services/extensions/types.js'
+import type { ExtensionDetail, ExtensionPanel as ExtensionPanelInfo } from '../../services/extensions/types.js'
 import * as client from '../../services/extensions/client.js'
 import { useExtensions } from '../../services/extensions/store.js'
+import { SchemaSettingsForm } from './SchemaSettingsForm.js'
+import { ExtensionPanelDialog } from './ExtensionPanelDialog.js'
 import styles from './ExtensionPanel.module.css'
 
 const levelClass = (level: string): string =>
@@ -18,7 +20,10 @@ export const ExtensionPanel = () => {
     useExtensions()
   const [detail, setDetail] = useState<ExtensionDetail | null>(null)
   const [detailName, setDetailName] = useState('')
+  const [panelInfo, setPanelInfo] = useState<ExtensionPanelInfo | null>(null)
+  const [panelOpen, setPanelOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState('')
+  const [settingsValue, setSettingsValue] = useState<Record<string, unknown>>({})
   const [busy, setBusy] = useState('')
   const [percent, setPercent] = useState(0)
   const installRef = useRef<HTMLInputElement>(null)
@@ -36,9 +41,14 @@ export const ExtensionPanel = () => {
       return
     }
     try {
-      const data = await client.getExtension(name)
+      const [data, panel] = await Promise.all([
+        client.getExtension(name),
+        client.getExtensionPanel(name).catch(() => null),
+      ])
       setDetail(data)
       setDetailName(name)
+      setPanelInfo(panel)
+      setSettingsValue((data.settings || {}) as Record<string, unknown>)
       setSettingsDraft(JSON.stringify(data.settings || {}, null, 2))
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err))
@@ -238,6 +248,26 @@ export const ExtensionPanel = () => {
                       </div>
                     </>
                   ) : null}
+                  {panelInfo?.type === 'schema' ? (
+                    <div>
+                      <div>{t('extensionsSchemaTitle')}</div>
+                      <SchemaSettingsForm
+                        schema={panelInfo.schema}
+                        value={settingsValue}
+                        onChange={(next) => {
+                          setSettingsValue(next)
+                          setSettingsDraft(JSON.stringify(next, null, 2))
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                  {panelInfo?.type === 'iframe' ? (
+                    <div className={styles.row}>
+                      <Button size="s" onClick={() => setPanelOpen(true)}>
+                        {t('extensionsOpenPanel')}
+                      </Button>
+                    </div>
+                  ) : null}
                   <div>
                     <div>{t('extensionsSettingsTitle')}</div>
                     <textarea
@@ -257,6 +287,17 @@ export const ExtensionPanel = () => {
           ))}
         </div>
       )}
+      {panelOpen && detailName ? (
+        <ExtensionPanelDialog
+          name={detailName}
+          displayName={detail?.manifest.display_name || detailName}
+          onClose={() => setPanelOpen(false)}
+          onSaved={(next) => {
+            setSettingsValue(next)
+            setSettingsDraft(JSON.stringify(next, null, 2))
+          }}
+        />
+      ) : null}
     </div>
   )
 }

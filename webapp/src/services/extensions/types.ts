@@ -95,3 +95,7 @@ export type InstallResult = {
   compat: CompatReport
   warnings: string[]
 }
+
+export type ExtensionPanel =
+  | { type: 'schema'; path: string; url: string; schema: Record<string, unknown> }
+  | { type: 'iframe'; path: string; url: string }

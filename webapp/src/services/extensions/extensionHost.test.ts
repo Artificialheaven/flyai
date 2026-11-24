@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { HOST_GLOBAL_SOURCE } from './runtime/hostShims.js'
 import { EXTENSION_MODULES, EXTENSION_MODULE_EXPORTS } from './runtime/modules.js'
 import { buildExtensionDoc } from './hostDoc.js'
+import { buildPanelDoc } from './panelDoc.js'
+import { useExtensionWidgets } from './widgets.js'
 import { hasCapability, isExtMessage, messageTooLarge } from './hostProtocol.js'
 import type { ExtensionHostState } from './types.js'
 
@@ -59,6 +61,8 @@ describe('extension host protocol', () => {
     expect(hasCapability(['chat.read'], 'chat.getMessages')).toBe(true)
     expect(hasCapability([], 'chat.getMessages')).toBe(false)
     expect(hasCapability([], 'ui.toast')).toBe(true)
+    expect(hasCapability(['ui'], 'ui.widget.register')).toBe(true)
+    expect(hasCapability([], 'ui.widget.register')).toBe(false)
   })
 })
 
@@ -129,5 +133,38 @@ describe('extension globals', () => {
     host.slash.SlashCommandParser.addCommandObject(command)
     await expect(host.executeSlash('/hello world')).resolves.toBe('hi world')
     expect(await host.executeSlash('/hello | /hello again')).toBe('hi again')
+  })
+})
+
+
+describe('L2 panel and widgets', () => {
+  it('wraps panel.html with host shims and settings', () => {
+    const doc = buildPanelDoc(
+      '<html><head><style>.x{}</style></head><body><button id="b">hi</button></body></html>',
+      {
+        state,
+        settings: { color: 'red' },
+        snapshot: { chat: [] },
+      },
+      'https://app.example'
+    )
+    expect(doc).toContain('<button id="b">hi</button>')
+    expect(doc).toContain('.x{}')
+    expect(doc).toContain('window.__FLYAI_EXT_HOST__')
+    expect(doc).toContain('connect-src \'none\'')
+    expect(doc).toContain('"color":"red"')
+  })
+
+  it('registers and replaces message widgets', () => {
+    const store = useExtensionWidgets.getState()
+    store.clearAll()
+    store.register({ ext: 'a', slot: 'message', id: 'w', label: 'Do', title: '', command: '/do' })
+    store.register({ ext: 'b', slot: 'message', id: 'w', label: 'Other', title: '', command: '/x' })
+    expect(useExtensionWidgets.getState().widgets).toHaveLength(2)
+    store.register({ ext: 'a', slot: 'message', id: 'w', label: 'Do2', title: '', command: '/do' })
+    expect(useExtensionWidgets.getState().widgets.filter((w) => w.ext === 'a')).toHaveLength(1)
+    expect(useExtensionWidgets.getState().widgets.find((w) => w.ext === 'a')?.label).toBe('Do2')
+    store.clearExt('a')
+    expect(useExtensionWidgets.getState().widgets.map((w) => w.ext)).toEqual(['b'])
   })
 })

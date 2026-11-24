@@ -180,6 +180,7 @@ def _zip_fixture(name: str) -> bytes:
     ("logic-events", None),
     ("logic-slash", "hello"),
     ("logic-settings", None),
+    ("logic-panel", None),
 ])
 def test_fixture_extensions_are_l1_loadable(tmp_path, fixture, command):
     svc = make_service(tmp_path)
@@ -193,6 +194,10 @@ def test_fixture_extensions_are_l1_loadable(tmp_path, fixture, command):
     if command:
         source = svc.store.files_dir(result.manifest.name).joinpath("index.js").read_text()
         assert f"name: '{command}'" in source
+    if fixture == "logic-panel":
+        panel = svc.panel_state(result.manifest.name)
+        assert panel and panel["type"] == "schema"
+        assert panel["schema"]["properties"]["greeting"]["type"] == "string"
 
 
 def test_dom_extension_is_l3_and_not_loadable(tmp_path):
@@ -227,3 +232,48 @@ def test_popup_extension_is_l2_but_loadable(tmp_path):
     assert result.report.level == "L2"
     svc.set_enabled("admin", "popup-fixture", True)
     assert svc.enabled_for("admin")[0]["name"] == "popup-fixture"
+
+
+def test_schema_panel_and_missing(tmp_path):
+    svc = make_service(tmp_path)
+    manifest = {
+        "display_name": "Panel Fixture",
+        "version": "1.0.0",
+        "js": "index.js",
+        "flyai": {
+            "compat": "logic",
+            "capabilities": ["settings"],
+            "panel": {"type": "schema", "schema": "panel.schema.json"},
+        },
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean", "title": "Enabled", "default": True},
+            "limit": {"type": "integer", "title": "Limit", "minimum": 1, "maximum": 100},
+            "mode": {"type": "string", "enum": ["a", "b"], "title": "Mode"},
+        },
+    }
+    data = make_zip({
+        "index.js": "export {};",
+        "panel.schema.json": json.dumps(schema),
+    }, manifest=manifest, top="panel-fixture")
+    svc.install(data, "panel-fixture")
+    panel = svc.panel_state("panel-fixture")
+    assert panel["type"] == "schema"
+    assert panel["schema"]["properties"]["limit"]["type"] == "integer"
+    assert panel["url"].endswith("/panel.schema.json")
+
+
+def test_panel_rejects_traversal(tmp_path):
+    svc = make_service(tmp_path)
+    manifest = {
+        "display_name": "Bad Panel",
+        "version": "1.0.0",
+        "js": "index.js",
+        "flyai": {"compat": "logic", "panel": {"type": "iframe", "html": "../secret.html"}},
+    }
+    data = make_zip({"index.js": "export {};"}, manifest=manifest, top="bad-panel")
+    svc.install(data, "bad-panel")
+    # manifest 解析阶段把非法路径清空，panel_state 因此不可用
+    assert svc.panel_state("bad-panel") is None

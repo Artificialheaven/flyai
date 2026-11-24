@@ -4,6 +4,7 @@ import { listWorlds, getWorld } from '../flyai/lore.js'
 import { proxyNet, writeSessionMvu } from '../flyai/st.js'
 import { request } from '../flyai/client.js'
 import { showToast } from '../../components/base/toastState.js'
+import { useExtensionWidgets } from './widgets.js'
 import type { ExtensionHostState } from './types.js'
 import { EXT_NS, EXT_VERSION, hasCapability, isExtMessage, messageTooLarge } from './hostProtocol.js'
 import type { ExtMessage } from './hostProtocol.js'
@@ -387,6 +388,19 @@ class ExtensionHostManager {
         case 'character.writeField':
           reply(undefined, { message: 'character.writeField is not supported yet' })
           return
+        case 'ui.widget.register': {
+          const slot = String(params.slot || 'message') === 'header' ? 'header' : 'message'
+          useExtensionWidgets.getState().register({
+            ext: mounted.state.name,
+            slot,
+            id: String(params.id || ''),
+            label: String(params.label || params.id || ''),
+            title: String(params.title || params.label || ''),
+            command: String(params.command || ''),
+          })
+          reply({ ok: true })
+          return
+        }
         case 'slash.register': {
           const name = String(params.name || '').replace(/^\//, '').toLowerCase()
           if (name) {
@@ -436,6 +450,19 @@ class ExtensionHostManager {
     }
   }
 
+  async runWidget(widget: { ext: string; command: string }): Promise<void> {
+    if (!widget.command) return
+    const mounted = this.mounted.get(widget.ext)
+    if (!mounted?.ready) return
+    try {
+      const result = await this.call(mounted, 'slash.execute', { text: widget.command })
+      const value = (result as { result?: unknown })?.result
+      if (value !== undefined && value !== null && String(value).length > 0) showToast(String(value))
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   async executeSlash(text: string): Promise<boolean> {
     const name = text.trim().split(/\s+/)[0].replace(/^\//, '').toLowerCase()
     const command = slashCommands.get(name)
@@ -479,6 +506,7 @@ class ExtensionHostManager {
       }
     }
     this.mounted.clear()
+    useExtensionWidgets.getState().clearAll()
     for (const pending of this.pending.values()) window.clearTimeout(pending.timer)
     this.pending.clear()
     slashCommands.clear()

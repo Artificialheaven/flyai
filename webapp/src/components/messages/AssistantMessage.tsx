@@ -38,6 +38,8 @@ import {
   type SelectMessageVersion,
 } from './BranchSwitcher.js'
 import { PromptDialog } from './PromptDialog.js'
+import { extensionHost } from '../../services/extensions/hostManager.js'
+import { useExtensionWidgets } from '../../services/extensions/widgets.js'
 import styles from './AssistantMessage.module.css'
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -163,6 +165,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         : []
     )
   )
+  const extensionWidgets = useExtensionWidgets((state) => state.widgets)
   const [promptData, setPromptData] = useState<PromptArchive | null>(null)
   const [promptLoading, setPromptLoading] = useState(false)
   const openPrompt = async () => {
@@ -300,6 +303,21 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.bottom}>
           <BranchSwitcher versions={versions} disabled={busy} onSelect={onSelectVersion} />
           <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
+            {extensionWidgets
+              .filter((widget) => widget.slot === 'message')
+              .map((widget) => (
+                <Button
+                  key={`${widget.ext}:${widget.id}`}
+                  variant="outlined"
+                  size="s"
+                  title={widget.title || widget.label}
+                  onClick={() => {
+                    void extensionHost.runWidget(widget)
+                  }}
+                >
+                  {widget.label}
+                </Button>
+              ))}
             {copyText ? <CopyButton text={copyText} /> : null}
             {responseText && !refused ? (
               <ReadAloudButton messageId={message.id} text={responseText} />

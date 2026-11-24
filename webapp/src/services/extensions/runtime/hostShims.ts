@@ -126,6 +126,7 @@ export const HOST_GLOBAL_SOURCE = String.raw`
     error: function(message){ post('log', { message: String(message), error: true }); }
   };
   window.__FLYAI_EXT_HOST__ = H;
+  window.SillyTavern = { getContext: function(){ return H.state.context || {}; } };
 
   // ---- 设置持久化 ----
   var settingsTimer = 0;
@@ -332,6 +333,30 @@ export const HOST_GLOBAL_SOURCE = String.raw`
     }
   };
   H.executeSlash = executeSlashCommandsWithOptions;
+
+  // ---- L2 挂件注册 ----
+  H.ui = {
+    registerMessageWidget: function(widget){
+      if (!widget || !widget.id) return;
+      request('ui.widget.register', {
+        slot: 'message',
+        id: String(widget.id),
+        label: String(widget.label || widget.id),
+        command: String(widget.command || ''),
+        title: String(widget.title || widget.label || '')
+      }).catch(function(){});
+    },
+    registerHeaderWidget: function(widget){
+      if (!widget || !widget.id) return;
+      request('ui.widget.register', {
+        slot: 'header',
+        id: String(widget.id),
+        label: String(widget.label || widget.id),
+        command: String(widget.command || ''),
+        title: String(widget.title || widget.label || '')
+      }).catch(function(){});
+    }
+  };
 
   // 错误上报
   window.addEventListener('error', function(event){

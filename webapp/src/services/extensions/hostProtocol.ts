@@ -42,6 +42,7 @@ export const RPC_CAPABILITIES: Record<string, string | undefined> = {
   'generate.raw': 'generate.raw',
   'prompt.setExtension': 'prompt.inject',
   'ui.toast': undefined,
+  'ui.widget.register': 'ui',
   'ui.popup': undefined,
   'net.fetch': 'net',
   'http.fetch': undefined,

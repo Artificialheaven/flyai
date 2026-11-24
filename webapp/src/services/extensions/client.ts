@@ -3,6 +3,7 @@ import type {
   ExtensionDetail,
   ExtensionHostState,
   ExtensionItem,
+  ExtensionPanel,
   InstallResult,
 } from './types.js'
 
@@ -79,3 +80,6 @@ export const putExtensionSettings = async (
 
 export const listEnabledExtensions = async (): Promise<{ extensions: ExtensionHostState[]; enabled: boolean }> =>
   request('/api/extensions/enabled')
+
+export const getExtensionPanel = async (name: string): Promise<ExtensionPanel> =>
+  request(`/api/extensions/${encodeURIComponent(name)}/panel`)

@@ -242,6 +242,19 @@ def put_extension_settings(name: str, body: SettingsBody, request: Request):
         raise HTTPException(413, str(exc))
 
 
+@router.get("/{name}/panel")
+def extension_panel(name: str, request: Request):
+    sc = _scope(request)
+    try:
+        check_safe_name(name, "扩展名称")
+    except InvalidName as exc:
+        raise HTTPException(400, str(exc))
+    panel = _svc(request).panel_state(name)
+    if panel is None:
+        raise HTTPException(404, "该扩展没有可用的 L2 面板")
+    return panel
+
+
 @router.get("/{name}/host-state")
 def extension_host_state(name: str, request: Request):
     sc = _scope(request)

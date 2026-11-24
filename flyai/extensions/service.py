@@ -128,6 +128,43 @@ class ExtensionService:
             "order": detail["order"],
         }
 
+    def panel_state(self, name: str) -> Optional[Dict[str, Any]]:
+        """L2 面板：返回 schema（JSON）或 panel.html 的 URL；文件必须存在且受限。"""
+        name = check_safe_name(name, "扩展名称")
+        manifest = self.store.manifest(name)
+        if manifest is None:
+            return None
+        panel = manifest.flyai.get("panel") if isinstance(manifest.flyai, dict) else None
+        if not isinstance(panel, dict) or not panel.get("type"):
+            return None
+        kind = str(panel.get("type"))
+        rel = str(panel.get("path") or "")
+        if kind not in ("schema", "iframe") or not rel:
+            return None
+        files = self.store.files_dir(name)
+        target = files.joinpath(*[p for p in rel.split("/") if p])
+        try:
+            resolved = target.resolve()
+            root = files.resolve()
+        except OSError:
+            return None
+        if root not in resolved.parents and resolved != root:
+            return None
+        if not resolved.is_file() or resolved.stat().st_size > 512 * 1024:
+            return None
+        base = "/scripts/extensions/third-party/%s/" % name
+        out: Dict[str, Any] = {"type": kind, "path": rel, "url": base + rel}
+        if kind == "schema":
+            import json
+            try:
+                schema = json.loads(resolved.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+            if not isinstance(schema, dict):
+                return None
+            out["schema"] = schema
+        return out
+
     def enabled_for(self, uid: str) -> List[Dict[str, Any]]:
         """按顺序返回可加载的扩展快照；依赖缺失/等级不符的写入 errors。"""
         state = self.store.user_state(uid)
