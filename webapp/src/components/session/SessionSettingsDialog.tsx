@@ -1,3 +1,4 @@
+import clsx from 'clsx'
 import { useEffect, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { useChatStore, updateSessionBinding, reloadSession } from '../../services/chat/store.js'
@@ -224,19 +225,34 @@ export const SessionSettingsDialog = ({
     <Modal
       title={t('sessionSettings')}
       closable
-      className={styles.dialog}
-      mainClassName={styles.content}
-      onClose={onClose}
+      className={clsx(
+        styles.dialog,
+        editingCopy && scopedChar ? styles.copyEditorDialog : ''
+      )}
+      mainClassName={clsx(
+        styles.content,
+        editingCopy && scopedChar ? styles.copyEditorContent : ''
+      )}
+      onClose={() => {
+        // 编辑副本是会话设置内的子视图：X / Esc / 返回键先回设置，不直接关整个弹窗
+        if (editingCopy && scopedChar) {
+          setEditingCopy(false)
+          return
+        }
+        onClose()
+      }}
       footer={
-        <div className={styles.footer}>
-          <span className={styles.spacer} />
-          <Button variant="outlined" size="m" onClick={onClose}>
-            {t('close')}
-          </Button>
-          <Button size="m" disabled={Boolean(busy)} onClick={() => void saveSettings()}>
-            {busy === 'settings' ? t('loreSaving') : t('loreSave')}
-          </Button>
-        </div>
+        editingCopy && scopedChar ? undefined : (
+          <div className={styles.footer}>
+            <span className={styles.spacer} />
+            <Button variant="outlined" size="m" onClick={onClose}>
+              {t('close')}
+            </Button>
+            <Button size="m" disabled={Boolean(busy)} onClick={() => void saveSettings()}>
+              {busy === 'settings' ? t('loreSaving') : t('loreSave')}
+            </Button>
+          </div>
+        )
       }
     >
       {editingCopy && scopedChar ? (

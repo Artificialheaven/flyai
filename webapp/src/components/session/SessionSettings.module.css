@@ -17,6 +17,18 @@
   overflow-y: auto;
 }
 
+/* 编辑会话副本时，CharacterEditor 内部依赖有确定高度的父容器
+   （flex: 1 0 0）。设置弹窗平时是 max-height 自适应高度，直接嵌编辑器
+   会被压成 0 高；这里临时给卡片一个固定高度，并让编辑器自己滚动。 */
+.copyEditorDialog {
+  height: min(680px, calc(100vh - 64px));
+  max-height: calc(100vh - 32px);
+}
+
+.copyEditorContent {
+  overflow: hidden;
+}
+
 .section {
   padding: 10px 0 14px;
   box-shadow: inset 0 1px 0 0 var(--dsw-alias-border-l2-darkmode-thin);
@@ -176,6 +188,13 @@
     max-height: calc(100vh - 24px);
     padding: 16px 16px 18px;
     border-radius: 16px 16px 0 0;
+  }
+
+  .copyEditorDialog {
+    height: calc(100vh - 40px);
+    height: calc(100dvh - 40px);
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
   }
 
   .content {
