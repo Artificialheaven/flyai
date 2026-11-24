@@ -509,6 +509,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         state.custom_runtime = CustomToolRuntime(
             data_dir, state.config.custom_tools
         )
+        from .extensions.service import ExtensionService
+
+        state.extensions = ExtensionService(
+            data_dir, getattr(state.config, "extensions", None), user_root=data_dir
+        )
         # P2 长跑状态机：先 reconcile 遗留 running，再开放新任务
         state.loop_manager = LoopManager(data_dir, state.config.loop)
         try:
@@ -673,6 +678,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_auth import router as auth_router
     from .api.routes_cdk import router as cdk_router
     from .api.routes_ext import router as ext_router
+    from .api.routes_extensions import router as extensions_router
+    from .api.routes_extensions import static_router as extensions_static_router
     from .api.routes_chat import router as chat_router
     from .api.routes_config import router as config_router
     from .api.routes_galgame import router as galgame_router
@@ -700,6 +707,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(chat_router)
     app.include_router(config_router)
     app.include_router(ext_router)
+    app.include_router(extensions_router)
+    app.include_router(extensions_static_router)
     app.include_router(galgame_router)
     app.include_router(gen_router)
     app.include_router(invite_router)

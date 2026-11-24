@@ -921,7 +921,7 @@ async def author_generate(sid: str, body: AuthorGenerateBody, request: Request):
         allowed = bool(is_admin)
     if not allowed:
         raise HTTPException(403, "作者脚本未开启")
-    if body.purpose not in ("phone", "memory", "social"):
+    if body.purpose not in ("phone", "memory", "social", "extension"):
         raise HTTPException(400, "不支持的生成用途")
     messages = [
         item for item in body.messages

@@ -1278,6 +1278,38 @@ class StNetSettings(BaseModel):
             return 600
 
 
+class ExtensionSettings(BaseModel):
+    """第三方酒馆前端扩展（L1 逻辑型）：安装、启停、能力与网络。
+
+    默认开启功能入口，但安装/更新/卸载默认只允许管理员（min_level=256）。
+    扩展代码永远在沙箱 iframe 执行，拿不到登录态与密钥。
+    """
+
+    enabled: bool = True
+    min_level: int = 256
+    user_enable_allowed: bool = True
+    max_total_bytes: int = 20 * 1024 * 1024
+    max_files: int = 500
+    max_settings_bytes: int = 1024 * 1024
+    network_enabled: bool = False
+    network_min_level: int = 256
+    allow_remote_install: bool = False
+
+    @validator("min_level", "network_min_level", pre=True)
+    def _clamp_extension_level(cls, v):  # noqa: N805
+        try:
+            return max(0, min(int(v), 256))
+        except (TypeError, ValueError):
+            return 256
+
+    @validator("max_total_bytes", "max_files", "max_settings_bytes", pre=True)
+    def _clamp_extension_limits(cls, v):  # noqa: N805
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 1
+
+
 class MvuSettings(BaseModel):
     """原生 MVU 变量系统总开关（关闭后不解析、不注入）。"""
 
@@ -1322,6 +1354,7 @@ class AppConfig(BaseModel):
     st_image: StImageSettings = StImageSettings()
     st_net: StNetSettings = StNetSettings()
     mvu: MvuSettings = MvuSettings()
+    extensions: ExtensionSettings = ExtensionSettings()
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:
