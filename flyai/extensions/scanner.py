@@ -111,12 +111,23 @@ HOST_MODULES: Dict[str, Set[str]] = {
     "scripts/slash-commands/SlashCommandParserError.js": {"SlashCommandParserError"},
 }
 
-# 依赖 ST DOM / 主页面布局的模块：加载可以尝试，但标记为 L2/L3 风险
-UI_RISK_MODULES = {
-    "scripts/popup.js",
+# 依赖 ST 主页面 DOM / 布局的模块：L3 明确不加载
+DOM_MODULES = {
     "scripts/RossAscends-mods.js",
     "scripts/dragdrop.js",
+}
+# 可以用宿主能力降级替代的模块：L2（弹窗→宿主 confirm，附件→明确报不支持）
+UI_RISK_MODULES = {
+    "scripts/popup.js",
     "scripts/chats.js",
+}
+# 这些符号一旦被 import，说明扩展会直接操作 ST DOM，按 L3 处理
+DOM_SYMBOLS = {
+    "script.js": {
+        "appendMediaToMessage", "updateMessageBlock", "processDroppedFiles",
+        "createModelIcon", "activateSendButtons", "deactivateSendButtons",
+        "cancelTtsPlay", "getMessageTimeStamp",
+    },
 }
 
 _IMPORT_RE = re.compile(
@@ -182,6 +193,7 @@ def scan_extension(files_dir: Path, manifest: ExtensionManifest) -> CompatReport
     missing_modules: Set[str] = set()
     missing_symbols: List[Dict[str, str]] = []
     ui_risk: Set[str] = set()
+    dom_risk: Set[str] = set()
 
     for path in _iter_js(files_dir):
         try:
@@ -206,6 +218,8 @@ def scan_extension(files_dir: Path, manifest: ExtensionManifest) -> CompatReport
                 continue
             available = HOST_MODULES[host]
             for symbol in symbols:
+                if symbol in DOM_SYMBOLS.get(host, set()):
+                    dom_risk.add(host)
                 if symbol not in available:
                     item["status"] = "partial"
                     if symbol not in item["missing"]:
@@ -213,6 +227,8 @@ def scan_extension(files_dir: Path, manifest: ExtensionManifest) -> CompatReport
                     missing_symbols.append({"module": host, "symbol": symbol})
             if host in UI_RISK_MODULES:
                 ui_risk.add(host)
+            if host in DOM_MODULES:
+                dom_risk.add(host)
 
     report.modules = sorted(modules.values(), key=lambda item: item["path"])
     report.missing_modules = sorted(missing_modules)
@@ -228,12 +244,11 @@ def scan_extension(files_dir: Path, manifest: ExtensionManifest) -> CompatReport
     report.missing_symbols = unique
     report.ui_risk = sorted(ui_risk)
 
-    if manifest.compat == "ui":
+    if manifest.compat == "ui" or dom_risk:
         report.level = "L3"
+        report.ui_risk = sorted(ui_risk | dom_risk)
     elif report.ui_risk:
         report.level = "L2"
-    elif report.missing_modules or report.missing_symbols:
-        report.level = "L1"
     else:
         report.level = "L1"
     return report
@@ -241,6 +256,7 @@ def scan_extension(files_dir: Path, manifest: ExtensionManifest) -> CompatReport
 
 def is_loadable(manifest: ExtensionManifest, report: CompatReport) -> bool:
     """L3 明确不加载；缺模块/符号允许加载但由管理面板提示缺口。"""
+    # L3（ST DOM 依赖）明确不加载；L2 允许加载但由管理面板提示降级。
     if manifest.compat == "ui" or report.level == "L3":
         return False
     return True

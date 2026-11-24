@@ -193,3 +193,37 @@ def test_fixture_extensions_are_l1_loadable(tmp_path, fixture, command):
     if command:
         source = svc.store.files_dir(result.manifest.name).joinpath("index.js").read_text()
         assert f"name: '{command}'" in source
+
+
+def test_dom_extension_is_l3_and_not_loadable(tmp_path):
+    svc = make_service(tmp_path)
+    manifest = {
+        "display_name": "DOM Fixture",
+        "version": "1.0.0",
+        "js": "index.js",
+        "flyai": {"compat": "logic"},
+    }
+    data = make_zip({
+        "index.js": "import { dragElement } from '../../../../scripts/RossAscends-mods.js';\ndragElement();",
+    }, manifest=manifest, top="dom-fixture")
+    result = svc.install(data, "dom-fixture")
+    assert result.report.level == "L3"
+    with pytest.raises(InstallError):
+        svc.set_enabled("admin", "dom-fixture", True)
+
+
+def test_popup_extension_is_l2_but_loadable(tmp_path):
+    svc = make_service(tmp_path)
+    manifest = {
+        "display_name": "Popup Fixture",
+        "version": "1.0.0",
+        "js": "index.js",
+        "flyai": {"compat": "logic", "capabilities": ["ui"]},
+    }
+    data = make_zip({
+        "index.js": "import { callGenericPopup, POPUP_TYPE } from '../../../../scripts/popup.js';\n",
+    }, manifest=manifest, top="popup-fixture")
+    result = svc.install(data, "popup-fixture")
+    assert result.report.level == "L2"
+    svc.set_enabled("admin", "popup-fixture", True)
+    assert svc.enabled_for("admin")[0]["name"] == "popup-fixture"
