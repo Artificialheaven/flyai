@@ -11,6 +11,10 @@ on:
         description: "POC versionName（默认 1.5）"
         required: false
         default: "1.5"
+      overlay_only:
+        description: "只生成 overlay + 清单（true，默认，日常代码更新）；改到 APK/依赖时选 false"
+        required: false
+        default: "true"
   push:
     tags:
       - "poc-*"
@@ -45,6 +49,7 @@ jobs:
           python-version: "3.9"
 
       - name: Set up Node
+        if: inputs.overlay_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -52,20 +57,24 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
 
       - name: Set up JDK 21
+        if: inputs.overlay_only != 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Android SDK
+        if: inputs.overlay_only != 'true'
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
+        if: inputs.overlay_only != 'true'
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle cache
+        if: inputs.overlay_only != 'true'
         uses: gradle/actions/setup-gradle@v4
 
       - name: Restore cached base rootfs
@@ -79,11 +88,11 @@ jobs:
           key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v3
 
       - name: Install arm64 binfmt (cache miss)
-        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        if: inputs.overlay_only != 'true' && steps.rootfs_cache.outputs.cache-hit != 'true'
         run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
       - name: Build base rootfs via Docker (cache miss)
-        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        if: inputs.overlay_only != 'true' && steps.rootfs_cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           # 用 Docker 内的完整 /dev 与 DNS（宿主 chroot 的 /dev、DNS 在 CI 上不可靠）
@@ -103,7 +112,7 @@ jobs:
 
       # 构建完立即落缓存：后续步骤失败时也不至于白跑 30 分钟
       - name: Save base rootfs cache
-        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        if: inputs.overlay_only != 'true' && steps.rootfs_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -112,9 +121,11 @@ jobs:
           key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v3
 
       - name: Install mobile dependencies
+        if: inputs.overlay_only != 'true'
         run: cd mobile && npm ci
 
       - name: Decode signing keystore
+        if: inputs.overlay_only != 'true'
         env:
           POC_KEYSTORE_B64: ${{ secrets.POC_KEYSTORE_B64 }}
         run: |
@@ -126,6 +137,7 @@ jobs:
           printf '%s' "$POC_KEYSTORE_B64" | base64 -d > mobile/poc-release.jks
 
       - name: Build POC APK
+        if: inputs.overlay_only != 'true'
         env:
           FLYAI_STORE_PASSWORD: ${{ secrets.POC_STORE_PASSWORD }}
           FLYAI_KEY_PASSWORD: ${{ secrets.POC_KEY_PASSWORD }}
@@ -141,6 +153,7 @@ jobs:
       - name: Generate OTA overlay and signed manifest
         env:
           POC_OTA_SIGNING_KEY: ${{ secrets.POC_OTA_SIGNING_KEY }}
+          OVERLAY_ONLY: ${{ inputs.overlay_only }}
         run: |
           set -euo pipefail
           if [ -z "$POC_OTA_SIGNING_KEY" ]; then
@@ -148,30 +161,42 @@ jobs:
             exit 1
           fi
           printf '%s' "$POC_OTA_SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/poc-ota.key"
-          APK=$(ls release/FlyAI-POC-arm64-v*.apk | head -1)
+          APK_ARGS=()
+          if [ "$OVERLAY_ONLY" != "true" ]; then
+            APK=$(ls release/FlyAI-POC-arm64-v*.apk | head -1)
+            APK_ARGS=(--apk "$APK")
+          fi
           python mobile/poc/build_overlay.py \
             --version-code "$POC_VERSION_CODE" \
             --version-name "$POC_VERSION_NAME" \
             --overlay-version "$POC_OVERLAY_VERSION" \
             --tag "$POC_TAG" \
             --repo-url "https://github.com/${{ github.repository }}" \
-            --apk "$APK" \
+            "${APK_ARGS[@]}" \
             --key "$RUNNER_TEMP/poc-ota.key"
 
       - name: Write job summary
         if: always()
+        env:
+          OVERLAY_ONLY: ${{ inputs.overlay_only }}
         run: |
           APK=$(ls release/FlyAI-POC-arm64-v*.apk 2>/dev/null | head -1 || true)
+          OVERLAY=$(ls release/poc-overlay-*.tar.gz 2>/dev/null | head -1 || true)
           {
-            echo "## FlyAI POC APK"
+            echo "## FlyAI POC"
             echo ""
             if [ -n "$APK" ]; then
-              echo "- 文件：\`$APK\`"
+              echo "- APK：\`$APK\`"
               echo "- 体积：$(du -h "$APK" | cut -f1)"
               echo "- SHA256：\`$(sha256sum "$APK" | cut -d' ' -f1)\`"
               echo "- versionCode=$POC_VERSION_CODE versionName=$POC_VERSION_NAME"
+            elif [ "$OVERLAY_ONLY" = "true" ]; then
+              echo "- 模式：仅 overlay（未编译 APK）"
             else
               echo "构建失败，未生成 APK。"
+            fi
+            if [ -n "$OVERLAY" ]; then
+              echo "- overlay：\`$OVERLAY\`（$(du -h "$OVERLAY" | cut -f1)）"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

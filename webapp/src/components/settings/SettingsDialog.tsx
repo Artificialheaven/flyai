@@ -593,7 +593,7 @@ const PocUpdateSetting = () => {
     ? t('pocUpdateCurrent', {
         version: info.versionName || String(info.versionCode),
         rev: info.codeRev || '—',
-      })
+      }) + (info.overlayVersion ? ` · overlay ${info.overlayVersion}` : '')
     : ''
   let description = current
   if (state === 'checking') {
