@@ -22,6 +22,7 @@ import {
   setDraftText,
   useDrafts,
 } from '../../services/chat/drafts.js'
+import { executeExtensionSlash } from '../../services/extensions/hostManager.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import { IconButton } from '../base/IconButton.js'
 import { Menu } from '../base/Menu.js'
@@ -175,13 +176,24 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   // 排队、上传中或上传失败的附件都留在输入框，全部上传成功后才能发送
   const canSend = !importingHistory && !streaming && voice.status === 'idle' && draftReady
 
-  const send = () => {
+  const send = async () => {
     if (
       useChatStore.getState().importingHistory ||
       voice.status !== 'idle' ||
       !prepareDraftMessage(getDraft(sessionId), useUploads.getState().tasks)
     ) {
       return
+    }
+    const slashText = getDraft(sessionId).text.trim()
+    if (slashText.startsWith('/')) {
+      try {
+        if (await executeExtensionSlash(slashText, sessionId || '')) {
+          setDraftText(sessionId, '')
+          return
+        }
+      } catch (error) {
+        console.warn('[extensions] slash failed', error)
+      }
     }
     // 文本与图片由提交动作读取最新快照，不使用上一次渲染的草稿；
     // 新会话需要先在后端建壳，无法同步返回结果。

@@ -18,6 +18,7 @@ import { SessionSettingsDialog } from './SessionSettingsDialog.js'
 import { StatusPanelDrawer, statusPanelAvailable } from './StatusPanel.js'
 import { ThreadTabs } from './ThreadTabs.js'
 import { CardSyncBar } from '../base/CardSyncBar.js'
+import { ExtensionHost } from '../extensions/ExtensionHost.js'
 import { TokenMeter } from './TokenMeter.js'
 import styles from './SessionView.module.css'
 
@@ -41,6 +42,7 @@ export const SessionView = ({
   const hasPanel = statusPanelAvailable(session)
   return (
     <div className={styles.view}>
+      <ExtensionHost />
       {isMobile ? (
         <MobileHeader
           title={title}
