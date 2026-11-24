@@ -36,15 +36,8 @@ docker exec "$CID" bash -c "export DEBIAN_FRONTEND=noninteractive; \
   cd /opt/flyai && python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && \
   .venv/bin/pip install -q -r requirements.txt"
 
-echo "== 本地监听配置"
-docker exec "$CID" bash -c "cd /opt/flyai && python3 - <<'PY'
-import json
-d = json.load(open('config/config.example.json'))
-d.setdefault('server', {})['host'] = '127.0.0.1'
-d['server']['port'] = 8000
-json.dump(d, open('config/config.json', 'w'), ensure_ascii=False, indent=2)
-PY
-cat > start.sh <<'SH'
+echo "== 启动脚本（config.json 不打包，首次启动自动生成，避免覆盖用户配置）"
+docker exec "$CID" bash -c "cd /opt/flyai && rm -f config/config.json && cat > start.sh <<'SH'
 #!/bin/sh
 cd /opt/flyai || exit 1
 export HOME=/root

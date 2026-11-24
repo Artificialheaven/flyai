@@ -69,15 +69,8 @@ echo "== 安装 Python 依赖"
 chroot "$ROOTFS" /bin/bash -c \
   "cd /opt/flyai && python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -r requirements.txt"
 
-echo "== 本地监听配置"
-python3 - "$ROOTFS/opt/flyai/config/config.json" <<'PY'
-import json, sys
-src = sys.argv[1].replace('config.json', 'config.example.json')
-data = json.load(open(src))
-data.setdefault('server', {})['host'] = '127.0.0.1'
-data['server']['port'] = 8000
-json.dump(data, open(sys.argv[1], 'w'), ensure_ascii=False, indent=2)
-PY
+# 不打包 config/config.json：首次启动由 load_config 从 example 生成，
+# 避免升级解包时覆盖设备上的管理员账号等用户配置。
 
 cat > "$ROOTFS/opt/flyai/start.sh" <<'EOF'
 #!/bin/sh

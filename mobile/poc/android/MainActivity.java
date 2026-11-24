@@ -533,10 +533,15 @@ public class MainActivity extends Activity {
         return out.toString();
     }
 
-    /** 停止 BootService（杀死 Python）→ 重新启动；BootService 会在启动前应用 pending。 */
+    /**
+     * 停止 BootService（杀死 Python），然后退出界面，由用户手动重新打开。
+     * 下次启动时 BootService 会先应用 pending overlay 再拉起服务，避免
+     * 重启与 WebView 重载/端口就绪之间的竞态（白屏）。
+     */
     private void restartForUpdate() {
         runOnUiThread(() -> {
-            android.widget.Toast.makeText(this, "正在应用更新…", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(this, "更新已就绪，请重新打开应用",
+                    android.widget.Toast.LENGTH_LONG).show();
             evaluateJs("window.__flyaiPocEvent&&window.__flyaiPocEvent({state:'applying'})");
         });
         new Thread(() -> {
@@ -549,32 +554,13 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            Intent boot = new Intent(this, BootService.class);
-            if (Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(boot);
-            } else {
-                startService(boot);
-            }
-            for (int i = 0; i < 360; i++) {
-                if (probe()) {
-                    runOnUiThread(() -> {
-                        if (webView != null) {
-                            webView.clearCache(true);
-                            webView.reload();
-                        }
-                    });
-                    return;
+            runOnUiThread(() -> {
+                if (webView != null) {
+                    webView.stopLoading();
+                    webView.loadUrl("about:blank");
                 }
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-            runOnUiThread(() -> android.widget.Toast.makeText(
-                    this, "更新后服务未就绪，请查看启动控制台",
-                    android.widget.Toast.LENGTH_LONG).show());
+                finishAndRemoveTask();
+            });
         }, "flyai-apply-update").start();
     }
 

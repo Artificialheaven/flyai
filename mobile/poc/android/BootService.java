@@ -170,6 +170,11 @@ public class BootService extends Service {
             boolean fresh = codeMissing && baseRev.isEmpty() && !marker.isFile();
             boolean upgrade = !fresh && (codeMissing || !ROOTFS_REV.equals(baseRev));
             if (fresh || upgrade) {
+                File keepConfig = new File(files, "update/config.json.keep");
+                if (upgrade) {
+                    // 旧 APK 的 payload 可能带一份默认 config.json，升级解包前先保留用户配置
+                    copyIfExists(new File(rootfs, "opt/flyai/config/config.json"), keepConfig);
+                }
                 if (fresh) {
                     notify("首次启动：正在解压运行环境（约 350MB）…");
                     stage("解压 rootfs（约 350MB，首次启动）…");
@@ -181,6 +186,10 @@ public class BootService extends Service {
                 }
                 try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
                     TarGzExtractor.extract(payload, rootfs);
+                }
+                if (keepConfig.isFile()) {
+                    copyIfExists(keepConfig, new File(rootfs, "opt/flyai/config/config.json"));
+                    if (!keepConfig.delete()) keepConfig.deleteOnExit();
                 }
                 new File(rootfs, "opt/flyai/data").mkdirs();
                 writeMarker(marker, ROOTFS_REV);
