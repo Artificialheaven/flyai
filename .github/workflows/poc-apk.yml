@@ -88,14 +88,26 @@ jobs:
 
       - name: Build base rootfs (cache miss)
         if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          set -euo pipefail
+          # 失败时把日志尾部写成 annotation，便于无 token 排查
+          set -uo pipefail
           WORK="$RUNNER_TEMP/poc-base"
+          LOG="$RUNNER_TEMP/rootfs-build.log"
           rm -rf "$WORK"
           mkdir -p "$WORK"
-          bash mobile/poc/fetch-proot.sh "$WORK"
-          sudo POC_APT_MIRROR=http://ports.ubuntu.com/ubuntu-ports \
-            bash mobile/poc/build-rootfs.sh "$WORK"
+          {
+            bash mobile/poc/fetch-proot.sh "$WORK"
+            sudo env POC_APT_MIRROR=http://ports.ubuntu.com/ubuntu-ports \
+              bash mobile/poc/build-rootfs.sh "$WORK"
+          } 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            while IFS= read -r line; do
+              echo "::error::${line//%/%25}"
+            done < <(tail -n 30 "$LOG")
+            exit "$rc"
+          fi
           mkdir -p .poc-cache/base .poc-cache/proot
           sudo cp "$WORK/rootfs.tar.gz" .poc-cache/base/rootfs.tar.gz
           sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/bin/proot" .poc-cache/proot/proot

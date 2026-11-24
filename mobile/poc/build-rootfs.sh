@@ -20,16 +20,33 @@ echo "== 解包 base rootfs"
 rm -rf "$ROOTFS"
 mkdir -p "$ROOTFS"
 tar xzf "$WORK/ubuntu-base.tar.gz" -C "$ROOTFS"
+# Ubuntu base 包里没有 /dev 节点，dpkg 维护脚本常重定向到 /dev/null，
+# 缺失会让 apt 安装以 100 退出。chroot 与宿主共享网络/设备命名空间。
+mkdir -p "$ROOTFS/dev"
+for spec in "null c 1 3" "zero c 1 5" "random c 1 8" "urandom c 1 9" "tty c 5 0"; do
+  set -- $spec
+  [ -e "$ROOTFS/dev/$1" ] || { mknod -m 666 "$ROOTFS/dev/$1" "$2" "$3" || true; }
+done
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
-# CI 的 systemd-resolved stub（127.0.0.53）在部分 chroot 环境不可用，给公网 DNS 兜底
+# chroot 共享网络命名空间，systemd-resolved 的 127.0.0.53 通常可达；
+# 保留它，再追加公网 DNS 兜底（部分 CI 无法直连 127.0.0.53）。
 if grep -q "127.0.0.53" "$ROOTFS/etc/resolv.conf" 2>/dev/null; then
-  printf "nameserver 223.5.5.5\nnameserver 8.8.8.8\n" > "$ROOTFS/etc/resolv.conf"
+  printf "nameserver 127.0.0.53\nnameserver 223.5.5.5\nnameserver 8.8.8.8\n" \
+    > "$ROOTFS/etc/resolv.conf"
 fi
 cat > "$ROOTFS/etc/apt/sources.list" <<EOF
 deb ${APT_MIRROR} noble main restricted universe multiverse
 deb ${APT_MIRROR} noble-updates main restricted universe multiverse
 deb ${APT_MIRROR} noble-security main restricted universe multiverse
 EOF
+
+echo "== chroot 自检"
+chroot "$ROOTFS" /bin/bash -c '
+  echo "uname: $(uname -m 2>/dev/null || echo unknown)"
+  echo "/dev/null: $(ls -l /dev/null 2>&1 || echo missing)"
+  echo "resolv:"; cat /etc/resolv.conf
+  echo "dns: $(getent hosts ports.ubuntu.com 2>&1 || echo FAIL)"
+' || echo "chroot 自检失败（继续尝试 apt）"
 
 echo "== 安装 Python 运行时"
 chroot "$ROOTFS" /bin/bash -c \
