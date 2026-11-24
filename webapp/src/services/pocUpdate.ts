@@ -72,13 +72,15 @@ export const isPocUpdateSupported = (): boolean => {
 
 const call = (name: keyof NonNullable<PocWindow['FlyAIPoc']>): BridgeResult => {
   const win = pocWindow()
-  const fn = win?.FlyAIPoc?.[name]
+  const bridge = win?.FlyAIPoc
   const current = token()
-  if (!fn || !current) {
+  if (!bridge?.[name] || !current) {
     return { ok: false, error: 'unsupported' }
   }
   try {
-    const raw = fn(current)
+    // 必须带接收者调用：WebView 的 Java 桥依赖 this 找到所属 WebView，
+    // 解构后 fn(current) 会报 "non-injected object"。
+    const raw = bridge[name]!(current)
     return raw ? (JSON.parse(raw) as BridgeResult) : { ok: false, error: 'empty' }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -87,13 +89,13 @@ const call = (name: keyof NonNullable<PocWindow['FlyAIPoc']>): BridgeResult => {
 
 export const getPocInfo = (): PocInfo | null => {
   const win = pocWindow()
-  const fn = win?.FlyAIPoc?.getState
+  const bridge = win?.FlyAIPoc
   const current = token()
-  if (!fn || !current) {
+  if (!bridge?.getState || !current) {
     return null
   }
   try {
-    const raw = fn(current)
+    const raw = bridge.getState(current)
     return raw ? (JSON.parse(raw) as PocInfo) : null
   } catch {
     return null
