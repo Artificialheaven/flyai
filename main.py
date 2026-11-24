@@ -3,6 +3,7 @@
 首次启动会自动从 config/config.example.json 生成 config/config.json。
 """
 
+# POC：main.py 与 flyai/ 一起由增量 overlay 整体替换，data/ 与 config/ 不受影响。
 from flyai import app
 from flyai.config import AppConfig, load_config
 import uvicorn
