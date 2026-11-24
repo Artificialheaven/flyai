@@ -6,6 +6,7 @@ export type SettingsSection =
   | 'usage'
   | 'models'
   | 'features'
+  | 'extensions'
   | 'memory'
   | 'data'
   | 'invite'

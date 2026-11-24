@@ -75,6 +75,7 @@ import { CdkPanel } from './admin/CdkPanel.js'
 import { DeepSeekPanel } from './admin/DeepSeekPanel.js'
 import { EmailPanel } from './admin/EmailPanel.js'
 import { FeaturesPanel } from './admin/FeaturesPanel.js'
+import { ExtensionPanel } from './ExtensionPanel.js'
 import { IntegrationPanel } from './admin/IntegrationPanel.js'
 import { MemoryPanel } from './admin/MemoryPanel.js'
 import { ModelsPanel } from './admin/ModelsPanel.js'
@@ -117,6 +118,11 @@ const sections: {
     value: 'features',
     label: 'settingDialogAsideFeaturesOptionLabel',
     icon: <IconDataOutline16 />,
+  },
+  {
+    value: 'extensions',
+    label: 'extensionsTitle',
+    icon: <IconBoltOutline16 />,
   },
   {
     value: 'memory',
@@ -232,6 +238,8 @@ const SettingsContent = () => {
         return <ModelsPanel />
       case 'features':
         return <FeaturesPanel />
+      case 'extensions':
+        return <ExtensionPanel />
       case 'memory':
         return <MemoryPanel />
       case 'integration':
