@@ -76,7 +76,7 @@ jobs:
             .poc-cache/base
             .poc-cache/proot
           # 依赖不变就复用 base rootfs；requirements.txt 变化时自动重建
-          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v2
+          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v3
 
       - name: Install arm64 binfmt (cache miss)
         if: steps.rootfs_cache.outputs.cache-hit != 'true'
@@ -109,7 +109,7 @@ jobs:
           path: |
             .poc-cache/base
             .poc-cache/proot
-          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v2
+          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v3
 
       - name: Install mobile dependencies
         run: cd mobile && npm ci
