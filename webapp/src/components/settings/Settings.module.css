@@ -113,6 +113,28 @@
   padding: 0 13px;
 }
 
+.linkButton {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4096px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
 .locationCell {
   flex-wrap: wrap;
 }
@@ -345,6 +367,10 @@
 
   .cellButton {
     flex-shrink: 0;
+    min-height: 44px;
+  }
+
+  .linkButton {
     min-height: 44px;
   }
 

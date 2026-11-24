@@ -328,11 +328,25 @@ export const onUpdateProgress = (cb: (progress: UpdateProgress) => void): (() =>
 
 let initialized = false
 
+/** POC 的裸 WebView 没有 Capacitor，用全局函数承接原生返回键 */
+type NativeBackWindow = {
+  __flyaiNativeBack?: () => boolean
+  __flyaiNativeBackDown?: () => void
+}
+
 /**
  * 初始化原生桥：App 前后台切（驱动通知轮询）、返回键、通知权限。
- * 只在 APK 内、且仅首次调用生效；`onBack` 返回 true 表示已消费返回键。
+ * Capacitor 插件只首次调用生效；`onBack` 返回 true 表示已消费返回键。
+ * POC 裸 WebView 没有 Capacitor，仍会挂上全局返回钩子供 MainActivity 调用。
  */
 export const initNative = (onBack: () => boolean) => {
+  // 无论 Capacitor 是否存在都挂上：POC WebView 由 MainActivity 直接调用。
+  // 按下/松开分开暴露，原生层可以在按住时先吃掉系统默认行为。
+  if (typeof window !== 'undefined') {
+    const bridge = window as unknown as NativeBackWindow
+    bridge.__flyaiNativeBack = onBack
+    bridge.__flyaiNativeBackDown = () => {}
+  }
   if (initialized || !isNativeApp()) {
     return
   }

@@ -21,12 +21,15 @@ export const BackgroundLayer = () => {
     return null
   }
 
+  // 上传时含 alpha 的图会编码成 WebP（Safari 回退 PNG）：不再铺底色和遮罩，
+  // 透明区域直接露出主题底色，才是真正的「透明背景」。
+  const alphaImage = bg.mode === 'image' && /\.(?:png|webp)$/i.test(bg.image)
   const style: CSSProperties = {
     // 用户可调的背景不透明度：100=完全不透明，0=完全看不见（露出主题底色）
     opacity: bg.opacity / 100,
     ...(bg.mode === 'image'
       ? {
-          backgroundColor: bg.color || undefined,
+          backgroundColor: alphaImage ? undefined : bg.color || undefined,
           backgroundImage: `url("${assetUrl(bg.image).replace(/"/g, '%22')}")`,
         }
       : { backgroundColor: bg.color }),
@@ -35,7 +38,13 @@ export const BackgroundLayer = () => {
   return (
     <div
       aria-hidden="true"
-      className={bg.mode === 'image' ? `${styles.layer} ${styles.image}` : styles.layer}
+      className={[
+        styles.layer,
+        bg.mode === 'image' ? styles.image : '',
+        alphaImage ? styles.transparent : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
       style={style}
     />
   )

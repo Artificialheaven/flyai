@@ -17,11 +17,11 @@ const MB = 1024 * 1024
 export const COMPRESS_TARGET_MB = 5
 /** 压缩后长边上限（像素），过大的原图先等比缩小 */
 const COMPRESS_MAX_EDGE = 2048
-/** 依次尝试的 JPEG 质量；当前缩放比例全部失败时再等比缩小重试 */
-const JPEG_QUALITIES = [0.9, 0.8, 0.72, 0.62, 0.52]
+/** 依次尝试的编码质量（JPEG/WebP 通用）；当前缩放比例全部失败时再等比缩小重试 */
+const ENCODE_QUALITIES = [0.9, 0.8, 0.72, 0.62, 0.52]
 const DOWNSCALE_STEP = 0.75
 const MAX_COMPRESS_ROUNDS = 6
-/** 压缩后统一改名 .jpg，扩展名与 MIME 保持一致 */
+/** 压缩后按实际编码改名（jpg/webp/png），扩展名与 MIME 保持一致 */
 const COMPRESSED_EXTS_RE = /\.(png|jpe?g|webp)$/i
 
 /** 文件扩展名（小写，不含点）；没有扩展名时为空 */
@@ -150,14 +150,27 @@ const decodeImage = async (file: File): Promise<DecodedImage> => {
   }
 }
 
-/** 把已解码图片按比例缩放并以 JPEG 质量重新编码；JPEG 无透明通道，先铺白底 */
-const encodeJpeg = (
+/** 编码结果：扩展名随实际 MIME 走（Safari 等不支持 WebP 编码时会回退 PNG） */
+type EncodedImage = { blob: Blob; ext: string }
+
+const EXT_BY_MIME: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+}
+
+/**
+ * 把已解码图片按比例缩放后重新编码。
+ * JPEG 无透明通道，先铺白底；WebP/PNG 保留 alpha，供透明背景图使用。
+ */
+const encodeImage = (
   source: CanvasImageSource,
   width: number,
   height: number,
   scale: number,
-  quality: number
-): Promise<Blob> =>
+  quality: number,
+  mime: 'image/jpeg' | 'image/webp'
+): Promise<EncodedImage> =>
   new Promise((resolve, reject) => {
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(width * scale))
@@ -167,36 +180,68 @@ const encodeJpeg = (
       reject(new Error('canvas unavailable'))
       return
     }
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    if (mime === 'image/jpeg') {
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+    }
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
     canvas.toBlob(
       (blob) => {
-        if (blob) {
-          resolve(blob)
-        } else {
+        if (!blob) {
           reject(new Error('encode failed'))
+          return
         }
+        const fallback = mime === 'image/webp' ? 'webp' : 'jpg'
+        resolve({ blob, ext: EXT_BY_MIME[blob.type] ?? fallback })
       },
-      'image/jpeg',
+      mime,
       quality
     )
   })
+
+/** 采样缩略图判断图片是否含透明像素；读取失败时按不透明处理 */
+const hasAlphaChannel = (image: DecodedImage): boolean => {
+  try {
+    const canvas = document.createElement('canvas')
+    const edge = 64
+    const scale = Math.min(1, edge / Math.max(image.width, image.height))
+    canvas.width = Math.max(1, Math.round(image.width * scale))
+    canvas.height = Math.max(1, Math.round(image.height * scale))
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) {
+      return false
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(image.source, 0, 0, canvas.width, canvas.height)
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) {
+        return true
+      }
+    }
+  } catch {
+    // 画布被污染或读取失败：走不透明分支，保持原有 JPEG 行为
+  }
+  return false
+}
 
 export type CompressOptions = {
   /** 压缩后长边上限（像素），默认 COMPRESS_MAX_EDGE */
   maxEdge?: number
   /** 目标文件大小上限（字节），默认 COMPRESS_TARGET_MB */
   targetBytes?: number
-  /** true 时无视「已达标/GIF」，始终解码并重编码 JPEG（背景图统一格式用） */
+  /** true 时无视「已达标/GIF」，始终解码并重编码（背景图统一格式用） */
   force?: boolean
+  /** true 时保留透明像素：有 alpha 的图编码为 WebP（不支持时回退 PNG），否则仍走 JPEG */
+  preserveAlpha?: boolean
 }
 
 /**
  * 非 GIF 图片自动压缩：超过目标大小时解码 → 缩放 → 重编码 JPEG，
- * 逐档降质量、仍超标再缩小长边，直到落入目标大小；返回改名 .jpg 的新 File。
+ * 逐档降质量、仍超标再缩小长边，直到落入目标大小；返回改名后的新 File。
+ * preserveAlpha 时含透明像素的图改走 WebP/PNG，避免白底吃掉透明背景。
  * GIF 或已在目标以内的图片原样返回（force 时除外）。失败时抛错，由调用方提示。
  */
 export const compressImageFile = async (
@@ -210,13 +255,25 @@ export const compressImageFile = async (
   }
   const decoded = await decodeImage(file)
   try {
+    const preserveAlpha = options.preserveAlpha === true && hasAlphaChannel(decoded)
+    const mime = preserveAlpha ? 'image/webp' : 'image/jpeg'
     let scale = Math.min(1, maxEdge / Math.max(decoded.width, decoded.height))
     for (let round = 0; round < MAX_COMPRESS_ROUNDS; round++) {
-      for (const quality of JPEG_QUALITIES) {
-        const blob = await encodeJpeg(decoded.source, decoded.width, decoded.height, scale, quality)
-        if (blob.size <= targetBytes) {
-          const name = file.name.replace(COMPRESSED_EXTS_RE, '') + '.jpg'
-          return new File([blob], name, { type: 'image/jpeg', lastModified: Date.now() })
+      for (const quality of ENCODE_QUALITIES) {
+        const encoded = await encodeImage(
+          decoded.source,
+          decoded.width,
+          decoded.height,
+          scale,
+          quality,
+          mime
+        )
+        if (encoded.blob.size <= targetBytes) {
+          const name = file.name.replace(COMPRESSED_EXTS_RE, '') + '.' + encoded.ext
+          return new File([encoded.blob], name, {
+            type: encoded.blob.type || mime,
+            lastModified: Date.now(),
+          })
         }
       }
       scale *= DOWNSCALE_STEP

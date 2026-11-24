@@ -251,6 +251,7 @@ const SettingsContent = () => {
             <LocaleSetting />
             <TtsVoiceSetting />
             <LocationSetting />
+            <GitHubSetting />
           </>
         )
     }
@@ -505,6 +506,31 @@ const LocationSetting = () => {
             />
           )}
         </div>
+      }
+    />
+  )
+}
+
+const GITHUB_URL = 'https://github.com/Artificialheaven/flyai'
+
+/** 通用设置最底部的项目入口：网页端新标签打开，POC/APK 由原生层转系统浏览器 */
+const GitHubSetting = () => {
+  const t = useTranslate()
+  return (
+    <SettingCell
+      label={t('settingsGitHub')}
+      description={t('settingsGitHubDescription')}
+      status={null}
+      action={
+        <a
+          className={styles.linkButton}
+          href={GITHUB_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <IconLinkOutline16 />
+          {t('settingsGitHubOpen')}
+        </a>
       }
     />
   )
@@ -766,6 +792,8 @@ const BackgroundSetting = () => {
         maxEdge: BG_MAX_EDGE,
         targetBytes: BG_TARGET_BYTES,
         force: true,
+        // AI 生成的透明背景（PNG/WebP）保留 alpha，不要被 JPEG 白底吃掉
+        preserveAlpha: true,
       })
     } catch {
       setBusy(null)
@@ -776,8 +804,13 @@ const BackgroundSetting = () => {
     try {
       const url = await uploadImage(compressed)
       setBusy(null)
-      setLocalBackground(device, { mode: 'image', image: url })
-      await persist({ mode: 'image', image: url })
+      // 透明图不保留底色，否则 alpha 区域会露出上一次选的纯色
+      const transparent = /\.(?:png|webp)$/i.test(url)
+      const patch: BgPatch = transparent
+        ? { mode: 'image', image: url, color: '' }
+        : { mode: 'image', image: url }
+      setLocalBackground(device, patch)
+      await persist(patch)
     } catch {
       setBusy(null)
       setStatus('error')

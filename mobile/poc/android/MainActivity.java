@@ -15,6 +15,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Message;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
@@ -27,8 +28,10 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -48,6 +51,8 @@ public class MainActivity extends Activity {
     private static final int PORT = 8000;
     private static final int FILE_CHOOSER = 1001;
     private static final long CONSOLE_INTERVAL = 700;
+    /** 页面返回处理超过该时间仍未回调就按未消费处理，避免 WebView 卡死时退不出去 */
+    private static final long BACK_JS_TIMEOUT = 700;
 
     private FrameLayout rootView;
     private WebView webView;
@@ -61,6 +66,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling;
+    private int backSeq;
 
     private final Runnable consoleTick = new Runnable() {
         @Override
@@ -360,13 +366,25 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setSupportMultipleWindows(true);
         if (Build.VERSION.SDK_INT >= 21) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
         if (Build.VERSION.SDK_INT >= 19) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return openExternal(request.getUrl());
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return openExternal(Uri.parse(url));
+            }
+        });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
@@ -384,7 +402,52 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+
+            /** target=_blank（如 GitHub 链接）不新建窗口，交给系统浏览器 */
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture,
+                                          Message resultMsg) {
+                WebView popup = new WebView(MainActivity.this);
+                popup.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest request) {
+                        boolean handled = openExternal(request.getUrl());
+                        if (handled) v.destroy();
+                        return handled;
+                    }
+
+                    @SuppressWarnings("deprecation")
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                        boolean handled = openExternal(Uri.parse(url));
+                        if (handled) v.destroy();
+                        return handled;
+                    }
+                });
+                WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                transport.setWebView(popup);
+                resultMsg.sendToTarget();
+                return true;
+            }
         });
+    }
+
+    /** 站外 http(s) 链接一律交给系统浏览器，避免把 App 自身导航走 */
+    private boolean openExternal(Uri uri) {
+        if (uri == null) return false;
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        if (!"http".equals(scheme) && !"https".equals(scheme)) return false;
+        if ("127.0.0.1".equals(host) || "localhost".equals(host) || "::1".equals(host)) {
+            return false;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "未找到可打开链接的应用",
+                    android.widget.Toast.LENGTH_SHORT).show();
+        }
+        return true;
     }
 
     private void startServerService() {
@@ -483,13 +546,93 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
+    /**
+     * 系统返回键统一交给网页处理：
+     * - 按下先吃掉并通知页面（不触发系统默认返回）；
+     * - 松开再执行页面返回逻辑，未消费才退出 App；
+     * - 全面屏手势在 targetSdk 28 下走 onBackPressed，同样路由到页面。
+     */
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
-            webView.goBack();
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK) {
+            return super.dispatchKeyEvent(event);
+        }
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() == 0) {
+                notifyBackPressedDown();
+            }
             return true;
         }
-        return super.onKeyDown(keyCode, event);
+        if (event.getAction() == KeyEvent.ACTION_UP) {
+            handleBack();
+            return true;
+        }
+        return true;
+    }
+
+    @Override
+    public void onBackPressed() {
+        handleBack();
+    }
+
+    private void notifyBackPressedDown() {
+        if (webView == null || webView.getVisibility() != View.VISIBLE) {
+            return;
+        }
+        webView.evaluateJavascript(
+                "(function(){try{if(window.__flyaiNativeBackDown)window.__flyaiNativeBackDown()}"
+                        + "catch(e){}})()",
+                null);
+    }
+
+    private boolean hideImeIfVisible() {
+        boolean visible;
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+            visible = insets != null && insets.isVisible(WindowInsets.Type.ime());
+        } else {
+            InputMethodManager imm = (InputMethodManager)
+                    getSystemService(Context.INPUT_METHOD_SERVICE);
+            visible = imm != null && imm.isAcceptingText();
+        }
+        if (!visible) {
+            return false;
+        }
+        InputMethodManager imm = (InputMethodManager)
+                getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.hideSoftInputFromWindow(webView.getWindowToken(), 0);
+        }
+        return true;
+    }
+
+    private void handleBack() {
+        if (webView == null || webView.getVisibility() != View.VISIBLE) {
+            finish();
+            return;
+        }
+        // 键盘展开时先收键盘，符合系统返回键习惯；再按一次才交给页面
+        if (hideImeIfVisible()) {
+            return;
+        }
+        final int seq = ++backSeq;
+        final boolean[] done = {false};
+        handler.postDelayed(() -> {
+            if (seq == backSeq && !done[0]) {
+                done[0] = true;
+                finish();
+            }
+        }, BACK_JS_TIMEOUT);
+        webView.evaluateJavascript(
+                "(function(){try{return !!(window.__flyaiNativeBack"
+                        + "&&window.__flyaiNativeBack())}catch(e){return false}})()",
+                value -> {
+                    if (done[0]) return;
+                    done[0] = true;
+                    if (!"true".equals(value)) {
+                        finish();
+                    }
+                });
     }
 
     @Override
