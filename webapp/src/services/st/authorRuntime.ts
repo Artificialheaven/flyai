@@ -71,6 +71,7 @@ export const AUTHOR_MSG_SAVE_MESSAGES_RESULT = 'flyai-author-save-messages-resul
 export const AUTHOR_MSG_GENERATE_MAIN = 'flyai-author-generate-main'
 /** 宿主 → 卡：主聊天生成结果 */
 export const AUTHOR_MSG_GENERATE_MAIN_RESULT = 'flyai-author-generate-main-result'
+export const AUTHOR_MSG_GLOBAL_VARS = 'flyai-author-global-vars'
 
 const MAX_MESSAGES = 200
 const MAX_MESSAGE_CHARS = 8000
@@ -99,6 +100,8 @@ export type AuthorRuntimeOptions = {
   externalMedia?: boolean
   /** 世界书/角色副本读取快照（st.write_context） */
   writeContext?: CardWriteContext
+  /** 用户级全局变量（st_global_vars.json），跨会话持久化 */
+  globalVariables?: Record<string, unknown> | null
   /** 会话/聊天标识；酒馆助手 context.chatId 需要 */
   sessionId?: string
   chatId?: string
@@ -612,6 +615,7 @@ type ShimOptions = {
   chatMetadata?: Record<string, unknown> | null
   character?: { name?: string; description?: string; avatar?: string | null }
   writeContext?: CardWriteContext
+  globalVariables?: Record<string, unknown> | null
   sessionId?: string
   chatId?: string
   userName?: string
@@ -627,6 +631,7 @@ const buildShim = ({
   chatMetadata,
   character,
   writeContext,
+  globalVariables,
   sessionId,
   chatId,
   userName,
@@ -697,6 +702,7 @@ const buildShim = ({
   var MSG_SAVE_MESSAGES_RESULT = ${escapeForScript(AUTHOR_MSG_SAVE_MESSAGES_RESULT)};
   var MSG_GENERATE_MAIN = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN)};
   var MSG_GENERATE_MAIN_RESULT = ${escapeForScript(AUTHOR_MSG_GENERATE_MAIN_RESULT)};
+  var MSG_GLOBAL_VARS = ${escapeForScript(AUTHOR_MSG_GLOBAL_VARS)};
   var MESSAGES = JSON.parse(${escapeForScript(messageData)});
   // 酒馆 context().chat 必须是稳定、可原地修改的数组：扩展（小手机）会把
   // dal_phone_source 等楼层身份写进 message.extra/swipe_info，再靠 keys() 读回。
@@ -1190,8 +1196,21 @@ const buildShim = ({
     window.insertOrAssignVariables({ [String(key)]: value }, { type: 'chat' });
     return Promise.resolve(true);
   };
-  window.getGlobalVariables = function(){ return {}; };
-  window.setGlobalVariable = function(){ return Promise.resolve(false); };
+  window.getGlobalVariables = function(){ return clone(GLOBAL_VARS); };
+  window.setGlobalVariable = function(key, value){
+    GLOBAL_VARS[String(key)] = value;
+    try {
+      HOST.postMessage({ v: VERSION, type: MSG_GLOBAL_VARS, variables: clone(GLOBAL_VARS) }, '*');
+    } catch (e) {}
+    return Promise.resolve(true);
+  };
+  window.replaceGlobalVariables = function(value){
+    GLOBAL_VARS = value && typeof value === 'object' ? clone(value) : {};
+    try {
+      HOST.postMessage({ v: VERSION, type: MSG_GLOBAL_VARS, variables: clone(GLOBAL_VARS) }, '*');
+    } catch (e) {}
+    return Promise.resolve(true);
+  };
   window.setVariables = window.replaceVariables;
 
   // ── 世界书本地副本 ─────────────────────────────────────────────
@@ -1760,7 +1779,9 @@ const buildShim = ({
     return list.length ? String(list[0].message || '') : '';
   };
 
-  var GLOBAL_VARS = {};
+  var GLOBAL_VARS = ${escapeForScript(JSON.stringify(
+    globalVariables && typeof globalVariables === 'object' ? globalVariables : {}
+  ))};
   function variableStore(scope){
     var isGlobal = scope === 'global';
     function read(){ return isGlobal ? GLOBAL_VARS : chatStat(); }

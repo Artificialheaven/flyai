@@ -41,6 +41,7 @@ export const CARD_APP_PROTOCOL_VERSION = 1
 export const CARD_MSG_RESIZE = 'flyai-card-resize'
 export const CARD_MSG_READY = 'flyai-card-ready'
 export const CARD_MSG_VARS = 'flyai-card-vars'
+export const CARD_MSG_GLOBAL_VARS = 'flyai-card-global-vars'
 export const CARD_MSG_MESSAGE = 'flyai-card-message'
 export const CARD_MSG_TOAST = 'flyai-card-toast'
 export const CARD_MSG_ERROR = 'flyai-card-error'
@@ -532,7 +533,8 @@ export const buildCardAppShim = (
   variables?: Record<string, unknown> | null,
   character?: CardAppCharacter | null,
   capabilities?: CardAppCapabilities | null,
-  chat?: CardAppChat | null
+  chat?: CardAppChat | null,
+  globalVariables?: Record<string, unknown> | null
 ): string => {
   const state = sanitizeCardAppVariables(variables)
   const chatSeed = (Array.isArray(chat?.messages) ? chat.messages : [])
@@ -560,6 +562,9 @@ export const buildCardAppShim = (
 (function(){
   var MESSAGE = ${escapeForScript(message)};
   var VARIABLES = JSON.parse(${escapeForScript(state.serialized)});
+  var GLOBAL_VARIABLES = ${escapeForScript(JSON.stringify(
+    globalVariables && typeof globalVariables === 'object' ? globalVariables : {}
+  ))};
   var CHAT_METADATA = JSON.parse(${escapeForScript(JSON.stringify(
     chat?.metadata && typeof chat.metadata === 'object' ? chat.metadata : {}
   ))});
@@ -1293,8 +1298,15 @@ export const buildCardAppShim = (
   window.deleteVariable = CAP_WRITE
     ? function(key){ return deleteChatVariable(key); }
     : function(){ readOnly(); return false; };
-  window.getGlobalVariables = function(){ return {}; };
-  window.setGlobalVariable = function(){ readOnly(); return false; };
+  window.getGlobalVariables = function(){ return clone(GLOBAL_VARIABLES); };
+  window.setGlobalVariable = function(key, value){
+    if (!CAP_WRITE) { readOnly(); return false; }
+    GLOBAL_VARIABLES[String(key)] = value;
+    try {
+      parent.postMessage({ v: CARD_APP_PROTOCOL_VERSION, type: CARD_MSG_GLOBAL_VARS, variables: clone(GLOBAL_VARIABLES) }, '*');
+    } catch (e) {}
+    return Promise.resolve(true);
+  };
 
   // 世界书：卡片看到的是「角色卡自带世界书 + 会话挂载世界书」的合并视图。
   // 角色卡的书（CC character_book）随角色副本下发在 CHARACTER_FIELDS.table；
@@ -3168,6 +3180,8 @@ export type CardAppDocOptions = {
   message: string
   /** 当前变量快照（通常是消息的 stat_data），shim 只读暴露 */
   variables?: Record<string, unknown> | null
+  /** 用户级全局变量（跨会话持久化） */
+  globalVariables?: Record<string, unknown> | null
   /** 允许图片/音频直连外网（与 st_external_images 开关一致） */
   externalMedia?: boolean
   /** 角色信息：shim 暴露名称，头像源加入 CSP img-src */
@@ -3232,7 +3246,8 @@ export const buildCardAppDoc = (
       options.variables,
       options.character,
       options.capabilities,
-      options.chat
+      options.chat,
+      options.globalVariables
     )}</script>` +
     inlineScript(ST_NATIVE_SNAPSHOT_SOURCE) +
     inlineScript(buildEjsTemplateSource()) +

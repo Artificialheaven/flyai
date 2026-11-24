@@ -13,13 +13,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import base64
 import binascii
 import logging
 import math
+import os
 import time
 from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,6 +34,53 @@ from ..netguard import BlockedHost, pin_request, resolve_and_check
 from ..user import ADMIN_UID
 
 router = APIRouter(prefix="/api/st", tags=["st"])
+
+
+def _global_vars_path(sc) -> Path:
+    base = getattr(sc, "settings_path", None)
+    if base is not None:
+        return Path(base).parent / "st_global_vars.json"
+    data_dir = getattr(sc, "data_dir", None)
+    if data_dir is None:
+        raise HTTPException(503, "用户存储不可用")
+    return Path(data_dir) / str(sc.uid) / "st_global_vars.json"
+
+
+def _read_global_vars(sc) -> dict:
+    path = _global_vars_path(sc)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+class GlobalVarsBody(BaseModel):
+    variables: Dict[str, Any] = {}
+
+
+@router.get("/global-vars")
+def get_global_vars(request: Request):
+    sc = request.app.state.flyai.user(request)
+    return {"variables": _read_global_vars(sc)}
+
+
+@router.put("/global-vars")
+def put_global_vars(body: GlobalVarsBody, request: Request):
+    sc = request.app.state.flyai.user(request)
+    if not isinstance(body.variables, dict):
+        raise HTTPException(400, "variables 必须是对象")
+    raw = json.dumps(body.variables, ensure_ascii=False)
+    if len(raw.encode("utf-8")) > 1024 * 1024:
+        raise HTTPException(413, "全局变量超过 1MB")
+    path = _global_vars_path(sc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(raw, encoding="utf-8")
+    os.replace(tmp, path)
+    return {"ok": True}
 log = logging.getLogger(__name__)
 
 _MAX_REDIRECTS = 5

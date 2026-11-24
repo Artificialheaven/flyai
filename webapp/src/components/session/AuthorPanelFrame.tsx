@@ -27,6 +27,7 @@ import {
   AUTHOR_MSG_GENERATE,
   AUTHOR_MSG_GENERATE_MAIN,
   AUTHOR_MSG_GENERATE_MAIN_RESULT,
+  AUTHOR_MSG_GLOBAL_VARS,
   AUTHOR_MSG_GENERATE_RESULT,
   AUTHOR_MSG_INJECT_PROMPTS,
   AUTHOR_MSG_PHONE_MAINLINE,
@@ -75,6 +76,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   canAct = false,
   actionMessageId,
   writeContext,
+  globalVariables,
   streaming = false,
 }: {
   html: string
@@ -99,6 +101,8 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
   actionMessageId?: string
   /** 世界书/角色副本读取快照 */
   writeContext?: CardWriteContext
+  /** 用户级全局变量（跨会话） */
+  globalVariables?: Record<string, unknown> | null
   /** 当前会话是否正在生成；用于向卡内派发 GENERATION_* 事件 */
   streaming?: boolean
 }) {
@@ -131,6 +135,7 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         character,
         externalMedia,
         writeContext,
+        globalVariables,
         sessionId,
         chatId: sessionId,
         userName,
@@ -468,6 +473,13 @@ export const AuthorPanelFrame = memo(function AuthorPanelFrame({
         void request(`/api/sessions/${encodeURIComponent(sessionId)}/author/state`, {
           method: 'POST',
           body: JSON.stringify({ phone_mainline: text }),
+        }).catch(() => undefined)
+        return
+      }
+      if (data.type === AUTHOR_MSG_GLOBAL_VARS) {
+        void request('/api/st/global-vars', {
+          method: 'PUT',
+          body: JSON.stringify({ variables: (data as { variables?: unknown }).variables || {} }),
         }).catch(() => undefined)
         return
       }

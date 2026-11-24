@@ -90,6 +90,9 @@ export type StAuthorPayload = {
   scripts?: StAuthorScript[]
   /** 脚本数量或体积超限，已截断 */
   truncated?: boolean
+  /** 去重响应：作者脚本按 digest 单独下发 */
+  scripts_digest?: string
+  scripts_url?: string
   /** 酒馆 chatMetadata（作者脚本的地图/手札存档），会话级持久化 */
   chat_metadata?: Record<string, unknown>
   character?: {

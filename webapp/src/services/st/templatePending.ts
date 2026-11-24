@@ -49,6 +49,41 @@ export type PendingRender = {
   rawHash: string
 }
 
+/** 按 ``` / ~~~ 代码围栏切分：围栏内不执行 EJS，原样保留。 */
+export const splitFencedSegments = (text: string): Array<{ text: string; literal: boolean }> => {
+  const segments: Array<{ text: string; literal: boolean }> = []
+  let buffer: string[] = []
+  let literal = false
+  let fence = ''
+  const flush = () => {
+    if (!buffer.length) return
+    segments.push({ text: buffer.join('\n'), literal })
+    buffer = []
+  }
+  for (const line of text.split('\n')) {
+    const match = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (fence) {
+      buffer.push(line)
+      if (match && line.trim().startsWith(fence)) {
+        flush()
+        fence = ''
+        literal = false
+      }
+      continue
+    }
+    if (match) {
+      flush()
+      literal = true
+      fence = match[1]
+      buffer.push(line)
+      continue
+    }
+    buffer.push(line)
+  }
+  flush()
+  return segments.length ? segments : [{ text, literal: false }]
+}
+
 export const renderPendingMessage = async (
   session: Session,
   message: AssistantMessage,
@@ -73,7 +108,12 @@ export const renderPendingMessage = async (
         : session.userName || '',
     content: messageText(item),
   }))
-  const result = await runTemplateCells([{ id: message.id, text: raw }], {
+  const segments = splitFencedSegments(raw)
+  const cells = segments
+    .map((segment, index) => ({ segment, index }))
+    .filter((item) => !item.segment.literal)
+    .map((item) => ({ id: `${message.id}#${item.index}`, text: item.segment.text }))
+  const result = await runTemplateCells(cells.length ? cells : [{ id: message.id, text: '' }], {
     messageId: message.id,
     scopes,
     readonly: {
@@ -93,9 +133,14 @@ export const renderPendingMessage = async (
     // 绝不能把空结果写进消息，否则回复会被“清空”。
     throw new Error(result.errors[0].message || '模板渲染失败')
   }
+  const content = segments
+    .map((segment, index) =>
+      segment.literal ? segment.text : (result.cells[`${message.id}#${index}`] ?? '')
+    )
+    .join('')
   return {
     messageId: message.id,
-    content: result.cells[message.id] ?? '',
+    content,
     ops: result.ops,
     errors: result.errors,
     rawHash: await sha256Hex(raw),

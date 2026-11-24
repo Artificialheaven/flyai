@@ -948,20 +948,70 @@ def _resolve_visible_provider(state, sc, provider_id: Optional[str]):
     raise HTTPException(400, "未配置可用提供商，请在设置中添加")
 
 
-def _author_prompt_extra(session) -> str:
-    """作者面板注入的剧情锚点/场记（injectPrompts / setExtensionPrompt）。"""
+def _author_prompt_items(session) -> list:
     author = (getattr(session, "attributes", None) or {}).get("author") or {}
     items = author.get("prompts")
-    if not isinstance(items, list):
-        return ""
+    return items[:20] if isinstance(items, list) else []
+
+
+def _author_prompt_position(item) -> int:
+    raw = item.get("position", 0)
+    if isinstance(raw, str):
+        key = raw.strip().lower()
+        return {"in_chat": 1, "before_prompt": 2, "in_prompt": 0}.get(key, 0)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return value if value in (0, 1, 2) else 0
+
+
+def _author_prompt_role(item) -> str:
+    raw = item.get("role", 0)
+    if isinstance(raw, str):
+        key = raw.strip().lower()
+        return {"user": "user", "assistant": "assistant", "system": "system"}.get(key, "system")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    return {1: "user", 2: "assistant"}.get(value, "system")
+
+
+def _author_prompt_extra(session) -> str:
+    """in_prompt / before_prompt 的扩展提示词（并入系统提示词）。"""
     parts = []
-    for item in items[:20]:
+    for item in _author_prompt_items(session):
         if not isinstance(item, dict):
+            continue
+        if _author_prompt_position(item) == 1:
             continue
         content = item.get("content")
         if isinstance(content, str) and content.strip():
             parts.append(content.strip()[:16384])
     return "\n\n".join(parts)
+
+
+def _author_prompt_depth(session) -> list:
+    """in_chat 的扩展提示词：转成 run_agent_loop 的 depth_blocks。"""
+    blocks = []
+    for index, item in enumerate(_author_prompt_items(session)):
+        if not isinstance(item, dict) or _author_prompt_position(item) != 1:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        try:
+            depth = max(0, int(item.get("depth") or 0))
+        except (TypeError, ValueError):
+            depth = 0
+        blocks.append({
+            "content": content.strip()[:16384],
+            "depth": depth,
+            "role": _author_prompt_role(item),
+            "order": 900 + index,
+        })
+    return blocks
 
 
 def _billing_tzname(state) -> str:
@@ -1526,6 +1576,7 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
                 services.get("lore"), character, user_char, req.message or "",
                 variables=mvu_vars,
             )
+            depth_specs = depth_specs + _author_prompt_depth(session)
             # 当前启用的模型预设：main 块并入系统提示词，tail 与角色 PHI 同位，
             # depth 块与世界书深度块合并；采样参数/jailbreak 前缀透传给 loop
             from ..preset.apply import render_preset
@@ -2412,6 +2463,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                     req.message or "", group_names=others,
                     variables=spk_vars,
                 )
+                depth_specs = depth_specs + _author_prompt_depth(session)
                 # 启用中的预设：按本座位角色渲染（main 入系统提示词、
                 # tail 与该角色 PHI 同位、depth 与世界书块合并、jailbreak 前缀）
                 from ..preset.apply import render_preset

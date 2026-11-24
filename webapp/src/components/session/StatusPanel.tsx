@@ -8,7 +8,7 @@
  */
 
 import clsx from 'clsx'
-import { useContext, useMemo, useState } from 'react'
+import { useContext, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMobile } from '../../app/viewport.js'
 import {
@@ -17,6 +17,7 @@ import {
   type TranslationParams,
 } from '../../i18n/index.js'
 import { getVisibleMessages } from '../../services/chat/branches.js'
+import { request } from '../../services/flyai/client.js'
 import type { Session } from '../../services/chat/types.js'
 import type {
   CardWriteContext,
@@ -231,6 +232,18 @@ const PanelBody = ({
       .filter((item) => item.html.trim() || item.author)
   }, [htmlEnabled, statData, hasAuthorScripts, effectivePanels, panelScripts, macroNames, t])
   const rows = useMemo(() => (statData ? statDataRows(statData) : []), [statData])
+  const [globalVariables, setGlobalVariables] = useState<Record<string, unknown> | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void request<{ variables: Record<string, unknown> }>('/api/st/global-vars')
+      .then((data) => {
+        if (!cancelled) setGlobalVariables(data.variables || {})
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
 
   if (rendered.length > 0) {
     return (
@@ -257,6 +270,7 @@ const PanelBody = ({
                   canAct={canAct}
                   actionMessageId={actionMessageId}
                   writeContext={writeContext}
+                  globalVariables={globalVariables}
                   streaming={streaming}
                 />
               ) : runScripts && options.jsSandbox && (item.app || /<script[\s>]/i.test(item.html)) ? (

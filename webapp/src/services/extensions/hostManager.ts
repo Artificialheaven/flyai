@@ -4,7 +4,7 @@ import { listWorlds, getWorld } from '../flyai/lore.js'
 import { proxyNet, writeSessionMvu } from '../flyai/st.js'
 import { request } from '../flyai/client.js'
 import { showToast } from '../../components/base/toastState.js'
-import { useExtensionWidgets } from './widgets.js'
+import { useExtensionErrors, useExtensionWidgets } from './widgets.js'
 import type { ExtensionHostState } from './types.js'
 import { EXT_NS, EXT_VERSION, hasCapability, isExtMessage, messageTooLarge } from './hostProtocol.js'
 import type { ExtMessage } from './hostProtocol.js'
@@ -233,7 +233,10 @@ class ExtensionHostManager {
       if (text) {
         mounted.errors.push(text)
         if (mounted.errors.length > 50) mounted.errors.shift()
-        if ((data as { error?: boolean }).error) console.warn('[ext]', mounted.state.name, text)
+        if ((data as { error?: boolean }).error) {
+          console.warn('[ext]', mounted.state.name, text)
+          useExtensionErrors.getState().add(mounted.state.name, text)
+        }
       }
       return
     }
@@ -507,6 +510,7 @@ class ExtensionHostManager {
     }
     this.mounted.clear()
     useExtensionWidgets.getState().clearAll()
+    useExtensionErrors.getState().clearAll()
     for (const pending of this.pending.values()) window.clearTimeout(pending.timer)
     this.pending.clear()
     slashCommands.clear()

@@ -79,6 +79,7 @@ import {
   CARD_MSG_RESIZE,
   CARD_MSG_TOAST,
   CARD_MSG_VARS,
+  CARD_MSG_GLOBAL_VARS,
   CARD_MSG_WRITE_CTX,
   buildCardAppDoc,
   sanitizeCardAppVariables,
@@ -290,6 +291,22 @@ export const CardAppFrame = memo(function CardAppFrame({
 
   // 变量/消息变化不重建 doc：重建会重载 iframe，卡内状态与滚动位置都会丢。
   // 刷新时从 ref 取最新值，普通更新只经 postMessage 补发。
+  const [globalVariables, setGlobalVariables] = useState<Record<string, unknown>>({})
+  const globalRef = useRef<Record<string, unknown>>({})
+  useEffect(() => {
+    let cancelled = false
+    void request<{ variables: Record<string, unknown> }>('/api/st/global-vars')
+      .then((data) => {
+        if (cancelled) return
+        const value = data.variables || {}
+        globalRef.current = value
+        setGlobalVariables(value)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const latestRef = useRef({ message, variables: sanitized.variables })
   useLayoutEffect(() => {
     latestRef.current = { message, variables: sanitized.variables }
@@ -306,12 +323,13 @@ export const CardAppFrame = memo(function CardAppFrame({
     return buildCardAppDoc(html, {
       message: latest.message,
       variables: latest.variables,
+      globalVariables,
       externalMedia,
       character: resolvedCharacter,
       chat: chatRef.current,
       capabilities: { actions: capActions, write: capWrite, net: capNet },
     })
-  }, [html, externalMedia, reloadKey, resolvedCharacter, capActions, capWrite, capNet])
+  }, [html, externalMedia, reloadKey, resolvedCharacter, capActions, capWrite, capNet, globalVariables])
 
   const postToCard = useCallback((payload: Record<string, unknown>) => {
     const win = iframeRef.current?.contentWindow
@@ -327,6 +345,7 @@ export const CardAppFrame = memo(function CardAppFrame({
 
   const sendContext = useCallback(() => {
     postToCard({ type: CARD_MSG_VARS, variables: sanitized.variables })
+    postToCard({ type: CARD_MSG_GLOBAL_VARS, variables: globalRef.current })
     postToCard({ type: CARD_MSG_MESSAGE, message })
     if (chatRef.current) {
       postToCard({ type: CARD_MSG_CHAT, chat: chatRef.current })

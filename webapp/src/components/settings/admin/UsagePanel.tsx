@@ -8,6 +8,14 @@ import {
   type QuotaView,
 } from '../../../services/flyai/admin.js'
 import { listSessions } from '../../../services/flyai/sessions.js'
+import { useAuth } from '../../../services/flyai/auth.js'
+import {
+  connectDeepSeek,
+  getDeepSeekBalance,
+  getDeepSeekStatus,
+  type DeepSeekBalance,
+  type DeepSeekStatus,
+} from '../../../services/flyai/deepseek.js'
 import type { SessionSummary } from '../../../services/flyai/types.js'
 import { Button } from '../../base/Button.js'
 import { errorText, PanelError, PanelEmpty } from './AdminCommon.js'
@@ -60,6 +68,13 @@ export const UsagePanel = () => {
   const [error, setError] = useState('')
   /** 点击柱状行固定悬浮框（触屏无 hover 时用）；再次点击或点其他行切换 */
   const [pinnedDate, setPinnedDate] = useState<string | null>(null)
+  const isAdmin = useAuth((state) => state.user?.role === 'admin')
+  const [dsStatus, setDsStatus] = useState<DeepSeekStatus | null>(null)
+  const [dsBalances, setDsBalances] = useState<DeepSeekBalance[]>([])
+  const [dsKey, setDsKey] = useState('')
+  const [dsModel, setDsModel] = useState('deepseek-chat')
+  const [dsBusy, setDsBusy] = useState(false)
+  const [dsNotice, setDsNotice] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -84,6 +99,64 @@ export const UsagePanel = () => {
     void load()
   }, [load])
 
+  const loadDeepSeek = useCallback(async () => {
+    try {
+      const status = await getDeepSeekStatus()
+      setDsStatus(status)
+      if (status.model) setDsModel(status.model)
+      if (status.configured) {
+        const balance = await getDeepSeekBalance().catch(() => null)
+        setDsBalances(balance?.balances || [])
+      } else {
+        setDsBalances([])
+      }
+    } catch {
+      // 非管理员/未配置时静默降级
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadDeepSeek()
+  }, [loadDeepSeek])
+
+  // 管理员在平台登录后返回 FlyAI：自动打开 API Keys 页（官方没有自动创建 Key 的接口）
+  useEffect(() => {
+    const onFocus = () => {
+      const at = Number(sessionStorage.getItem('flyai-deepseek-login') || 0)
+      if (!at) return
+      sessionStorage.removeItem('flyai-deepseek-login')
+      if (Date.now() - at > 15 * 60 * 1000) return
+      const url = dsStatus?.platform.api_keys
+      if (!url) return
+      const opened = window.open(url, '_blank', 'noopener')
+      setDsNotice(opened ? t('usageDeepSeekOpenKeys') : t('usageDeepSeekOpenKeysManual'))
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [dsStatus, t])
+
+  const loginDeepSeek = () => {
+    const url = dsStatus?.platform.sign_in || 'https://platform.deepseek.com/sign_in'
+    sessionStorage.setItem('flyai-deepseek-login', String(Date.now()))
+    window.open(url, '_blank', 'noopener')
+    setDsNotice(t('usageDeepSeekLoginHint'))
+  }
+
+  const connectDeepSeekKey = async () => {
+    if (dsBusy || !dsKey.trim()) return
+    setDsBusy(true)
+    try {
+      await connectDeepSeek(dsKey.trim(), dsModel, true)
+      setDsKey('')
+      setDsNotice(t('usageDeepSeekConnected'))
+      await Promise.all([loadDeepSeek(), load()])
+    } catch (err) {
+      setDsNotice(errorText(err))
+    } finally {
+      setDsBusy(false)
+    }
+  }
+
   const tokens = sessions.reduce(addUsage, { prompt: 0, completion: 0, total: 0 })
   const messageCount = sessions.reduce((sum, item) => sum + (item.message_count ?? 0), 0)
   const days = usage?.days ?? []
@@ -98,6 +171,7 @@ export const UsagePanel = () => {
   const used = quota?.used ?? 0
   const remaining = quota ? (quota.remaining ?? Math.max(0, total - used)) : 0
   const percent = !unlimited && total > 0 ? Math.min(100, (used / total) * 100) : 0
+  const officialActive = Boolean(dsStatus?.is_official_active && dsBalances.length > 0)
 
   return (
     <div className={styles.page}>
@@ -112,7 +186,76 @@ export const UsagePanel = () => {
       </div>
       {error ? <PanelError message={error} /> : null}
 
-      <div className={styles.card}>
+      {officialActive ? (
+        <div className={styles.card}>
+          <div className={styles.cardHead}>
+            <span className={styles.rowLabel}>{t('usageDeepSeekOfficialBalance')}</span>
+            <span className={clsx(styles.badge, styles.badgeBrand)}>
+              {t('usageDeepSeekOfficialBadge')}
+            </span>
+          </div>
+          {dsBalances.map((item) => (
+            <div key={item.currency} className={styles.quotaValue}>
+              {item.currency} {item.total}
+            </div>
+          ))}
+          <div className={styles.hint}>{t('usageDeepSeekBalanceHint')}</div>
+          <div className={styles.rowLine}>
+            <a href={dsStatus?.platform.top_up} target="_blank" rel="noreferrer">
+              {t('usageDeepSeekTopUp')}
+            </a>
+            <a href={dsStatus?.platform.usage} target="_blank" rel="noreferrer">
+              {t('usageDeepSeekOfficialUsage')}
+            </a>
+          </div>
+        </div>
+      ) : null}
+
+      {isAdmin ? (
+        <div className={styles.card}>
+          <div className={styles.cardHead}>
+            <span className={styles.rowLabel}>{t('usageDeepSeekTitle')}</span>
+            {dsStatus?.configured ? (
+              <span className={styles.hint}>{dsStatus.key_masked}</span>
+            ) : null}
+          </div>
+          <div className={styles.hint}>{t('usageDeepSeekHint')}</div>
+          <div className={styles.rowLine}>
+            <Button variant="outlined" size="s" onClick={loginDeepSeek}>
+              {t('usageDeepSeekLogin')}
+            </Button>
+            <a href={dsStatus?.platform.api_keys} target="_blank" rel="noreferrer">
+              {t('usageDeepSeekOpenKeys')}
+            </a>
+            <a href={dsStatus?.platform.top_up} target="_blank" rel="noreferrer">
+              {t('usageDeepSeekTopUp')}
+            </a>
+          </div>
+          <div className={styles.rowLine}>
+            <input
+              className={styles.textInput}
+              type="password"
+              value={dsKey}
+              placeholder={t('usageDeepSeekKeyPlaceholder')}
+              onChange={(event) => setDsKey(event.target.value)}
+            />
+            <select
+              className={styles.textInput}
+              value={dsModel}
+              onChange={(event) => setDsModel(event.target.value)}
+            >
+              <option value="deepseek-chat">deepseek-chat</option>
+              <option value="deepseek-reasoner">deepseek-reasoner</option>
+            </select>
+            <Button size="s" disabled={dsBusy || !dsKey.trim()} onClick={() => void connectDeepSeekKey()}>
+              {dsBusy ? t('usageDeepSeekConnecting') : t('usageDeepSeekConnect')}
+            </Button>
+          </div>
+          {dsNotice ? <div className={styles.hint}>{dsNotice}</div> : null}
+        </div>
+      ) : null}
+
+      <div className={styles.card} style={officialActive ? { display: 'none' } : undefined}>
         <div className={styles.cardHead}>
           <span className={styles.rowLabel}>{t('usageQuotaTitle')}</span>
           {unlimited ? (
@@ -161,6 +304,14 @@ export const UsagePanel = () => {
         </div>
       </div>
 
+      {officialActive ? (
+        <div className={styles.hint}>
+          {t('usageDeepSeekTokenNote')}{' '}
+          <a href={dsStatus?.platform.usage} target="_blank" rel="noreferrer">
+            {t('usageDeepSeekOfficialUsage')}
+          </a>
+        </div>
+      ) : null}
       <div className={styles.card}>
         <div className={styles.cardHead}>
           <span className={styles.rowLabel}>{t('usageChartTitle')}</span>

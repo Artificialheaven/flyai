@@ -185,14 +185,19 @@ const sandboxMain = () => {
       getPath(findScope(scopes, scopeName(opts, defaultScope)), parts(name)) !== undefined ||
       getPath(readonly, parts(name)) !== undefined
 
+    // 提示词侧可以按任意楼层读取变量；输出侧没有对应楼层时回退当前 message 作用域。
     const getMessageVar = (id: unknown, name: unknown): unknown => {
-      if (!messageId || String(id) !== messageId) return undefined
-      return clone(getPath(scopes.message, parts(name)))
+      const key = String(id ?? messageId ?? '')
+      const bucket = key ? scopes.message[key] : scopes.message[messageId]
+      const value = getPath(bucket && typeof bucket === 'object' ? bucket : {}, parts(name))
+      if (value !== undefined) return clone(value)
+      return messageId && key === messageId ? clone(getPath(scopes.message, parts(name))) : undefined
     }
 
     const setMessageVar = (id: unknown, name: unknown, value: unknown): unknown => {
-      if (!messageId || String(id) !== messageId) return value
-      return setvar(name, value, { scope: 'message' })
+      const key = String(id ?? messageId ?? '')
+      if (!key) return value
+      return setvar(name, value, { scope: 'message', message_id: key })
     }
 
     const substituteParams = (text: unknown): string => {
@@ -205,6 +210,13 @@ const sandboxMain = () => {
         .replace(/\{\{\s*char\s*\}\}/gi, char)
         .replace(/\{\{\s*user\s*\}\}/gi, user)
         .replace(/\{\{\s*group\s*\}\}/gi, group)
+        .replace(/\{\{\s*time\s*\}\}/gi, new Date().toLocaleTimeString())
+        .replace(/\{\{\s*date\s*\}\}/gi, new Date().toLocaleDateString())
+        .replace(/\{\{\s*newline\s*\}\}/gi, '\n')
+        .replace(/\{\{\s*random::([^}]+)\}\}/gi, (_match, options) => {
+          const list = String(options).split(',').map((item) => item.trim()).filter(Boolean)
+          return list.length ? list[Math.floor(Math.random() * list.length)] : ''
+        })
     }
 
     const readOnly = () => {

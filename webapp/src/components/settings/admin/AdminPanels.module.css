@@ -895,3 +895,27 @@
     max-height: 70vh;
   }
 }
+.rowLine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.rowLine a {
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.textInput {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  background: transparent;
+  color: inherit;
+  padding: 0 10px;
+  font-size: 12px;
+  min-width: 180px;
+}

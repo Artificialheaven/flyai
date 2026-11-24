@@ -6,6 +6,7 @@ import { useTranslate } from '../../i18n/index.js'
 import type { ExtensionDetail, ExtensionPanel as ExtensionPanelInfo } from '../../services/extensions/types.js'
 import * as client from '../../services/extensions/client.js'
 import { useExtensions } from '../../services/extensions/store.js'
+import { useExtensionErrors } from '../../services/extensions/widgets.js'
 import { SchemaSettingsForm } from './SchemaSettingsForm.js'
 import { ExtensionPanelDialog } from './ExtensionPanelDialog.js'
 import styles from './ExtensionPanel.module.css'
@@ -18,6 +19,7 @@ export const ExtensionPanel = () => {
   const t = useTranslate()
   const { items, admin, featureEnabled, loading, error, load, toggle, remove, move, install } =
     useExtensions()
+  const runtimeErrors = useExtensionErrors((state) => state.errors)
   const [detail, setDetail] = useState<ExtensionDetail | null>(null)
   const [detailName, setDetailName] = useState('')
   const [panelInfo, setPanelInfo] = useState<ExtensionPanelInfo | null>(null)
@@ -266,6 +268,16 @@ export const ExtensionPanel = () => {
                       <Button size="s" onClick={() => setPanelOpen(true)}>
                         {t('extensionsOpenPanel')}
                       </Button>
+                    </div>
+                  ) : null}
+                  {runtimeErrors[item.name]?.length ? (
+                    <div>
+                      <div>{t('extensionsRuntimeErrors')}</div>
+                      <div className={styles.modules}>
+                        {runtimeErrors[item.name].slice(-5).map((message, index) => (
+                          <div key={index}>✗ {message}</div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                   <div>

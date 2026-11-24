@@ -59,8 +59,38 @@ export const clearSession = async (sid: string): Promise<void> => {
 }
 
 /** 完整房间：members/threads/messages 都在这里，列表项拿不到 */
-export const getSession = async (sid: string): Promise<SessionDetail> =>
-  request<SessionDetail>(`/api/sessions/${encodeURIComponent(sid)}`)
+export const getSession = async (sid: string): Promise<SessionDetail> => {
+  const detail = await request<SessionDetail>(`/api/sessions/${encodeURIComponent(sid)}`, {
+    headers: { 'X-FlyAI-Client': '2' },
+  })
+  return hydrateCardBundle(detail)
+}
+
+const bundleCache = new Map<string, { scripts: unknown[]; truncated: boolean }>()
+
+/** 会话响应去重后按 digest 拉取作者脚本；浏览器/内存缓存避免重复下载。 */
+const hydrateCardBundle = async (detail: SessionDetail): Promise<SessionDetail> => {
+  const author = detail.st?.author
+  const url = author?.scripts_url
+  if (!author || !url || (author.scripts && author.scripts.length > 0)) {
+    return detail
+  }
+  const key = author.scripts_digest || url
+  let cached = bundleCache.get(key)
+  if (!cached) {
+    const res = await fetch(apiUrl(url), { headers: authHeaders() })
+    if (res.ok) {
+      const data = (await res.json()) as { author_scripts?: unknown[]; truncated?: boolean }
+      cached = { scripts: data.author_scripts || [], truncated: Boolean(data.truncated) }
+      bundleCache.set(key, cached)
+    }
+  }
+  if (cached) {
+    author.scripts = cached.scripts as typeof author.scripts
+    author.truncated = Boolean(author.truncated || cached.truncated)
+  }
+  return detail
+}
 
 /**
  * 条件拉取会话：带上一次的 ETag，304 时返回 null（调用方保留现有状态）。
@@ -76,6 +106,7 @@ export const getSessionConditional = async (
   const res = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sid)}`), {
     headers: {
       ...authHeaders(),
+      'X-FlyAI-Client': '2',
       ...(etag ? { 'If-None-Match': etag } : {}),
     },
   })
@@ -85,7 +116,7 @@ export const getSessionConditional = async (
   if (!res.ok) {
     throw new FlyApiError(res.status, await readDetail(res))
   }
-  const detail = (await res.json()) as SessionDetail
+  const detail = await hydrateCardBundle((await res.json()) as SessionDetail)
   const next = res.headers.get('ETag')
   if (next) sessionEtags.set(sid, next)
   else sessionEtags.delete(sid)

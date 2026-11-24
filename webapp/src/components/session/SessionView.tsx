@@ -8,6 +8,7 @@ import {
   IconSettingsOutline16,
   IconUsersOutline16,
 } from '../base/icons.js'
+import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
@@ -19,6 +20,8 @@ import { StatusPanelDrawer, statusPanelAvailable } from './StatusPanel.js'
 import { ThreadTabs } from './ThreadTabs.js'
 import { CardSyncBar } from '../base/CardSyncBar.js'
 import { ExtensionHost } from '../extensions/ExtensionHost.js'
+import { useExtensionWidgets } from '../../services/extensions/widgets.js'
+import { extensionHost } from '../../services/extensions/hostManager.js'
 import { TokenMeter } from './TokenMeter.js'
 import styles from './SessionView.module.css'
 
@@ -40,6 +43,9 @@ export const SessionView = ({
   const title = session.title || t('untitledChat')
   const canManageMembers = (session.members?.length ?? 0) > 0
   const hasPanel = statusPanelAvailable(session)
+  const headerWidgets = useExtensionWidgets((state) => state.widgets).filter(
+    (widget) => widget.slot === 'header'
+  )
   return (
     <div className={styles.view}>
       <ExtensionHost />
@@ -57,6 +63,17 @@ export const SessionView = ({
             {title}
           </div>
           <div className={styles.headerRight}>
+            {headerWidgets.map((widget) => (
+              <Button
+                key={`${widget.ext}:${widget.id}`}
+                variant="outlined"
+                size="s"
+                title={widget.title || widget.label}
+                onClick={() => void extensionHost.runWidget(widget)}
+              >
+                {widget.label}
+              </Button>
+            ))}
             {hasPanel ? (
               <IconButton
                 size="m"
@@ -86,6 +103,21 @@ export const SessionView = ({
           </div>
         </div>
       )}
+      {isMobile && headerWidgets.length ? (
+        <div style={{ display: 'flex', gap: 6, padding: '6px 12px', overflowX: 'auto' }}>
+          {headerWidgets.map((widget) => (
+            <Button
+              key={`${widget.ext}:${widget.id}`}
+              variant="outlined"
+              size="s"
+              title={widget.title || widget.label}
+              onClick={() => void extensionHost.runWidget(widget)}
+            >
+              {widget.label}
+            </Button>
+          ))}
+        </div>
+      ) : null}
       <ThreadTabs sessionId={session.id} />
       {/* 卡片写回进度条挂在头部（含标签栏）下沿，而不是会话内容里 */}
       <CardSyncBar />

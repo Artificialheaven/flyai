@@ -89,11 +89,23 @@ def _chat_view(history: Sequence[Any]) -> List[Dict[str, Any]]:
     for offset, message in enumerate(items):
         text = getattr(message, "content", None) or ""
         text = _truncate(text, MAX_CHAT_CHAR)
+        role = getattr(message, "role", "") or ""
+        name = getattr(message, "name", "") or ""
         block = {
+            # 兼容旧模板的 index/role/name/content
             "index": base + offset,
-            "role": getattr(message, "role", "") or "",
-            "name": getattr(message, "name", "") or "",
+            "role": role,
+            "name": name,
             "content": text,
+            # 酒馆消息形状：常见模板读 .mes / .is_user / .extra
+            "message_id": base + offset,
+            "mes": text,
+            "is_user": role == "user",
+            "is_system": role == "system",
+            "extra": getattr(message, "attributes", None) or {},
+            "data": {},
+            "is_hidden": bool(getattr(message, "hidden", False)),
+            "swipe_id": 0,
         }
         used += len(text)
         if used > MAX_CHAT_TOTAL:

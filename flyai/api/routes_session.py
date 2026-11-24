@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import uuid
 
@@ -208,6 +209,7 @@ def get_session(sid: str, request: Request):
         changed = bool(template_output.mark_pending_output(s, True)) or changed
     if changed:
         sc.store.save(s)
+    compact = str(request.headers.get("x-flyai-client", "")).strip().startswith("2")
     payload = _session_dict(
         s, with_messages=True, lore=sc.lore,
         user_settings=getattr(sc, "user_settings", None),
@@ -215,6 +217,7 @@ def get_session(sid: str, request: Request):
         level=int(getattr(sc, "level", 0) or 0),
         is_admin=sc.uid == ADMIN_UID,
         preset_scripts=active_preset_regex_scripts(sc),
+        compact=compact,
     )
     # 条件请求：会话文件（可能刚被 MVU/模板标记重写）的 mtime+size 作为弱 ETag。
     # 命中时返回 304，省掉整个 JSON body 的传输与下发（压缩在前者之后）。
@@ -224,6 +227,48 @@ def get_session(sid: str, request: Request):
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return JSONResponse(payload, headers=headers)
+
+
+@router.get("/sessions/{sid}/card-bundle")
+def get_card_bundle(sid: str, request: Request, digest: str = ""):
+    """按 digest 单独下发酒馆助手作者脚本，配合会话响应去重。"""
+    sc = request.app.state.flyai.user(request)
+    _safe_sid(sid)
+    s = sc.store.get(sid)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    char = effective_character(s, sc.lore)
+    if char is None:
+        return {"digest": "", "author_scripts": [], "truncated": False}
+    from ..st.author_scripts import collect_author_scripts
+
+    cfg = getattr(request.app.state.flyai, "config", None)
+    try:
+        author_mb = int(getattr(getattr(cfg, "lore", None), "max_author_script_mb", 5))
+    except (TypeError, ValueError):
+        author_mb = 5
+    author_mb = max(1, min(author_mb, 5))
+    limit = author_mb * 1024 * 1024
+    collected = collect_author_scripts(
+        char, max_script_chars=limit, max_total_chars=limit
+    )
+    scripts = collected["scripts"]
+    current = _author_digest(scripts)
+    etag = 'W/"bundle-%s"' % current
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=31536000, immutable",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(
+        {
+            "digest": current,
+            "author_scripts": scripts,
+            "truncated": bool(collected.get("truncated")),
+        },
+        headers=headers,
+    )
 
 
 @router.get("/sessions/{sid}/messages/{mid}/prompt")
@@ -1723,9 +1768,15 @@ def _member_dict_for_client(m):
     return d
 
 
+def _author_digest(scripts) -> str:
+    raw = json.dumps(scripts or [], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _session_dict(s, with_messages: bool = False, lore=None,
                   user_settings=None, cfg=None, level: int = 0,
-                  is_admin: bool = False, preset_scripts=None):
+                  is_admin: bool = False, preset_scripts=None,
+                  compact: bool = False):
     d = {
         "id": s.id,
         "title": s.title,
@@ -1765,4 +1816,28 @@ def _session_dict(s, with_messages: bool = False, lore=None,
                 level=level, is_admin=is_admin,
                 preset_scripts=preset_scripts,
             )
+            if compact:
+                author = d["st"].get("author") or {}
+                scripts = author.get("scripts") or []
+                if scripts:
+                    digest = _author_digest(scripts)
+                    author["scripts"] = []
+                    author["scripts_digest"] = digest
+                    author["scripts_url"] = (
+                        "/api/sessions/%s/card-bundle?digest=%s" % (s.id, digest)
+                    )
+                # 单 AI 会话：成员副本与顶层角色重复，只下发轻量 stub
+                ai_members = [m for m in (s.members or []) if not m.is_user]
+                if len(ai_members) == 1 and s.character_override:
+                    for member in d["members"]:
+                        if member.get("is_user"):
+                            continue
+                        override = member.get("override")
+                        if not isinstance(override, dict):
+                            continue
+                        member["override_stub"] = {
+                            "name": override.get("name") or (char.name if char else ""),
+                            "avatar": override.get("avatar") or "",
+                        }
+                        member["override"] = None
     return d
