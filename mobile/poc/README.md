@@ -26,6 +26,15 @@ MainActivity (WebView)
 - rootfs 里 `/opt/flyai` 是完整仓库（已剔除 tests/docs/node_modules 等）
 - 数据目录 `/opt/flyai/data` 位于应用私有存储，卸载即清除
 
+## 构建机架构说明
+
+- **APK 编译**不需要 ARM：x86_64 上 aapt2 是原生二进制，反而更简单；
+  只有 rootfs（要装 arm64 的 Python/依赖）需要 arm64 环境。
+- 三种生成 rootfs 的方式：
+  1. aarch64 Linux + chroot：`build-rootfs.sh`（最快）
+  2. 任意架构 + Docker（推荐 x86_64）：`build-rootfs-docker.sh`
+  3. GitHub Actions 公共 arm64 runner（`runs-on: ubuntu-24.04-arm`），产物上传 artifact
+
 ## 构建（aarch64 Linux）
 
 前置：JDK 21、Android SDK（platform 35 / build-tools 35）、Node 18+、`mobile/` 已 `npm ci`。
