@@ -84,3 +84,11 @@ APK (top.eastcloud.flyai.poc, targetSdk 28)
   原实现把 APK 内的 asset 当成私有目录文件打开；现改为 `AssetManager.open()`
   直接流式解包，同时省掉一次 101MB 的临时复制。
 - `versionCode=2 / versionName=1.1`，签名与包名不变，可覆盖安装。
+
+
+### v1.3（2026-11-24）
+
+- 首启页改为「品牌/进度 + 实时控制台」两段式布局，控制台每秒刷新 `boot.log`
+  与 `server.log` 末尾，可直接看到解压、PRoot 启动、Python 报错等阶段。
+- BootService 增加阶段日志（`boot.log`）与状态广播；失败页保留控制台与「重试启动」。
+- `versionCode=4 / versionName=1.3`。

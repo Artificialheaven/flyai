@@ -16,6 +16,9 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 /**
  * 前台服务：首次启动解包 Debian 用户态 + 用 PRoot 拉起 FlyAI（FastAPI）。
@@ -81,7 +84,31 @@ public class BootService extends Service {
         }
     }
 
+    private void stage(String text) {
+        try {
+            Intent intent = new Intent(ACTION_STATUS);
+            intent.setPackage(getPackageName());
+            intent.putExtra("text", text);
+            sendBroadcast(intent);
+        } catch (Exception ignored) {
+        }
+        try (java.io.FileWriter writer = new java.io.FileWriter(new File(getFilesDir(), "boot.log"), true)) {
+            String time = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            writer.write("[" + time + "] " + text + "\n");
+        } catch (Exception ignored) {
+        }
+    }
+
+    static final String ACTION_STATUS = "top.eastcloud.flyai.poc.BOOT_STATUS";
+
     private void notify(String text) {
+        try {
+            Intent intent = new Intent(ACTION_STATUS);
+            intent.setPackage(getPackageName());
+            intent.putExtra("text", text);
+            sendBroadcast(intent);
+        } catch (Exception ignored) {
+        }
         try {
             startForegroundCompat(text);
         } catch (Exception ignored) {
@@ -93,10 +120,12 @@ public class BootService extends Service {
         File rootfs = new File(files, "rootfs");
         File prootDir = new File(files, "proot");
         try {
+            stage("准备 PRoot 运行环境");
             installProot(prootDir);
             File marker = new File(rootfs, ".installed");
             if (!marker.isFile()) {
                 notify("首次启动：正在解压运行环境（约 350MB）…");
+                stage("解压 rootfs（约 350MB，首次启动）…");
                 deleteRecursive(rootfs);
                 try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
                     TarGzExtractor.extract(payload, rootfs);
@@ -104,14 +133,20 @@ public class BootService extends Service {
                 if (!marker.createNewFile()) {
                     throw new RuntimeException("无法写入安装标记");
                 }
+                stage("rootfs 解压完成");
+            } else {
+                stage("rootfs 已安装，跳过解压");
             }
             notify("正在启动 FlyAI…");
+            stage("启动 Python 服务（PRoot）…");
             startServer(files, rootfs, prootDir);
             readLogTail(files);
             notify("FlyAI 正在运行");
+            stage("服务进程已拉起，等待端口 8000 就绪");
         } catch (Throwable error) {
             Log.e(TAG, "boot failed", error);
             notify("启动失败：" + error.getMessage());
+            stage("启动失败：" + error);
         } finally {
             starting = false;
         }
