@@ -50,24 +50,37 @@ PY
 
 echo "== Gradle"
 python3 - "$APP/build.gradle" <<'PY'
+import os
 import sys
 p = sys.argv[1]
 s = open(p).read()
 s = s.replace('targetSdkVersion rootProject.ext.targetSdkVersion', 'targetSdkVersion 28')
 if 'poc-release.jks' not in s:
-    s = s.replace('''    buildTypes {''', '''    lint {
+    # 签名口令从 mobile/keystore.properties 读取，不写死进仓库
+    props = {}
+    props_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'keystore.properties')
+    if os.path.exists(props_path):
+        for line in open(props_path, encoding='utf-8'):
+            line = line.strip()
+            if '=' in line and not line.startswith('#'):
+                k, v = line.split('=', 1)
+                props[k.strip()] = v.strip()
+    store_pw = props.get('storePassword', os.environ.get('FLYAI_STORE_PASSWORD', 'changeme'))
+    key_pw = props.get('keyPassword', os.environ.get('FLYAI_KEY_PASSWORD', store_pw))
+    key_alias = props.get('keyAlias', 'flyai')
+    s = s.replace('''    buildTypes {''', f'''    lint {{
         checkReleaseBuilds false
         abortOnError false
-    }
-    signingConfigs {
-        release {
+    }}
+    signingConfigs {{
+        release {{
             storeFile file('../../poc-release.jks')
-            storePassword 'flyaipoc'
-            keyAlias 'flyai'
-            keyPassword 'flyaipoc'
-        }
-    }
-    buildTypes {''')
+            storePassword '{store_pw}'
+            keyAlias '{key_alias}'
+            keyPassword '{key_pw}'
+        }}
+    }}
+    buildTypes {{''')
     s = s.replace('''        release {
             minifyEnabled false''', '''        release {
             signingConfig signingConfigs.release
