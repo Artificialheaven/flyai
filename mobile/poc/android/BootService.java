@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.util.Log;
 
 import java.io.File;
@@ -30,6 +31,7 @@ public class BootService extends Service {
     private static final int NOTIFICATION_ID = 1001;
 
     private volatile Process server;
+    private PowerManager.WakeLock wakeLock;
     private volatile boolean starting;
 
     @Override
@@ -41,6 +43,13 @@ public class BootService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannel();
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FlyAI:server");
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire();
+        } catch (Exception ignored) {
+        }
         startForegroundCompat("正在准备运行环境…");
     }
 
@@ -250,6 +259,9 @@ public class BootService extends Service {
     @Override
     public void onDestroy() {
         if (server != null) server.destroy();
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
         super.onDestroy();
     }
 }

@@ -92,3 +92,13 @@ APK (top.eastcloud.flyai.poc, targetSdk 28)
   与 `server.log` 末尾，可直接看到解压、PRoot 启动、Python 报错等阶段。
 - BootService 增加阶段日志（`boot.log`）与状态广播；失败页保留控制台与「重试启动」。
 - `versionCode=4 / versionName=1.3`。
+
+
+### v1.4（2026-11-24）
+
+- 移除原生 ActionBar（Activity 改用 `AppTheme.NoActionBar`，窗口背景改为启动页同色）
+- 首启控制台美化：圆点状态灯、实时标签、复制日志按钮、按行着色（错误红/阶段灰/正常绿）
+- 全面屏适配：按 systemBars + displayCutout insets 给内容加内边距，避开状态栏/挖孔；
+  进入 Web 后切换浅色状态栏与导航栏
+- 启动即申请通知权限（Android 13+），前台服务配合 PARTIAL_WAKE_LOCK 提升后台存活
+- `versionCode=5 / versionName=1.4`

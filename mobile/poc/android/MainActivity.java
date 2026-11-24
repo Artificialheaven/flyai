@@ -1,22 +1,31 @@
 package top.eastcloud.flyai.poc;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.style.ForegroundColorSpan;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -40,6 +49,7 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER = 1001;
     private static final long CONSOLE_INTERVAL = 700;
 
+    private FrameLayout rootView;
     private WebView webView;
     private LinearLayout splash;
     private ProgressBar spinner;
@@ -80,6 +90,7 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(Color.parseColor("#0F1115"));
 
         FrameLayout root = new FrameLayout(this);
+        rootView = root;
         root.setBackgroundColor(Color.parseColor("#0F1115"));
 
         webView = new WebView(this);
@@ -92,7 +103,11 @@ public class MainActivity extends Activity {
         root.addView(splash, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        applySystemInsets(root);
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 2001);
+        }
         configureWebView();
         startServerService();
         startConsole();
@@ -170,11 +185,32 @@ public class MainActivity extends Activity {
         consoleBox.setBackground(bg);
         consoleBox.setPadding(dp(12), dp(10), dp(12), dp(8));
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView dot = new TextView(this);
+        dot.setText("●");
+        dot.setTextColor(Color.parseColor("#4ADE80"));
+        dot.setTextSize(8);
+        titleRow.addView(dot);
         TextView title = new TextView(this);
-        title.setText("启动控制台 · 实时");
+        title.setText("  启动控制台 · 实时");
         title.setTextColor(Color.parseColor("#8B96A5"));
         title.setTextSize(10);
-        consoleBox.addView(title);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView copy = new TextView(this);
+        copy.setText("复制");
+        copy.setTextColor(Color.parseColor("#7DD3FC"));
+        copy.setTextSize(10);
+        copy.setPadding(dp(10), dp(2), dp(4), dp(2));
+        copy.setOnClickListener(v -> {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("FlyAI 启动日志", console.getText().toString()));
+            android.widget.Toast.makeText(this, "日志已复制", android.widget.Toast.LENGTH_SHORT).show();
+        });
+        titleRow.addView(copy);
+        consoleBox.addView(titleRow);
 
         consoleScroll = new ScrollView(this);
         consoleScroll.setVerticalScrollBarEnabled(true);
@@ -224,10 +260,9 @@ public class MainActivity extends Activity {
             text.append("---- server.log ----\n").append(server);
         }
         if (text.length() == 0) return;
-        String current = console.getText().toString();
         String next = text.toString();
-        if (!next.equals(current)) {
-            console.setText(next);
+        if (!next.equals(console.getText().toString())) {
+            console.setText(colorizeLog(next));
             consoleScroll.post(() -> consoleScroll.fullScroll(View.FOCUS_DOWN));
         }
     }
@@ -250,6 +285,71 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    /** 按行着色：错误红、阶段灰、正常输出绿。 */
+    private Spannable colorizeLog(String text) {
+        SpannableStringBuilder out = new SpannableStringBuilder();
+        for (String line : text.split("\n", -1)) {
+            int start = out.length();
+            out.append(line).append('\n');
+            String lower = line.toLowerCase();
+            int color;
+            if (lower.contains("失败") || lower.contains("error") || lower.contains("traceback")
+                    || lower.contains("exception") || lower.contains("fatal")) {
+                color = Color.parseColor("#FF9B9B");
+            } else if (line.startsWith("[") || line.startsWith("----")) {
+                color = Color.parseColor("#7C8794");
+            } else {
+                color = Color.parseColor("#9FE3B0");
+            }
+            out.setSpan(new ForegroundColorSpan(color), start, out.length(),
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return out;
+    }
+
+    /** 全面屏：内容避开状态栏/导航栏与挖孔，背景仍铺满。 */
+    private void applySystemInsets(View root) {
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top;
+            int bottom;
+            int left;
+            int right;
+            if (Build.VERSION.SDK_INT >= 30) {
+                Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                top = bars.top;
+                bottom = bars.bottom;
+                left = bars.left;
+                right = bars.right;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+                left = insets.getSystemWindowInsetLeft();
+                right = insets.getSystemWindowInsetRight();
+            }
+            view.setPadding(left, top, right, bottom);
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    /** 进入 Web 后切回浅色系统栏，避免白页面配黑色状态栏。 */
+    private void applyLightSystemBars() {
+        if (rootView != null) rootView.setBackgroundColor(Color.WHITE);
+        getWindow().setStatusBarColor(Color.WHITE);
+        getWindow().setNavigationBarColor(Color.WHITE);
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().getInsetsController().setSystemBarsAppearance(
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+        } else if (Build.VERSION.SDK_INT >= 23) {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         }
     }
 
@@ -321,6 +421,7 @@ public class MainActivity extends Activity {
         splash.animate().alpha(0f).setDuration(220).withEndAction(() -> {
             splash.setVisibility(View.GONE);
         }).start();
+        applyLightSystemBars();
         webView.setVisibility(View.VISIBLE);
         webView.loadUrl("http://127.0.0.1:" + PORT + "/");
     }
