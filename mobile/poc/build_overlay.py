@@ -144,6 +144,11 @@ def read_base_requirements(base_rootfs):
     except Exception as exc:
         warn("读取 base requirements 失败: %s" % exc)
         return None
+    if data is None:
+        # rootfs 里没有 requirements.txt（或成员名不一致）：按未知处理，
+        # 不能当成空文件，否则会误判为依赖变更而禁用 overlay。
+        warn("base rootfs 中找不到 opt/flyai/requirements.txt")
+        return None
     return normalized_requirements(data)
 
 

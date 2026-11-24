@@ -1,3 +1,4 @@
+import io
 import json
 import shutil
 import subprocess
@@ -61,6 +62,33 @@ def test_payload_only_contains_runtime_code(tmp_path):
         assert "/data/" not in name
         assert "/.venv/" not in name
         assert not name.endswith("/config/config.json")
+
+
+def test_read_tar_member_accepts_docker_style_paths(tmp_path):
+    import rootfs_overlay
+
+    data = b"fastapi==0.115.6\n"
+    tar_path = tmp_path / "rootfs.tar.gz"
+    with tarfile.open(str(tar_path), "w:gz") as archive:
+        info = tarfile.TarInfo("opt/flyai/requirements.txt")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    # GNU tar 的 "./opt/..." 与 docker export 的 "opt/..." 都要能命中
+    assert rootfs_overlay.read_tar_member(tar_path, "./opt/flyai/requirements.txt") == data
+    assert rootfs_overlay.read_tar_member(tar_path, "opt/flyai/requirements.txt") == data
+    assert rootfs_overlay.read_tar_member(tar_path, "./opt/flyai/missing.txt") is None
+
+
+def test_read_base_requirements_missing_returns_none(tmp_path):
+    tar_path = tmp_path / "rootfs.tar.gz"
+    with tarfile.open(str(tar_path), "w:gz") as archive:
+        info = tarfile.TarInfo("opt/flyai/main.py")
+        info.size = 1
+        archive.addfile(info, io.BytesIO(b"x"))
+
+    # 缺 requirements.txt 不能当成空文件，否则会误判依赖变化而禁用 overlay
+    assert build_overlay.read_base_requirements(tar_path) is None
 
 
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl unavailable")

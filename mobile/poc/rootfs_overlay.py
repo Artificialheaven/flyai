@@ -76,11 +76,17 @@ def requirements_sha256(data):
     return hashlib.sha256(normalize_requirements(data)).hexdigest()
 
 
+def _normalize_member_name(name):
+    # GNU tar 产物是 "./opt/..."，docker export 是 "opt/..."，统一去掉前缀
+    return name[2:] if name.startswith("./") else name
+
+
 def read_tar_member(tar_path, member_name):
     """流式读取 tar.gz 中的单个文件；找不到返回 None。"""
+    target = _normalize_member_name(member_name)
     with tarfile.open(str(tar_path), "r|gz") as tf:
         for member in tf:
-            if member.name == member_name and member.isfile():
+            if _normalize_member_name(member.name) == target and member.isfile():
                 fileobj = tf.extractfile(member)
                 if fileobj is not None:
                     return fileobj.read()

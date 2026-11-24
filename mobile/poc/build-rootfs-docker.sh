@@ -56,9 +56,22 @@ chmod +x start.sh"
 echo "== 清理体积"
 docker exec "$CID" bash -c "cd /opt/flyai && rm -rf tests docs webapp mobile show promo deploy example scripts \
   .pytest_cache requirements-dev.txt requirements-browser.txt README.md && \
-  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /usr/share/doc/* /usr/share/man/* \
-  /usr/share/locale/* /usr/libexec/gcc /usr/lib/gcc /usr/include && \
-  find usr/lib/python3.12 -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true"
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /var/log/* /tmp/* /run/* \
+  /root/.cache /root/.local \
+  /usr/share/doc/* /usr/share/man/* /usr/share/locale/* /usr/libexec/gcc /usr/lib/gcc /usr/include \
+  /usr/lib/python3.12/test /usr/lib/python3.12/idlelib /usr/lib/python3.12/tkinter \
+  /usr/lib/python3.12/lib2to3 /usr/lib/python3.12/ensurepip \
+  /usr/lib/aarch64-linux-gnu/perl* /usr/lib/aarch64-linux-gnu/libasan* \
+  /usr/lib/aarch64-linux-gnu/libtsan* /usr/lib/aarch64-linux-gnu/libhwasan* \
+  /usr/lib/aarch64-linux-gnu/libubsan* /usr/bin/perl* /usr/bin/gcc* /usr/bin/g++* && \
+  rm -rf .venv/lib/python3.12/site-packages/pip .venv/lib/python3.12/site-packages/pip-* && \
+  find usr/lib/python3.12 -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null; \
+  find .venv -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null; true"
+
+echo "== 体积分布"
+docker exec "$CID" bash -c "du -sh /opt/flyai /opt/flyai/.venv /usr /var /root 2>/dev/null; \
+  echo '-- site-packages top --'; \
+  du -sh /opt/flyai/.venv/lib/python3.12/site-packages/* 2>/dev/null | sort -rh | head -12"
 
 echo "== 导出 rootfs"
 docker export "$CID" | gzip -6 > "$WORK/rootfs.tar.gz"
