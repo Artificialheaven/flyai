@@ -112,3 +112,11 @@ APK (top.eastcloud.flyai.poc, targetSdk 28)
 - 新增 `ACCESS_NETWORK_STATE` 权限；启动控制台会打印实际写入的 DNS。
 - 已有 rootfs 无需重新解包，升级后下次启动即生效。
 - `versionCode=6 / versionName=1.5`。
+
+
+### v1.6（规划）
+
+- 通用设置新增 GitHub 入口；背景图保留 alpha；返回键按下/松开与全面屏手势交给页面处理。
+- 增量更新方案见 `docs/POC增量更新方案书.md`：GitHub Release 发布代码 overlay，
+  客户端下载/校验后本地覆盖；依赖或 native 变化时回退全量 APK。
+- 本次返回键改动在 `MainActivity`，需要先安装一次全量 APK；后续代码/前端更新可走 overlay。

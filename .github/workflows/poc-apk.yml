@@ -25,6 +25,9 @@ concurrency:
 env:
   POC_VERSION_CODE: ${{ inputs.version_code || '6' }}
   POC_VERSION_NAME: ${{ inputs.version_name || '1.5' }}
+  POC_OVERLAY_VERSION: ${{ github.run_number }}
+  # 手动触发用版本号+run；push tag 时沿用触发它的 tag
+  POC_TAG: ${{ github.event_name == 'workflow_dispatch' && format('poc-v{0}-{1}', inputs.version_name || '1.5', github.run_number) || github.ref_name }}
 
 jobs:
   build:
@@ -126,6 +129,26 @@ jobs:
             --version-code "$POC_VERSION_CODE" \
             --version-name "$POC_VERSION_NAME"
 
+      - name: Generate OTA overlay and signed manifest
+        env:
+          POC_OTA_SIGNING_KEY: ${{ secrets.POC_OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$POC_OTA_SIGNING_KEY" ]; then
+            echo "::error::缺少 Secrets.POC_OTA_SIGNING_KEY（OTA RSA 私钥 PEM 的 base64）"
+            exit 1
+          fi
+          printf '%s' "$POC_OTA_SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/poc-ota.key"
+          APK=$(ls release/FlyAI-POC-arm64-v*.apk | head -1)
+          python mobile/poc/build_overlay.py \
+            --version-code "$POC_VERSION_CODE" \
+            --version-name "$POC_VERSION_NAME" \
+            --overlay-version "$POC_OVERLAY_VERSION" \
+            --tag "$POC_TAG" \
+            --repo-url "https://github.com/${{ github.repository }}" \
+            --apk "$APK" \
+            --key "$RUNNER_TEMP/poc-ota.key"
+
       - name: Write job summary
         if: always()
         run: |
@@ -143,10 +166,39 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload APK
+      - name: Upload APK and OTA artifacts
         uses: actions/upload-artifact@v4
         with:
           name: FlyAI-POC-arm64-v${{ env.POC_VERSION_NAME }}
-          path: release/FlyAI-POC-arm64-v*.apk
+          path: |
+            release/FlyAI-POC-arm64-v*.apk
+            release/poc-overlay-*.tar.gz
+            release/poc-update.json
+            release/FlyAI-POC-update-*.zip
           retention-days: 7
           if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/poc-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: FlyAI-POC-arm64-v${{ env.POC_VERSION_NAME }}
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.POC_TAG }}
+          name: FlyAI POC ${{ env.POC_VERSION_NAME }}
+          make_latest: true
+          files: |
+            artifacts/FlyAI-POC-arm64-v*.apk
+            artifacts/poc-overlay-*.tar.gz
+            artifacts/poc-update.json
+            artifacts/FlyAI-POC-update-*.zip

@@ -29,6 +29,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -42,9 +43,12 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.UUID;
 
 /** 本地一体化 POC：前台服务拉起 rootfs 里的 FlyAI，WebView 连 127.0.0.1:8000。 */
 public class MainActivity extends Activity {
@@ -67,6 +71,18 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling;
     private int backSeq;
+    /** 注入主页面的随机 token；卡片 iframe 读不到主页面闭包，不能调用更新桥。 */
+    private final String updateToken = UUID.randomUUID().toString();
+
+    private final BroadcastReceiver updateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String json = intent.getStringExtra("json");
+            if (json != null) {
+                evaluateJs("window.__flyaiPocEvent&&window.__flyaiPocEvent(" + json + ")");
+            }
+        }
+    };
 
     private final Runnable consoleTick = new Runnable() {
         @Override
@@ -373,6 +389,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 19) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
+        webView.addJavascriptInterface(new UpdateBridge(), "FlyAIPoc");
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -383,6 +400,11 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                 return openExternal(Uri.parse(url));
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                injectPocBridge();
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -430,6 +452,187 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
+    }
+
+    private void evaluateJs(String js) {
+        if (webView == null) return;
+        webView.evaluateJavascript(js, null);
+    }
+
+    private void injectPocBridge() {
+        try {
+            JSONObject info = new JSONObject(pocStateJson());
+            info.put("token", updateToken);
+            evaluateJs("window.__flyaiPoc=" + info.toString()
+                    + ";window.dispatchEvent(new Event('flyai-poc-ready'));");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String pocStateJson() {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("supported", true);
+            try {
+                android.content.pm.PackageInfo info = getPackageManager()
+                        .getPackageInfo(getPackageName(), 0);
+                out.put("versionCode", info.versionCode);
+                out.put("versionName", info.versionName == null ? "" : info.versionName);
+            } catch (Exception ignored) {
+            }
+            JSONObject state = OtaState.read(getFilesDir());
+            out.put("baseRev", state.optString("baseRev", ""));
+            out.put("codeRev", state.optString("codeRev", ""));
+            out.put("overlayVersion", state.optLong("overlayVersion", 0));
+            out.put("pending", false);
+            File pending = new File(getFilesDir(), "update/pending");
+            if (new File(pending, "ready").isFile()) {
+                try {
+                    JSONObject m = OtaManifest.read(new File(pending, "manifest.json"));
+                    JSONObject overlay = m.optJSONObject("overlay");
+                    out.put("pending", true);
+                    out.put("pendingVersion", m.optString("version", ""));
+                    out.put("pendingOverlayVersion", m.optLong("overlay_version", 0));
+                    out.put("pendingSize", overlay == null ? 0 : overlay.optLong("size", 0));
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception e) {
+            try {
+                out.put("supported", true);
+                out.put("error", e.getMessage());
+            } catch (Exception ignored) {
+            }
+        }
+        return out.toString();
+    }
+
+    private String startUpdateAction(String action, String token) {
+        if (!updateToken.equals(token)) return "{\"ok\":false,\"error\":\"forbidden\"}";
+        try {
+            Intent intent = new Intent(this, UpdateService.class);
+            intent.setAction(action);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+            return "{\"ok\":true}";
+        } catch (Exception e) {
+            return errorJson(e.getMessage());
+        }
+    }
+
+    private static String errorJson(String message) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("ok", false);
+            out.put("error", message == null ? "unknown" : message);
+        } catch (Exception ignored) {
+        }
+        return out.toString();
+    }
+
+    /** 停止 BootService（杀死 Python）→ 重新启动；BootService 会在启动前应用 pending。 */
+    private void restartForUpdate() {
+        runOnUiThread(() -> {
+            android.widget.Toast.makeText(this, "正在应用更新…", android.widget.Toast.LENGTH_SHORT).show();
+            evaluateJs("window.__flyaiPocEvent&&window.__flyaiPocEvent({state:'applying'})");
+        });
+        new Thread(() -> {
+            stopService(new Intent(this, BootService.class));
+            for (int i = 0; i < 40 && probe(); i++) {
+                try {
+                    Thread.sleep(250);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            Intent boot = new Intent(this, BootService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(boot);
+            } else {
+                startService(boot);
+            }
+            for (int i = 0; i < 360; i++) {
+                if (probe()) {
+                    runOnUiThread(() -> {
+                        if (webView != null) {
+                            webView.clearCache(true);
+                            webView.reload();
+                        }
+                    });
+                    return;
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            runOnUiThread(() -> android.widget.Toast.makeText(
+                    this, "更新后服务未就绪，请查看启动控制台",
+                    android.widget.Toast.LENGTH_LONG).show());
+        }, "flyai-apply-update").start();
+    }
+
+    private final class UpdateBridge {
+        @JavascriptInterface
+        public String getState(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            return pocStateJson();
+        }
+
+        @JavascriptInterface
+        public String check(String token) {
+            return startUpdateAction(UpdateService.ACTION_CHECK, token);
+        }
+
+        @JavascriptInterface
+        public String downloadOverlay(String token) {
+            return startUpdateAction(UpdateService.ACTION_DOWNLOAD_OVERLAY, token);
+        }
+
+        @JavascriptInterface
+        public String downloadFull(String token) {
+            return startUpdateAction(UpdateService.ACTION_DOWNLOAD_FULL, token);
+        }
+
+        @JavascriptInterface
+        public String cancel(String token) {
+            return startUpdateAction(UpdateService.ACTION_CANCEL, token);
+        }
+
+        @JavascriptInterface
+        public String applyOverlay(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            File ready = new File(getFilesDir(), "update/pending/ready");
+            if (!ready.isFile()) return errorJson("没有已下载的更新");
+            restartForUpdate();
+            return "{\"ok\":true}";
+        }
+
+        @JavascriptInterface
+        public String markReady(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            OtaState.markReady(getFilesDir());
+            return "{\"ok\":true}";
+        }
+
+        @JavascriptInterface
+        public String openInstallSettings(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            if (Build.VERSION.SDK_INT >= 26) {
+                Intent intent = new Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            }
+            return "{\"ok\":true}";
+        }
     }
 
     /** 站外 http(s) 链接一律交给系统浏览器，避免把 App 自身导航走 */
@@ -514,10 +717,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        IntentFilter bootFilter = new IntentFilter(BootService.ACTION_STATUS);
+        IntentFilter updateFilter = new IntentFilter(UpdateService.ACTION_STATUS);
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(statusReceiver, new IntentFilter(BootService.ACTION_STATUS), Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(statusReceiver, bootFilter, Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(updateReceiver, updateFilter, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            registerReceiver(statusReceiver, new IntentFilter(BootService.ACTION_STATUS));
+            registerReceiver(statusReceiver, bootFilter);
+            registerReceiver(updateReceiver, updateFilter);
         }
     }
 
@@ -525,6 +732,10 @@ public class MainActivity extends Activity {
     protected void onStop() {
         try {
             unregisterReceiver(statusReceiver);
+        } catch (Exception ignored) {
+        }
+        try {
+            unregisterReceiver(updateReceiver);
         } catch (Exception ignored) {
         }
         super.onStop();

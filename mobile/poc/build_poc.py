@@ -58,6 +58,21 @@ LATEST_ROOTFS = LATEST_DIR / "rootfs.tar.gz"
 PROOT_DIR = CACHE_DIR / "proot"
 
 PROOT_FILES = ("proot", "loader", "libtalloc.so.2", "libandroid-shmem.so")
+DEFAULT_OTA_PUBLIC_KEY = POC_DIR / "ota-public.pem"
+DEFAULT_OTA_MANIFEST_URL = (
+    "https://github.com/Artificialheaven/flyai/releases/latest/download/poc-update.json"
+)
+
+
+def ota_public_key_b64(path):
+    """读取 PEM 公钥，返回 Java 内嵌用的 base64 DER（去掉头尾/换行）。"""
+    path = Path(path)
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    return "".join(
+        line.strip() for line in text.splitlines() if "-----" not in line
+    )
 
 
 def root_build_gradle():
@@ -441,11 +456,22 @@ def apply_patches(args, build_mobile):
     app = android_dir / "app"
     rev = sha256_file(LATEST_ROOTFS)[:16]
 
+    sys.path.insert(0, str(POC_DIR))
+    import build_overlay
+
+    code_rev = build_overlay.compute_code_rev(REPO_ROOT)
+    public_key = ota_public_key_b64(args.ota_public_key)
+    if not public_key:
+        warn("未找到 OTA 公钥 %s：本次 APK 会拒绝所有增量包" % args.ota_public_key)
+
     java_dir = app / "src" / "main" / "java" / "top" / "eastcloud" / "flyai" / "poc"
     java_dir.mkdir(parents=True, exist_ok=True)
     for java_file in sorted((POC_DIR / "android").glob("*.java")):
         text = java_file.read_text(encoding="utf-8")
         text = text.replace("__ROOTFS_REV__", rev)
+        text = text.replace("__CODE_REV__", code_rev)
+        text = text.replace("__OTA_PUBLIC_KEY__", public_key)
+        text = text.replace("__OTA_MANIFEST_URL__", args.ota_manifest_url)
         (java_dir / java_file.name).write_text(text, encoding="utf-8")
 
     shutil.copyfile(
@@ -456,6 +482,11 @@ def apply_patches(args, build_mobile):
         str(POC_DIR / "res" / "values" / "styles.patched.xml"),
         str(app / "src" / "main" / "res" / "values" / "styles.xml"),
     )
+    file_paths = POC_DIR / "res" / "xml" / "file_paths.patched.xml"
+    if file_paths.is_file():
+        dest = app / "src" / "main" / "res" / "xml" / "file_paths.xml"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(file_paths), str(dest))
     shutil.copyfile(
         str(POC_DIR / "android" / "app-build.gradle.patched"),
         str(app / "build.gradle"),
@@ -488,6 +519,7 @@ def apply_patches(args, build_mobile):
 
     prepare_signing(args, build_mobile)
     print("rootfs 版本标记: %s" % rev)
+    print("代码版本标记: %s" % code_rev)
 
 
 def pick_java_home():
@@ -613,6 +645,7 @@ def build_apk(args, build_mobile, java_home):
     print("  体积: %.1f MB" % (output.stat().st_size / 1024.0 / 1024.0))
     print("  SHA256: %s" % digest)
     print("  versionCode=%d versionName=%s" % (args.version_code, args.version_name))
+    return output
 
 
 def parse_args():
@@ -630,6 +663,21 @@ def parse_args():
     parser.add_argument("--force-rootfs", action="store_true", help="requirements 不一致时仍继续（不推荐）")
     parser.add_argument("--no-build", action="store_true", help="只生成 rootfs，不编译 APK")
     parser.add_argument("--clean", action="store_true", help="删除 .poc-build 后重新生成 Android 工程")
+    parser.add_argument(
+        "--ota-public-key",
+        default=str(DEFAULT_OTA_PUBLIC_KEY),
+        help="OTA 签名公钥 PEM（默认 mobile/poc/ota-public.pem）",
+    )
+    parser.add_argument(
+        "--ota-manifest-url",
+        default=DEFAULT_OTA_MANIFEST_URL,
+        help="客户端检查更新的清单地址",
+    )
+    parser.add_argument("--overlay", action="store_true", help="APK 构建后同时生成 OTA overlay/清单")
+    parser.add_argument("--overlay-version", type=int, default=0, help="overlay 版本（默认当前时间 YYYYMMDDHHMM）")
+    parser.add_argument("--release-tag", default="", help="GitHub Release tag（生成下载 URL）")
+    parser.add_argument("--overlay-notes", default="", help="更新说明")
+    parser.add_argument("--ota-key", default=str(Path.home() / ".flyai" / "poc-ota-signing.key"))
     return parser.parse_args()
 
 
@@ -652,7 +700,24 @@ def main():
 
     build_mobile = ensure_mobile_project(args, args.sdk)
     apply_patches(args, build_mobile)
-    build_apk(args, build_mobile, java_home)
+    output = build_apk(args, build_mobile, java_home)
+    if args.overlay:
+        overlay_version = args.overlay_version or int(time.strftime("%Y%m%d%H%M"))
+        tag = args.release_tag or ("poc-v%s-%s" % (args.version_name, overlay_version))
+        cmd = [
+            sys.executable,
+            str(POC_DIR / "build_overlay.py"),
+            "--version-code", str(args.version_code),
+            "--version-name", args.version_name,
+            "--overlay-version", str(overlay_version),
+            "--tag", tag,
+            "--apk", str(output),
+            "--notes", args.overlay_notes,
+        ]
+        if args.ota_key:
+            cmd.extend(["--key", str(args.ota_key)])
+        log("生成 OTA overlay / 签名清单")
+        subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":

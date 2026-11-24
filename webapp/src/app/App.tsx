@@ -14,6 +14,12 @@ import { SearchPanel } from '../components/search/SearchPanel.js'
 import { closeSearchPanel, useSearchPanel } from '../components/search/searchPanelState.js'
 import { closeTopOverlay } from '../components/base/overlayStack.js'
 import { initNative } from '../services/native.js'
+import {
+  checkPocUpdate,
+  isPocUpdateSupported,
+  markPocReady,
+  onPocReady,
+} from '../services/pocUpdate.js'
 import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
@@ -100,6 +106,36 @@ export const App = () => {
       }
       return false
     })
+  }, [])
+
+  // POC 更新：页面挂载后告诉原生“前端已就绪”（回滚看门狗），并延迟检查新版本
+  useEffect(() => {
+    let started = false
+    const start = () => {
+      if (started || !isPocUpdateSupported()) {
+        return
+      }
+      started = true
+      markPocReady()
+      window.setTimeout(() => {
+        if (isPocUpdateSupported()) {
+          checkPocUpdate()
+        }
+      }, 3000)
+    }
+    start()
+    const offReady = onPocReady(start)
+    // 页面可能在 React 挂载前就收到 onPageFinished；补一个短轮询兜底
+    const timer = window.setInterval(() => {
+      if (isPocUpdateSupported()) {
+        start()
+        window.clearInterval(timer)
+      }
+    }, 500)
+    return () => {
+      window.clearInterval(timer)
+      offReady()
+    }
   }, [])
 
   // 服务器地址来自根目录 config.json，必须在任何请求发出前加载完成；

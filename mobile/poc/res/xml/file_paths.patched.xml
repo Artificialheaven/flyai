@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 完整 APK 下载目录，供 FileProvider 交给系统安装器 -->
+    <files-path name="update" path="update/" />
+    <cache-path name="cache" path="." />
+</paths>

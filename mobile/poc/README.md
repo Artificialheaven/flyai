@@ -26,6 +26,18 @@ MainActivity (WebView)
 - rootfs 里 `/opt/flyai` 是完整仓库（已剔除 tests/docs/node_modules 等）
 - 数据目录 `/opt/flyai/data` 位于应用私有存储，卸载即清除
 
+## 增量更新
+
+代码/前端更新走 GitHub Release 的 rootfs overlay（约 2.7 MB），不重装 APK；
+依赖或 native 变化时回退全量 APK。设计见 `docs/POC增量更新方案书.md`。
+
+OTA 签名：
+
+- 私钥默认 `%USERPROFILE%\.flyai\poc-ota-signing.key`（不入库）；
+- 公钥 `mobile/poc/ota-public.pem` 随 APK 构建注入；
+- CI 用 Secret `POC_OTA_SIGNING_KEY`（私钥 PEM 的 base64）签名；
+- 重新生成密钥后必须同步更新公钥并重打 APK。
+
 ## 构建机架构说明
 
 - **APK 编译**不需要 ARM：x86_64 上 aapt2 是原生二进制，反而更简单；

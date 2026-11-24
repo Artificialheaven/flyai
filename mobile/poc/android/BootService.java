@@ -15,6 +15,8 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -36,6 +38,7 @@ public class BootService extends Service {
     private static final String TAG = "FlyAI-Boot";
     private static final String CHANNEL = "flyai_server";
     private static final int NOTIFICATION_ID = 1001;
+    private static final int PORT = 8000;
 
     /**
      * 打包时由 mobile/poc/build_poc.py 注入 rootfs 内容版本（哈希前 16 位）。
@@ -43,6 +46,9 @@ public class BootService extends Service {
      * 手动构建未注入时保留占位符也仍然可以运行。
      */
     private static final String ROOTFS_REV = "__ROOTFS_REV__";
+
+    /** 打包时注入的代码树版本；与 OTA 清单的 code_rev 使用同一算法。 */
+    private static final String CODE_REV = "__CODE_REV__";
 
     private volatile Process server;
     private PowerManager.WakeLock wakeLock;
@@ -145,9 +151,24 @@ public class BootService extends Service {
         try {
             stage("准备 PRoot 运行环境");
             installProot(prootDir);
+
+            JSONObject state = OtaState.read(files);
+            recoverInterruptedApply(files, rootfs, state);
+            state = OtaState.read(files);
+
+            // 上一次 overlay 连续两次没有收到前端 markReady：先回滚再启动
+            if (isOverlayCode(state) && state.optJSONObject("boot") != null
+                    && state.optJSONObject("boot").optInt("attempts", 0) >= 2) {
+                stage("上次更新未通过启动检测，回滚…");
+                rollback(files, rootfs, state, "前端连续两次未就绪");
+                state = OtaState.read(files);
+            }
+
             File marker = new File(rootfs, ".installed");
-            boolean fresh = !marker.isFile();
-            boolean upgrade = !fresh && !ROOTFS_REV.equals(readMarker(marker));
+            String baseRev = state.optString("baseRev", "");
+            boolean codeMissing = !new File(rootfs, "opt/flyai/main.py").isFile();
+            boolean fresh = codeMissing && baseRev.isEmpty() && !marker.isFile();
+            boolean upgrade = !fresh && (codeMissing || !ROOTFS_REV.equals(baseRev));
             if (fresh || upgrade) {
                 if (fresh) {
                     notify("首次启动：正在解压运行环境（约 350MB）…");
@@ -156,35 +177,392 @@ public class BootService extends Service {
                 } else {
                     notify("正在更新运行环境…");
                     stage("rootfs 版本变化，更新代码（保留数据与配置）…");
-                    // 只替换代码，保留 .venv / config / data，避免升级丢聊天记录和 API Key
-                    deleteRecursive(new File(rootfs, "opt/flyai/flyai"));
-                    deleteRecursive(new File(rootfs, "opt/flyai/plugins"));
-                    deleteIfExists(new File(rootfs, "opt/flyai/main.py"));
-                    deleteIfExists(new File(rootfs, "opt/flyai/requirements.txt"));
-                    deleteIfExists(new File(rootfs, "opt/flyai/start.sh"));
+                    deleteCode(rootfs);
                 }
                 try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
                     TarGzExtractor.extract(payload, rootfs);
                 }
                 new File(rootfs, "opt/flyai/data").mkdirs();
                 writeMarker(marker, ROOTFS_REV);
+
+                state = OtaState.defaults();
+                state.put("baseRev", ROOTFS_REV);
+                state.put("codeRev", bundledCodeRev());
+                state.put("overlayVersion", 0L);
+                state.put("requirementsSha256", OtaState.requirementsSha256(rootfs));
+                state.put("appVersionCode", OtaState.versionCode(this));
+                OtaState.write(files, state);
+                OtaState.deleteRecursive(new File(files, "update/pending"));
+                OtaState.deleteRecursive(new File(files, "update/backup"));
                 stage(fresh ? "rootfs 解压完成" : "rootfs 更新完成");
             } else {
                 stage("rootfs 已安装（" + ROOTFS_REV + "），跳过解压");
             }
+
+            // 有待生效的代码增量包：在启动 Python 前应用
+            if (applyPending(files, rootfs)) {
+                state = OtaState.read(files);
+            }
+
             prepareDns(rootfs);
             notify("正在启动 FlyAI…");
             stage("启动 Python 服务（PRoot）…");
             startServer(files, rootfs, prootDir);
-            readLogTail(files);
-            notify("FlyAI 正在运行");
-            stage("服务进程已拉起，等待端口 8000 就绪");
+
+            if (!waitForPort(60000)) {
+                stage("服务 60 秒内未就绪");
+                state = OtaState.read(files);
+                if (!state.optString("backupDir", "").isEmpty()) {
+                    rollback(files, rootfs, state, "服务启动超时");
+                    startServer(files, rootfs, prootDir);
+                    if (!waitForPort(60000)) {
+                        notify("回滚后服务仍未就绪，请查看控制台");
+                    } else {
+                        notify("更新失败，已恢复到上一版本");
+                    }
+                } else {
+                    notify("启动失败：本地服务未就绪");
+                }
+            } else {
+                state = OtaState.read(files);
+                if (isOverlayCode(state)) {
+                    JSONObject boot = state.optJSONObject("boot");
+                    if (boot == null) boot = new JSONObject();
+                    boot.put("attempts", boot.optInt("attempts", 0) + 1);
+                    boot.put("lastCodeRev", state.optString("codeRev", ""));
+                    state.put("boot", boot);
+                    OtaState.write(files, state);
+                }
+                readLogTail(files);
+                notify("FlyAI 正在运行");
+                stage("服务进程已拉起，端口 8000 就绪");
+            }
         } catch (Throwable error) {
             Log.e(TAG, "boot failed", error);
             notify("启动失败：" + error.getMessage());
             stage("启动失败：" + error);
         } finally {
             starting = false;
+        }
+    }
+
+    private static String bundledCodeRev() {
+        if (CODE_REV == null || CODE_REV.isEmpty() || CODE_REV.startsWith("__")) {
+            return "";
+        }
+        return CODE_REV;
+    }
+
+    private static boolean isOverlayCode(JSONObject state) {
+        String code = state == null ? "" : state.optString("codeRev", "");
+        return !code.isEmpty() && !code.equals(bundledCodeRev());
+    }
+
+    private boolean waitForPort(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try (java.net.Socket socket = new java.net.Socket()) {
+                socket.connect(new java.net.InetSocketAddress("127.0.0.1", PORT), 500);
+                return true;
+            } catch (Exception ignored) {
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void stopServer() {
+        Process current = server;
+        server = null;
+        if (current != null) {
+            current.destroy();
+            try {
+                Thread.sleep(800);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            if (current.isAlive()) current.destroyForcibly();
+        }
+    }
+
+    private static void deleteCode(File rootfs) {
+        File opt = new File(rootfs, "opt/flyai");
+        deleteRecursive(new File(opt, "flyai"));
+        deleteRecursive(new File(opt, "plugins"));
+        deleteIfExists(new File(opt, "main.py"));
+        deleteIfExists(new File(opt, "requirements.txt"));
+        deleteIfExists(new File(opt, "start.sh"));
+        deleteIfExists(new File(opt, "config/config.example.json"));
+    }
+
+    /**
+     * 上次 apply 在解包中途被杀：恢复 backup；没有 backup 就强制全量。
+     */
+    private void recoverInterruptedApply(File files, File rootfs, JSONObject state)
+            throws Exception {
+        JSONObject applying = state.optJSONObject("applying");
+        if (applying == null) return;
+        stage("检测到未完成的代码更新，恢复上一版本");
+        String backup = state.optString("backupDir", "");
+        try {
+            if (!backup.isEmpty() && new File(files, backup).isDirectory()) {
+                restoreBackup(files, rootfs, state);
+            } else {
+                // 没有可用备份：清空 baseRev，让下面走全量解包
+                state.put("applying", JSONObject.NULL);
+                state.put("baseRev", "");
+                OtaState.write(files, state);
+            }
+        } catch (Exception e) {
+            stage("恢复失败，将重新解包基础 rootfs：" + e);
+            state.put("applying", JSONObject.NULL);
+            state.put("baseRev", "");
+            OtaState.write(files, state);
+        }
+    }
+
+    /**
+     * 应用 update/pending。返回是否应用成功；失败时保持/恢复旧版本。
+     */
+    private boolean applyPending(File files, File rootfs) {
+        File pending = new File(files, "update/pending");
+        File ready = new File(pending, "ready");
+        if (!ready.isFile()) return false;
+
+        JSONObject manifest;
+        try {
+            manifest = OtaManifest.read(new File(pending, "manifest.json"));
+        } catch (Exception e) {
+            stage("更新清单读取失败：" + e.getMessage());
+            dropPending(files);
+            return false;
+        }
+        if (!OtaManifest.verify(manifest)) {
+            stage("更新清单验签失败，已丢弃");
+            dropPending(files);
+            return false;
+        }
+        JSONObject overlay = manifest.optJSONObject("overlay");
+        if (overlay == null) {
+            stage("更新清单没有 overlay，已丢弃");
+            dropPending(files);
+            return false;
+        }
+
+        JSONObject state = OtaState.read(files);
+        String stateReq = state.optString("requirementsSha256", "");
+        if (stateReq.isEmpty()) {
+            stateReq = OtaState.requirementsSha256(rootfs);
+            try {
+                state.put("requirementsSha256", stateReq);
+            } catch (Exception ignored) {
+            }
+        }
+        String manifestReq = manifest.optString("requirements_sha256", "");
+        long currentVersion = OtaState.versionCode(this);
+        long manifestVersion = manifest.optLong("version_code", 0);
+        long minApp = manifest.optLong("min_app_version_code", 0);
+        long overlayVersion = manifest.optLong("overlay_version", 0);
+        String codeRev = manifest.optString("code_rev", "");
+        JSONObject lastRollback = state.optJSONObject("lastRollback");
+        String badRev = lastRollback == null ? "" : lastRollback.optString("codeRev", "");
+        String reason = null;
+        if (!manifestReq.equals(stateReq)) {
+            reason = "requirements 与当前 base 不一致";
+        } else if (currentVersion < minApp || (manifestVersion > 0 && currentVersion > manifestVersion)) {
+            reason = "APK 版本不匹配";
+        } else if (overlayVersion <= state.optLong("overlayVersion", 0)) {
+            reason = "版本不高于已安装";
+        } else if (codeRev.isEmpty() || codeRev.equals(state.optString("codeRev", ""))) {
+            reason = "代码版本未变化";
+        } else if (codeRev.equals(badRev)) {
+            reason = "该版本上次已回滚";
+        }
+        if (reason != null) {
+            stage("跳过更新：" + reason);
+            dropPending(files);
+            return false;
+        }
+
+        File payload = new File(pending, "payload.tar.gz");
+        if (!payload.isFile()
+                || payload.length() != overlay.optLong("size", -1)
+                || !OtaManifest.sha256(payload).equals(overlay.optString("sha256", ""))) {
+            stage("更新包大小/哈希校验失败，已丢弃");
+            dropPending(files);
+            return false;
+        }
+
+        String relBackup = "update/backup/" + System.currentTimeMillis();
+        File backupOpt = new File(new File(files, relBackup), "opt/flyai");
+        try {
+            if (!backupOpt.isDirectory() && !backupOpt.mkdirs()) {
+                throw new RuntimeException("无法创建更新备份目录");
+            }
+            // 先复制旧代码（保留相对路径，便于原样恢复）；复制失败时原目录不受影响
+            File opt = new File(rootfs, "opt/flyai");
+            copyIfExists(new File(opt, "flyai"), new File(backupOpt, "flyai"));
+            copyIfExists(new File(opt, "plugins"), new File(backupOpt, "plugins"));
+            copyIfExists(new File(opt, "main.py"), new File(backupOpt, "main.py"));
+            copyIfExists(new File(opt, "requirements.txt"), new File(backupOpt, "requirements.txt"));
+            copyIfExists(new File(opt, "start.sh"), new File(backupOpt, "start.sh"));
+            copyIfExists(new File(opt, "config/config.example.json"),
+                    new File(backupOpt, "config/config.example.json"));
+
+            long prevOverlay = state.optLong("overlayVersion", 0);
+            String prevCode = state.optString("codeRev", "");
+            JSONObject applying = new JSONObject();
+            applying.put("prevCodeRev", prevCode);
+            applying.put("prevOverlayVersion", prevOverlay);
+            state.put("applying", applying);
+            state.put("backupDir", relBackup);
+            state.put("prevCodeRev", prevCode);
+            state.put("prevOverlayVersion", prevOverlay);
+            OtaState.write(files, state);
+            deleteCode(rootfs);
+
+            TarGzExtractor.extract(payload, rootfs);
+            if (!new File(rootfs, "opt/flyai/main.py").isFile()
+                    || !new File(rootfs, "opt/flyai/flyai/app.py").isFile()
+                    || !new File(rootfs, "opt/flyai/start.sh").isFile()) {
+                throw new RuntimeException("增量包缺少关键代码文件");
+            }
+
+            state.put("codeRev", codeRev);
+            state.put("overlayVersion", overlayVersion);
+            state.put("applying", JSONObject.NULL);
+            state.put("boot", new JSONObject().put("attempts", 0).put("lastCodeRev", codeRev));
+            OtaState.write(files, state);
+            // 已解包完成，pending 不再需要；backup 留到 markReady/回滚
+            dropPending(files);
+            stage("代码增量已应用：" + codeRev + "（旧版本已备份）");
+            return true;
+        } catch (Throwable error) {
+            stage("应用增量失败，恢复上一版本：" + error);
+            try {
+                restoreBackup(files, rootfs, OtaState.read(files));
+            } catch (Throwable restoreError) {
+                stage("恢复备份失败：" + restoreError);
+            }
+            return false;
+        }
+    }
+
+    private void restoreBackup(File files, File rootfs, JSONObject state) throws Exception {
+        String relBackup = state.optString("backupDir", "");
+        File backup = new File(files, relBackup);
+        if (relBackup.isEmpty() || !backup.isDirectory()) {
+            throw new RuntimeException("没有可用的更新备份");
+        }
+        deleteCode(rootfs);
+        File backupOpt = new File(backup, "opt/flyai");
+        File opt = new File(rootfs, "opt/flyai");
+        if (!opt.isDirectory() && !opt.mkdirs()) {
+            throw new RuntimeException("无法创建代码目录");
+        }
+        moveIfExists(new File(backupOpt, "flyai"), new File(opt, "flyai"));
+        moveIfExists(new File(backupOpt, "plugins"), new File(opt, "plugins"));
+        moveIfExists(new File(backupOpt, "main.py"), new File(opt, "main.py"));
+        moveIfExists(new File(backupOpt, "requirements.txt"), new File(opt, "requirements.txt"));
+        moveIfExists(new File(backupOpt, "start.sh"), new File(opt, "start.sh"));
+        moveIfExists(new File(backupOpt, "config/config.example.json"),
+                new File(opt, "config/config.example.json"));
+
+        state.put("codeRev", state.optString("prevCodeRev", ""));
+        state.put("overlayVersion", state.optLong("prevOverlayVersion", 0));
+        state.put("applying", JSONObject.NULL);
+        state.put("backupDir", "");
+        state.put("prevCodeRev", "");
+        state.put("prevOverlayVersion", 0);
+        state.put("boot", new JSONObject().put("attempts", 0));
+        OtaState.write(files, state);
+        OtaState.deleteRecursive(backup);
+        dropPending(files);
+    }
+
+    /** 回滚到 backup；没有 backup 时重新解包 APK 内置代码。 */
+    private void rollback(File files, File rootfs, JSONObject state, String reason) {
+        stopServer();
+        String badRev = state.optString("codeRev", "");
+        try {
+            if (!state.optString("backupDir", "").isEmpty()) {
+                restoreBackup(files, rootfs, state);
+            } else {
+                deleteCode(rootfs);
+                try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
+                    TarGzExtractor.extract(payload, rootfs);
+                }
+                state = OtaState.defaults();
+                state.put("baseRev", ROOTFS_REV);
+                state.put("codeRev", bundledCodeRev());
+                state.put("requirementsSha256", OtaState.requirementsSha256(rootfs));
+                state.put("appVersionCode", OtaState.versionCode(this));
+                OtaState.write(files, state);
+                OtaState.deleteRecursive(new File(files, "update/pending"));
+                OtaState.deleteRecursive(new File(files, "update/backup"));
+            }
+            state = OtaState.read(files);
+            JSONObject last = new JSONObject();
+            last.put("codeRev", badRev);
+            last.put("at", System.currentTimeMillis());
+            last.put("reason", reason == null ? "" : reason);
+            state.put("lastRollback", last);
+            OtaState.write(files, state);
+            stage("已回滚，原因：" + reason);
+        } catch (Throwable error) {
+            stage("回滚失败：" + error);
+        }
+    }
+
+    private static void dropPending(File files) {
+        OtaState.deleteRecursive(new File(files, "update/pending"));
+    }
+
+    private static void copyIfExists(File source, File target) {
+        if (source == null || !source.exists()) return;
+        try {
+            copyRecursive(source, target);
+        } catch (Exception e) {
+            throw new RuntimeException("备份失败: " + source + " → " + target, e);
+        }
+    }
+
+    private static void moveIfExists(File source, File target) {
+        if (source == null || !source.exists()) return;
+        File parent = target.getParentFile();
+        if (parent != null && !parent.isDirectory()) parent.mkdirs();
+        if (source.renameTo(target)) return;
+        try {
+            copyRecursive(source, target);
+            deleteRecursive(source);
+        } catch (Exception e) {
+            throw new RuntimeException("移动失败: " + source + " → " + target, e);
+        }
+    }
+
+    private static void copyRecursive(File source, File target) throws Exception {
+        File parent = target.getParentFile();
+        if (parent != null && !parent.isDirectory()) parent.mkdirs();
+        if (source.isDirectory()) {
+            if (!target.isDirectory() && !target.mkdirs()) {
+                throw new RuntimeException("无法创建目录: " + target);
+            }
+            File[] children = source.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    copyRecursive(child, new File(target, child.getName()));
+                }
+            }
+            return;
+        }
+        try (InputStream in = new java.io.FileInputStream(source);
+             OutputStream out = new FileOutputStream(target)) {
+            copy(in, out);
         }
     }
 
@@ -355,7 +733,7 @@ public class BootService extends Service {
 
     @Override
     public void onDestroy() {
-        if (server != null) server.destroy();
+        stopServer();
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }

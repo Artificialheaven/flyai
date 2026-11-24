@@ -23,7 +23,20 @@ import { importSessions, removeAllSessions } from '../../services/chat/store.js'
 import { useAuth } from '../../services/flyai/auth.js'
 import { assetUrl, FlyApiError } from '../../services/flyai/client.js'
 import { uploadImage } from '../../services/flyai/lore.js'
-import { compressImageFile } from '../../services/attachments.js'
+import { compressImageFile, formatSize } from '../../services/attachments.js'
+import {
+  applyPocOverlay,
+  cancelPocUpdate,
+  checkPocUpdate,
+  downloadPocFullApk,
+  downloadPocOverlay,
+  getPocInfo,
+  isPocUpdateSupported,
+  onPocReady,
+  onPocUpdateEvent,
+  type PocInfo,
+  type PocUpdateEvent,
+} from '../../services/pocUpdate.js'
 import {
   saveDeviceBackground,
   setLocalBackground,
@@ -252,6 +265,7 @@ const SettingsContent = () => {
             <TtsVoiceSetting />
             <LocationSetting />
             <GitHubSetting />
+            <PocUpdateSetting />
           </>
         )
     }
@@ -532,6 +546,136 @@ const GitHubSetting = () => {
           {t('settingsGitHubOpen')}
         </a>
       }
+    />
+  )
+}
+
+/** POC 本地更新：只在原生 WebView 注入 window.__flyaiPoc 后显示。 */
+const PocUpdateSetting = () => {
+  const t = useTranslate()
+  const [info, setInfo] = useState<PocInfo | null>(null)
+  const [event, setEvent] = useState<PocUpdateEvent | null>(null)
+  const [supported, setSupported] = useState(false)
+
+  useEffect(() => {
+    const refresh = () => {
+      setSupported(isPocUpdateSupported())
+      setInfo(getPocInfo())
+    }
+    refresh()
+    const offReady = onPocReady(() => {
+      refresh()
+      if (isPocUpdateSupported()) {
+        checkPocUpdate()
+      }
+    })
+    const offEvent = onPocUpdateEvent((next) => {
+      setEvent(next)
+      if (next.state === 'staged' || next.state === 'applying') {
+        refresh()
+      }
+    })
+    if (isPocUpdateSupported()) {
+      checkPocUpdate()
+    }
+    return () => {
+      offReady()
+      offEvent()
+    }
+  }, [])
+
+  if (!supported) {
+    return null
+  }
+
+  const state = event?.state ?? (info?.pending ? 'staged' : 'idle')
+  const current = info
+    ? t('pocUpdateCurrent', {
+        version: info.versionName || String(info.versionCode),
+        rev: info.codeRev || '—',
+      })
+    : ''
+  let description = current
+  if (state === 'checking') {
+    description = t('pocUpdateChecking')
+  } else if (state === 'available') {
+    const size = event?.size ? ` · ${formatSize(event.size)}` : ''
+    description = event?.kind === 'full'
+      ? `${t('pocUpdateFull')}${size}`
+      : `${t('pocUpdateAvailable', { version: event?.version || info?.versionName || '' })}${size}`
+  } else if (state === 'downloading') {
+    const percent = event?.percent ?? 0
+    const loaded = event?.loaded ? formatSize(event.loaded) : ''
+    description = `${t('pocUpdateDownloading', { percent })}${loaded ? ` · ${loaded}` : ''}`
+  } else if (state === 'staged') {
+    description = `${t('pocUpdateStaged')}${t('pocUpdateRestartHint')}`
+  } else if (state === 'installing') {
+    description = t('pocUpdateInstalling')
+  } else if (state === 'applying') {
+    description = t('pocUpdateApplying')
+  } else if (state === 'uptodate') {
+    description = `${t('pocUpdateUpToDate')} · ${current}`
+  } else if (state === 'failed') {
+    description = event?.error || t('pocUpdateFailed')
+  }
+
+  const run = (action: () => { ok?: boolean; error?: string }) => {
+    const result = action()
+    if (!result.ok) {
+      showToast(result.error || t('pocUpdateFailed'))
+    }
+  }
+
+  let action = (
+    <Button
+      variant="outlined"
+      size="m"
+      className={styles.cellButton}
+      onClick={() => run(checkPocUpdate)}
+    >
+      {t('pocUpdateCheck')}
+    </Button>
+  )
+  if (state === 'available') {
+    action = (
+      <Button
+        variant="outlined"
+        size="m"
+        className={styles.cellButton}
+        onClick={() => run(event?.kind === 'full' ? downloadPocFullApk : downloadPocOverlay)}
+      >
+        {event?.kind === 'full' ? t('pocUpdateFullDownload') : t('pocUpdateDownload')}
+      </Button>
+    )
+  } else if (state === 'downloading') {
+    action = (
+      <Button
+        variant="outlined"
+        size="m"
+        className={styles.cellButton}
+        onClick={() => run(cancelPocUpdate)}
+      >
+        {t('pocUpdateCancel')}
+      </Button>
+    )
+  } else if (state === 'staged') {
+    action = (
+      <Button
+        size="m"
+        className={styles.cellButton}
+        onClick={() => run(applyPocOverlay)}
+      >
+        {t('pocUpdateApplyNow')}
+      </Button>
+    )
+  }
+
+  return (
+    <SettingCell
+      label={t('pocUpdateTitle')}
+      description={description}
+      status={null}
+      action={action}
     />
   )
 }
