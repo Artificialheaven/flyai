@@ -1,0 +1,7 @@
+{
+  "display_name": "Logic Slash Fixture",
+  "version": "1.0.0",
+  "js": "index.js",
+  "loading_order": 20,
+  "flyai": { "compat": "logic", "capabilities": ["slash.register", "slash.execute"] }
+}

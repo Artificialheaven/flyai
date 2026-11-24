@@ -1,0 +1,7 @@
+{
+  "display_name": "Logic Settings Fixture",
+  "version": "1.0.0",
+  "js": "index.js",
+  "loading_order": 30,
+  "flyai": { "compat": "logic", "capabilities": ["settings"] }
+}

@@ -3,6 +3,7 @@
 import io
 import json
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -163,3 +164,32 @@ def test_host_modules_contract():
     assert "event_types" in HOST_MODULES["script.js"]
     assert "setExtensionPrompt" in HOST_MODULES["script.js"]
     assert "SlashCommandParser" in HOST_MODULES["scripts/slash-commands/SlashCommandParser.js"]
+
+
+def _zip_fixture(name: str) -> bytes:
+    root = Path(__file__).parent / "fixtures" / "extensions" / name
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in root.rglob("*"):
+            if path.is_file():
+                zf.write(path, f"{name}/{path.relative_to(root).as_posix()}")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("fixture,command", [
+    ("logic-events", None),
+    ("logic-slash", "hello"),
+    ("logic-settings", None),
+])
+def test_fixture_extensions_are_l1_loadable(tmp_path, fixture, command):
+    svc = make_service(tmp_path)
+    result = svc.install(_zip_fixture(fixture), fallback_name=fixture)
+    assert result.report.level == "L1"
+    assert result.report.missing_modules == []
+    assert result.report.missing_symbols == []
+    svc.set_enabled("admin", result.manifest.name, True)
+    enabled = svc.enabled_for("admin")
+    assert [item["name"] for item in enabled] == [result.manifest.name]
+    if command:
+        source = svc.store.files_dir(result.manifest.name).joinpath("index.js").read_text()
+        assert f"name: '{command}'" in source

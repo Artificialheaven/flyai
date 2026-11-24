@@ -1,0 +1,7 @@
+{
+  "display_name": "Logic Events Fixture",
+  "version": "1.0.0",
+  "js": "index.js",
+  "loading_order": 10,
+  "flyai": { "compat": "logic", "capabilities": ["chat.read", "variables.read", "settings"] }
+}
