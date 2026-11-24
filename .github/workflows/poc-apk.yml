@@ -78,36 +78,21 @@ jobs:
           # 依赖不变就复用 base rootfs；requirements.txt 变化时自动重建
           key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v1
 
-      - name: Install qemu (cache miss)
+      - name: Install arm64 binfmt (cache miss)
         if: steps.rootfs_cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support
-          sudo update-binfmts --enable qemu-aarch64 || true
-          sudo systemctl restart systemd-binfmt || true
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
-      - name: Build base rootfs (cache miss)
+      - name: Build base rootfs via Docker (cache miss)
         if: steps.rootfs_cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # 失败时把日志尾部写成 annotation，便于无 token 排查
-          set -uo pipefail
+          # 用 Docker 内的完整 /dev 与 DNS（宿主 chroot 的 /dev、DNS 在 CI 上不可靠）
+          set -euo pipefail
           WORK="$RUNNER_TEMP/poc-base"
-          LOG="$RUNNER_TEMP/rootfs-build.log"
           rm -rf "$WORK"
           mkdir -p "$WORK"
-          {
-            bash mobile/poc/fetch-proot.sh "$WORK"
-            sudo env POC_APT_MIRROR=http://ports.ubuntu.com/ubuntu-ports \
-              bash mobile/poc/build-rootfs.sh "$WORK"
-          } 2>&1 | tee "$LOG"
-          rc=${PIPESTATUS[0]}
-          if [ "$rc" -ne 0 ]; then
-            while IFS= read -r line; do
-              echo "::error::${line//%/%25}"
-            done < <(tail -n 30 "$LOG")
-            exit "$rc"
-          fi
+          bash mobile/poc/fetch-proot.sh "$WORK"
+          bash mobile/poc/build-rootfs-docker.sh "$WORK" "$PWD"
           mkdir -p .poc-cache/base .poc-cache/proot
           sudo cp "$WORK/rootfs.tar.gz" .poc-cache/base/rootfs.tar.gz
           sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/bin/proot" .poc-cache/proot/proot

@@ -25,8 +25,10 @@ docker start "$CID" >/dev/null
 
 echo "== 复制源码"
 docker cp "$REPO_ROOT" "$CID:/opt/flyai"
-docker exec "$CID" bash -c "rm -rf /opt/flyai/.git /opt/flyai/data /opt/flyai/show /opt/flyai/.venv \
-  /opt/flyai/webapp/node_modules /opt/flyai/webapp/dist /opt/flyai/mobile/android"
+docker exec "$CID" bash -c "rm -rf /opt/flyai/.git /opt/flyai/.github /opt/flyai/data /opt/flyai/show \
+  /opt/flyai/.venv /opt/flyai/.poc-cache /opt/flyai/.poc-build /opt/flyai/release /opt/flyai/test \
+  /opt/flyai/workspace /opt/flyai/webapp/node_modules /opt/flyai/webapp/dist /opt/flyai/mobile/android \
+  /opt/flyai/config/config.json /opt/flyai/flyai/web/static/poc"
 
 echo "== 安装 Python 与依赖（QEMU 模拟，首次约 10-20 分钟）"
 docker exec "$CID" bash -c "export DEBIAN_FRONTEND=noninteractive; \

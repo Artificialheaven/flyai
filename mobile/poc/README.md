@@ -83,9 +83,11 @@ OTA 签名：
 
 `.github/workflows/poc-apk.yml` 可在 GitHub 上出包（手动触发或推送 `poc-*` tag）：
 
-- runner 用 `ubuntu-latest`；base rootfs 走 Actions cache（key = `requirements.txt` 哈希）。
+- runner 用 `ubuntu-24.04`（26.04 暂无 Python 3.9 构建包）；base rootfs 走
+  Actions cache（key = `requirements.txt` 哈希）。
 - 缓存命中时只做源码覆盖 + APK 打包（约 3–5 分钟）；未命中时用
-  `qemu-user-static` 在 x86_64 上构建 arm64 rootfs（约 30–50 分钟）。
+  Docker + `tonistiigi/binfmt` 在 x86_64 上构建 arm64 rootfs（约 30–50 分钟）。
+  不用宿主 chroot：CI 上 `/dev`、DNS 与 binfmt 都不稳定。
 - APK 作为 workflow artifact 上传，保留 7 天。
 
 需要在仓库 Secrets 中配置：
