@@ -1,0 +1,83 @@
+apply plugin: 'com.android.application'
+
+// 版本号由 build_poc.py 用 -P 传入；先算成局部变量，避免 Groovy 命令式调用的歧义
+def pocVersionCode = (rootProject.findProperty('pocVersionCode') ?: '6').toString().toInteger()
+def pocVersionName = (rootProject.findProperty('pocVersionName') ?: '1.5').toString()
+
+android {
+    namespace "top.eastcloud.flyai.poc"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "top.eastcloud.flyai.poc"
+        minSdkVersion rootProject.ext.minSdkVersion
+        // 必须 <=28：Android 10+ 对 targetSdk>=29 的应用禁止从数据目录 execve，
+        // PRoot 依赖该能力（与 Termux 一致）
+        targetSdkVersion 28
+        versionCode pocVersionCode
+        versionName pocVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            // 口令优先从 mobile/keystore.properties 读取，未配置时回退环境变量
+            def ksProps = new Properties()
+            def ksPropsFile = rootProject.file('../keystore.properties')
+            if (ksPropsFile.exists()) {
+                ksPropsFile.withInputStream { ksProps.load(it) }
+            }
+            def storePasswordValue = ksProps.getProperty('storePassword') ?: System.getenv('FLYAI_STORE_PASSWORD')
+            def keyPasswordValue = ksProps.getProperty('keyPassword') ?: System.getenv('FLYAI_KEY_PASSWORD')
+            if (!storePasswordValue || !keyPasswordValue) {
+                throw new GradleException('缺少 POC 签名口令：请提供 mobile/keystore.properties 或 FLYAI_STORE_PASSWORD / FLYAI_KEY_PASSWORD')
+            }
+            storeFile rootProject.file('../poc-release.jks')
+            storePassword storePasswordValue
+            keyAlias ksProps.getProperty('keyAlias') ?: 'flyai'
+            keyPassword keyPasswordValue
+        }
+    }
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

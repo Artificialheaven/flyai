@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 已弃用：请优先使用 mobile/poc/build_poc.py（本地缓存构建，Windows/Linux 通用）。
+# build_poc.py 会一并处理 capacitor appId、Manifest、样式、签名、rootfs 覆盖与 proot 资源。
+# 本脚本仅保留给旧的 Linux 构建流程，不再补齐后续新增的补丁。
+#
 # 把 POC 补丁应用到 `npx cap add android` 生成的工程，并放入 rootfs/proot 资源。
 # 用法：mobile/poc/apply-android.sh [POC_DIR]   默认 POC_DIR=/workspace/poc
 set -euo pipefail

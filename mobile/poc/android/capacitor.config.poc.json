@@ -1,0 +1,19 @@
+{
+  "appId": "top.eastcloud.flyai.poc",
+  "appName": "FlyAI POC",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true,
+    "adjustMarginsForEdgeToEdge": "auto"
+  },
+  "plugins": {
+    "StatusBar": {
+      "overlaysWebView": false,
+      "backgroundColor": "#ffffff",
+      "style": "DEFAULT"
+    }
+  }
+}

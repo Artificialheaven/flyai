@@ -35,7 +35,70 @@ MainActivity (WebView)
   2. 任意架构 + Docker（推荐 x86_64）：`build-rootfs-docker.sh`
   3. GitHub Actions 公共 arm64 runner（`runs-on: ubuntu-24.04-arm`），产物上传 artifact
 
+## 本地缓存构建（推荐，Windows 也可，无需 WSL/qemu）
+
+前提：已有一份 `rootfs.tar.gz`（或任意已构建的 `FlyAI-POC-*.apk`）、POC 签名
+`poc-release.jks` 与口令 properties。首次把文件喂给脚本播种，之后改代码直接重打：
+
+```bash
+# 首次：从现成 APK 提取 rootfs/proot，并指定签名
+.venv/Scripts/python mobile/poc/build_poc.py \
+  --source-apk /path/FlyAI-POC-arm64-v1.5.apk \
+  --keystore /path/poc-release.jks \
+  --keystore-properties /path/keystore.properties
+
+# 之后（约 2-3 分钟出包）
+.venv/Scripts/python mobile/poc/build_poc.py
+
+# 只更新 rootfs，不编译 APK
+.venv/Scripts/python mobile/poc/build_poc.py --no-build
+```
+
+工作原理：
+
+- `.poc-cache/base/rootfs.tar.gz` 只读基底；`rootfs_overlay.py` 流式重写 tar，
+  只替换 `opt/flyai/{flyai,plugins}`、`main.py`、`requirements.txt`、`start.sh`
+  与 `config/config.example.json`，保留 `.venv`、`config`、`data`、符号链接、
+  硬链接和权限。**不要在 Windows 上解包再重打**，会丢 600+ 个软链。
+- `.poc-build/` 是可复用的 Capacitor/Gradle 工程，删除后会自动重建。
+- APK 里的 `rootfs_payload.bin` 不含用户 `data/` 与 `config/config.json`；
+  `BootService` 按注入的 `ROOTFS_REV` 判断版本，升级时只替换代码目录，
+  保留聊天记录与 API Key。首次安装仍会完整解包约 350MB。
+- 只有 `requirements.txt` 变化才需要重建 rootfs（WSL2 + qemu 或 arm64 机器），
+  脚本会检测并中止；确认可用 `--force-rootfs`（不推荐）。
+
+## GitHub Actions
+
+`.github/workflows/poc-apk.yml` 可在 GitHub 上出包（手动触发或推送 `poc-*` tag）：
+
+- runner 用 `ubuntu-latest`；base rootfs 走 Actions cache（key = `requirements.txt` 哈希）。
+- 缓存命中时只做源码覆盖 + APK 打包（约 3–5 分钟）；未命中时用
+  `qemu-user-static` 在 x86_64 上构建 arm64 rootfs（约 30–50 分钟）。
+- APK 作为 workflow artifact 上传，保留 7 天。
+
+需要在仓库 Secrets 中配置：
+
+| Secret | 内容 |
+|---|---|
+| `POC_KEYSTORE_B64` | `poc-release.jks` 的 base64（不要换行输出问题） |
+| `POC_STORE_PASSWORD` | keystore 口令 |
+| `POC_KEY_PASSWORD` | key 口令 |
+| `POC_KEY_ALIAS` | 别名，默认 `flyai` |
+
+生成 base64：
+
+```bash
+# Linux / macOS
+base64 -w0 mobile/poc-release.jks
+# Windows PowerShell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("mobile\poc-release.jks"))
+```
+
 ## 构建（aarch64 Linux）
+
+> 该流程用于**重新生成基础 rootfs**（依赖变化时）。日常打 APK 直接用上面的
+> `build_poc.py` 即可，它在 Linux/Windows 上都能从缓存 rootfs 出包。
+> `apply-android.sh` 已由 `build_poc.py` 取代，仅保留给旧流程。
 
 前置：JDK 21、Android SDK（platform 35 / build-tools 35）、Node 18+、`mobile/` 已 `npm ci`。
 

@@ -1,0 +1,152 @@
+name: FlyAI POC APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: "POC versionCode（默认 6）"
+        required: false
+        default: "6"
+      version_name:
+        description: "POC versionName（默认 1.5）"
+        required: false
+        default: "1.5"
+  push:
+    tags:
+      - "poc-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poc-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  POC_VERSION_CODE: ${{ inputs.version_code || '6' }}
+  POC_VERSION_NAME: ${{ inputs.version_name || '1.5' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore cached base rootfs
+        id: rootfs_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .poc-cache/base
+            .poc-cache/proot
+          # 依赖不变就复用 base rootfs；requirements.txt 变化时自动重建
+          key: poc-rootfs-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v1
+
+      - name: Install qemu (cache miss)
+        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64 || true
+          sudo systemctl restart systemd-binfmt || true
+
+      - name: Build base rootfs (cache miss)
+        if: steps.rootfs_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/poc-base"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          bash mobile/poc/fetch-proot.sh "$WORK"
+          sudo POC_APT_MIRROR=http://ports.ubuntu.com/ubuntu-ports \
+            bash mobile/poc/build-rootfs.sh "$WORK"
+          mkdir -p .poc-cache/base .poc-cache/proot
+          sudo cp "$WORK/rootfs.tar.gz" .poc-cache/base/rootfs.tar.gz
+          sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/bin/proot" .poc-cache/proot/proot
+          sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/libexec/proot/loader" .poc-cache/proot/loader
+          sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/lib/libtalloc.so.2.5.0" .poc-cache/proot/libtalloc.so.2
+          sudo cp "$WORK/proot-pkg/data/data/com.termux/files/usr/lib/libandroid-shmem.so" .poc-cache/proot/libandroid-shmem.so
+          sudo chown -R "$USER:$USER" .poc-cache
+
+      - name: Install mobile dependencies
+        run: cd mobile && npm ci
+
+      - name: Decode signing keystore
+        env:
+          POC_KEYSTORE_B64: ${{ secrets.POC_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$POC_KEYSTORE_B64" ]; then
+            echo "::error::缺少 Secrets.POC_KEYSTORE_B64（poc-release.jks 的 base64）"
+            exit 1
+          fi
+          printf '%s' "$POC_KEYSTORE_B64" | base64 -d > mobile/poc-release.jks
+
+      - name: Build POC APK
+        env:
+          FLYAI_STORE_PASSWORD: ${{ secrets.POC_STORE_PASSWORD }}
+          FLYAI_KEY_PASSWORD: ${{ secrets.POC_KEY_PASSWORD }}
+          FLYAI_KEY_ALIAS: ${{ secrets.POC_KEY_ALIAS }}
+          # GitHub runner 直连官方 Gradle / Maven 更稳，不走国内镜像
+          POC_GRADLE_MIRROR: https://services.gradle.org/distributions/gradle-8.11.1-all.zip
+          POC_NO_CN_MIRRORS: "1"
+        run: |
+          python mobile/poc/build_poc.py \
+            --version-code "$POC_VERSION_CODE" \
+            --version-name "$POC_VERSION_NAME"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          APK=$(ls release/FlyAI-POC-arm64-v*.apk 2>/dev/null | head -1 || true)
+          {
+            echo "## FlyAI POC APK"
+            echo ""
+            if [ -n "$APK" ]; then
+              echo "- 文件：\`$APK\`"
+              echo "- 体积：$(du -h "$APK" | cut -f1)"
+              echo "- SHA256：\`$(sha256sum "$APK" | cut -d' ' -f1)\`"
+              echo "- versionCode=$POC_VERSION_CODE versionName=$POC_VERSION_NAME"
+            else
+              echo "构建失败，未生成 APK。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlyAI-POC-arm64-v${{ env.POC_VERSION_NAME }}
+          path: release/FlyAI-POC-arm64-v*.apk
+          retention-days: 7
+          if-no-files-found: error

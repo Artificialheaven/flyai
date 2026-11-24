@@ -33,3 +33,9 @@ webapp/**/*.module.css.d.ts
 
 # POC 构建产物（不随仓库分发）
 flyai/web/static/poc/
+
+# POC 本地缓存构建（rootfs 缓存 / 临时工程 / 签名副本）
+.poc-cache/
+.poc-build/
+mobile/poc-release.jks
+mobile/keystore.properties

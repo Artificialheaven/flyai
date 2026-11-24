@@ -7,6 +7,8 @@ WORK="${1:-/workspace/poc}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOTFS="$WORK/rootfs"
 BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
+# 允许 CI / 海外构建机切换到官方 ports 源
+APT_MIRROR="${POC_APT_MIRROR:-http://mirrors.aliyun.com/ubuntu-ports}"
 
 mkdir -p "$WORK"
 if [ ! -f "$WORK/ubuntu-base.tar.gz" ]; then
@@ -19,10 +21,14 @@ rm -rf "$ROOTFS"
 mkdir -p "$ROOTFS"
 tar xzf "$WORK/ubuntu-base.tar.gz" -C "$ROOTFS"
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
-cat > "$ROOTFS/etc/apt/sources.list" <<'EOF'
-deb http://mirrors.aliyun.com/ubuntu-ports noble main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu-ports noble-updates main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu-ports noble-security main restricted universe multiverse
+# CI 的 systemd-resolved stub（127.0.0.53）在部分 chroot 环境不可用，给公网 DNS 兜底
+if grep -q "127.0.0.53" "$ROOTFS/etc/resolv.conf" 2>/dev/null; then
+  printf "nameserver 223.5.5.5\nnameserver 8.8.8.8\n" > "$ROOTFS/etc/resolv.conf"
+fi
+cat > "$ROOTFS/etc/apt/sources.list" <<EOF
+deb ${APT_MIRROR} noble main restricted universe multiverse
+deb ${APT_MIRROR} noble-updates main restricted universe multiverse
+deb ${APT_MIRROR} noble-security main restricted universe multiverse
 EOF
 
 echo "== 安装 Python 运行时"
@@ -32,9 +38,14 @@ chroot "$ROOTFS" /bin/bash -c \
 echo "== 复制 FlyAI 源码"
 mkdir -p "$ROOTFS/opt/flyai"
 tar cf - -C "$REPO_ROOT" \
-  --exclude=.git --exclude=.venv --exclude=data --exclude=show \
+  --exclude=.git --exclude=.claude --exclude=.venv --exclude=data --exclude=show \
+  --exclude=test --exclude=workspace \
+  --exclude=.poc-cache --exclude=.poc-build --exclude=release --exclude=.github \
   --exclude=webapp/node_modules --exclude=webapp/dist --exclude=node_modules \
-  --exclude=mobile/android --exclude=__pycache__ --exclude=.pytest_cache . \
+  --exclude=mobile/android --exclude=__pycache__ --exclude=.pytest_cache \
+  --exclude='*.jks' --exclude='*.keystore' --exclude=mobile/keystore.properties \
+  --exclude=config/config.json --exclude='config/config.json.bak-*' \
+  --exclude=tools/frp --exclude=flyai/web/static/poc --exclude='tmp_*' . \
   | tar xf - -C "$ROOTFS/opt/flyai"
 
 echo "== 安装 Python 依赖"

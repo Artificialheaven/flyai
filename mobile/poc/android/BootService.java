@@ -37,6 +37,13 @@ public class BootService extends Service {
     private static final String CHANNEL = "flyai_server";
     private static final int NOTIFICATION_ID = 1001;
 
+    /**
+     * 打包时由 mobile/poc/build_poc.py 注入 rootfs 内容版本（哈希前 16 位）。
+     * 设备上安装过的版本与当前 APK 不一致时，只更新代码目录，保留 .venv / config / data。
+     * 手动构建未注入时保留占位符也仍然可以运行。
+     */
+    private static final String ROOTFS_REV = "__ROOTFS_REV__";
+
     private volatile Process server;
     private PowerManager.WakeLock wakeLock;
     private volatile boolean starting;
@@ -139,19 +146,31 @@ public class BootService extends Service {
             stage("准备 PRoot 运行环境");
             installProot(prootDir);
             File marker = new File(rootfs, ".installed");
-            if (!marker.isFile()) {
-                notify("首次启动：正在解压运行环境（约 350MB）…");
-                stage("解压 rootfs（约 350MB，首次启动）…");
-                deleteRecursive(rootfs);
+            boolean fresh = !marker.isFile();
+            boolean upgrade = !fresh && !ROOTFS_REV.equals(readMarker(marker));
+            if (fresh || upgrade) {
+                if (fresh) {
+                    notify("首次启动：正在解压运行环境（约 350MB）…");
+                    stage("解压 rootfs（约 350MB，首次启动）…");
+                    deleteRecursive(rootfs);
+                } else {
+                    notify("正在更新运行环境…");
+                    stage("rootfs 版本变化，更新代码（保留数据与配置）…");
+                    // 只替换代码，保留 .venv / config / data，避免升级丢聊天记录和 API Key
+                    deleteRecursive(new File(rootfs, "opt/flyai/flyai"));
+                    deleteRecursive(new File(rootfs, "opt/flyai/plugins"));
+                    deleteIfExists(new File(rootfs, "opt/flyai/main.py"));
+                    deleteIfExists(new File(rootfs, "opt/flyai/requirements.txt"));
+                    deleteIfExists(new File(rootfs, "opt/flyai/start.sh"));
+                }
                 try (InputStream payload = getAssets().open("rootfs_payload.bin")) {
                     TarGzExtractor.extract(payload, rootfs);
                 }
-                if (!marker.createNewFile()) {
-                    throw new RuntimeException("无法写入安装标记");
-                }
-                stage("rootfs 解压完成");
+                new File(rootfs, "opt/flyai/data").mkdirs();
+                writeMarker(marker, ROOTFS_REV);
+                stage(fresh ? "rootfs 解压完成" : "rootfs 更新完成");
             } else {
-                stage("rootfs 已安装，跳过解压");
+                stage("rootfs 已安装（" + ROOTFS_REV + "），跳过解压");
             }
             prepareDns(rootfs);
             notify("正在启动 FlyAI…");
@@ -288,6 +307,36 @@ public class BootService extends Service {
         }
         //noinspection ResultOfMethodCallIgnored
         file.delete();
+    }
+
+    private static void deleteIfExists(File file) {
+        if (file.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+        }
+    }
+
+    private static String readMarker(File marker) {
+        if (!marker.isFile()) return "";
+        try (RandomAccessFile raf = new RandomAccessFile(marker, "r")) {
+            byte[] data = new byte[(int) raf.length()];
+            raf.readFully(data);
+            return new String(data, "UTF-8").trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static void writeMarker(File marker, String value) {
+        try {
+            File parent = marker.getParentFile();
+            if (parent != null && !parent.isDirectory()) parent.mkdirs();
+            try (FileOutputStream out = new FileOutputStream(marker)) {
+                out.write(value.getBytes("UTF-8"));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("无法写入安装标记", e);
+        }
     }
 
     static String tail(File log, int maxBytes) {
