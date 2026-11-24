@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# POC：APK 内置本目录源码；本地增量更新会整体替换 opt/flyai 下的代码目录。
+
 import asyncio
 import logging
 import threading
