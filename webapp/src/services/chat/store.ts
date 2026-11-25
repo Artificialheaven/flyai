@@ -781,6 +781,7 @@ const mapSession = async (detail: SessionDetail, preferredThreadId?: string): Pr
     readOnly: detail.mode === 'galgame',
     pinned: detail.pinned,
     tokenUsage: detail.token_usage,
+    contextTokens: detail.context_tokens,
     maxTokens: detail.max_tokens,
     disabledTools: detail.disabled_tools,
     characterId: character?.id || seat?.character_id || undefined,

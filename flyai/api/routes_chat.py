@@ -2500,6 +2500,8 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 重试会真实消耗 token：按座位累计每轮 attempt 的用量
                 usage_acc = {"prompt_tokens": 0, "completion_tokens": 0,
                              "cached_tokens": 0}
+                # 最后一轮 attempt 的 prompt token 才是上下文水位（累加值会偏大）
+                last_prompt = 0
                 retry_nudge = ""
                 attempts = 0
                 skipped = False
@@ -2626,6 +2628,12 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                         if ev == "done":
                             done_data = data
                             attempt_usage = (data or {}).get("usage") or {}
+                            try:
+                                last_prompt = int(
+                                    attempt_usage.get("prompt_tokens")
+                                    or last_prompt)
+                            except (TypeError, ValueError):
+                                pass
                             for ukey in usage_acc:
                                 try:
                                     usage_acc[ukey] += int(
@@ -2684,7 +2692,7 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 # 结算本座位：旧费率座位跳过（回复「略」）的退回其费用，正常完成的
                 # 仅从 unspent 移除；按 token 计费的座位用累计实际用量结算
                 if any(usage_acc.values()):
-                    session.add_usage(usage_acc)
+                    session.add_usage(usage_acc, context_prompt=last_prompt)
                     if speaker_priced.get(spk.id):
                         billing.settle_usage(
                             state, sc.uid, spk_provider, usage_acc,

@@ -60,6 +60,21 @@ def test_add_usage_ignores_none_and_empty():
     assert s.token_usage == {}
 
 
+def test_add_usage_tracks_context_tokens_as_last_prompt():
+    s = Session()
+    s.add_usage({"prompt_tokens": 100, "completion_tokens": 50})
+    s.add_usage({"prompt_tokens": 250, "completion_tokens": 20})
+    assert s.context_tokens == 250
+    assert s.token_usage["prompt_tokens"] == 350
+
+
+def test_add_usage_context_prompt_overrides_accumulated():
+    s = Session()
+    s.add_usage({"prompt_tokens": 900, "completion_tokens": 50}, context_prompt=420)
+    assert s.context_tokens == 420
+    assert s.token_usage["prompt_tokens"] == 900
+
+
 # ---- JSON 持久化 ----
 
 def test_json_store_roundtrips_token_usage(tmp_path):
@@ -73,10 +88,20 @@ def test_json_store_roundtrips_token_usage(tmp_path):
                                   "total_tokens": 1500, "cached_tokens": 0}
 
 
+def test_json_store_roundtrips_context_tokens(tmp_path):
+    store = JsonSessionStore(tmp_path)
+    s = store.create(title="上下文会话")
+    s.add_usage({"prompt_tokens": 1000, "completion_tokens": 100})
+    store.save(s)
+    assert store.get(s.id).context_tokens == 1000
+
+
 def test_old_session_without_token_usage_loads_empty(tmp_path):
     store = JsonSessionStore(tmp_path)
     s = store.create()
-    assert store.get(s.id).token_usage == {}
+    loaded = store.get(s.id)
+    assert loaded.token_usage == {}
+    assert loaded.context_tokens == 0
 
 
 # ---- API 序列化 ----
@@ -87,6 +112,7 @@ def test_session_dict_contains_token_usage():
     d = _session_dict(s)
     assert d["token_usage"] == {"prompt_tokens": 5, "completion_tokens": 2,
                                 "total_tokens": 7, "cached_tokens": 0}
+    assert d["context_tokens"] == 5
 
 
 # ---- agent loop done 带 usage ----

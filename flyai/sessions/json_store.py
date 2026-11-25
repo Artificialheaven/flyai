@@ -143,6 +143,7 @@ def session_from_dict(data: Dict, sid: str = "") -> Session:
         threads=[Thread.from_dict(t) for t in data.get("threads", [])],
         pinned=bool(data.get("pinned", False)),
         token_usage=data.get("token_usage", {}) or {},
+        context_tokens=int(data.get("context_tokens", 0) or 0),
         context_warned={
             str(k): [int(x) for x in (v or [])]
             for k, v in (data.get("context_warned") or {}).items()
@@ -209,6 +210,7 @@ def session_to_dict(session: Session) -> Dict:
         "threads": [t.to_dict() for t in session.threads],
         "pinned": session.pinned,
         "token_usage": session.token_usage or {},
+        "context_tokens": int(session.context_tokens or 0),
         "context_warned": session.context_warned or {},
         "mode": session.mode,
         "opening_entry": session.opening_entry or "",

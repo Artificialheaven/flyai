@@ -122,6 +122,8 @@ class Session:
     pinned: bool = False              # 置顶（侧栏排序优先）
     # 整个会话自创建以来的累计 token（跨刷新持久），各轮 done.usage 累加
     token_usage: Dict[str, int] = field(default_factory=dict)
+    # 当前上下文长度：最近一轮实际送进模型的 prompt token（跨刷新持久）
+    context_tokens: int = 0
     # 已提示过的上下文阈值：{窗口 id: [200000, 400000, ...]}；旧会话缺省为空
     context_warned: Dict[str, List[int]] = field(default_factory=dict)
     # normal=普通聊天；galgame=Galgame 模式（全屏视觉小说，单角色）
@@ -155,8 +157,18 @@ class Session:
     def set_title(self, title: str) -> None:
         self.title = title or self.title
 
-    def add_usage(self, usage: Optional[Dict[str, Any]]) -> None:
-        """把一轮（可能含多次 LLM 调用）的用量累加进会话级持久计数。"""
+    def add_usage(
+        self,
+        usage: Optional[Dict[str, Any]],
+        context_prompt: Optional[int] = None,
+    ) -> None:
+        """把一轮（可能含多次 LLM 调用）的用量累加进会话级持久计数。
+
+        context_prompt 是该轮最后一次模型调用的 prompt token（即真正的上下文
+        水位）；群聊把多次 attempt 累加进 usage 时用它避免把上下文也算成总和。
+        """
+        if context_prompt is not None and int(context_prompt) > 0:
+            self.context_tokens = int(context_prompt)
         if not usage:
             return
         p = int(usage.get("prompt_tokens") or 0)
@@ -165,6 +177,8 @@ class Session:
         hit = int(usage.get("cached_tokens") or 0)
         if not (p or c or t or hit):
             return
+        if context_prompt is None and p > 0:
+            self.context_tokens = p
         cur = self.token_usage or {}
         self.token_usage = {
             "prompt_tokens": int(cur.get("prompt_tokens") or 0) + p,

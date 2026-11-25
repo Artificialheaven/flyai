@@ -346,6 +346,8 @@ export type SessionDetail = SessionSummary & {
   /** POST /api/rooms 返回带顶层消息；GET 的线程内已有历史 */
   messages?: Message[]
   token_usage: TokenUsage
+  /** 最近一轮实际送进模型的 prompt token（当前上下文水位）；旧后端不返回 */
+  context_tokens?: number
   max_tokens: number
   disabled_tools: string[]
   galgame: Record<string, unknown>

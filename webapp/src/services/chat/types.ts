@@ -206,6 +206,8 @@ export type Session = {
     /** 输入中命中缓存的 token 数（已含在 prompt_tokens 内，用于算缓存命中率） */
     cached_tokens?: number
   }
+  /** 最近一轮实际送进模型的 prompt token（当前上下文水位） */
+  contextTokens?: number
   /** 单窗口上下文上限；0 表示跟随全局默认 */
   maxTokens?: number
   /** 本会话额外禁用的工具名（会话级覆盖） */

@@ -38,7 +38,8 @@ export const TokenMeter = ({ session }: { session: Session }) => {
         return message.usage.input_tokens
       }
     }
-    return 0
+    // 刷新后历史消息没有单条 usage，由后端持久化的会话上下文水位兜底
+    return session.contextTokens ?? 0
   }, [session])
   if (total <= 0) {
     return null
