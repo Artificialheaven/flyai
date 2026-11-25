@@ -51,13 +51,28 @@
   /* 免责声明行（6+6 padding + 16 line-height）不铺渐隐底色，
      让背景图透出来；输入框本身的渐隐保持不变 */
   --caveat-clear: 28px;
+  background: none;
+  isolation: isolate;
+}
+
+/* 渐隐只铺到输入框底边，圆角与输入框（24px）一致，
+   避免下方露出方角 */
+.inputContainer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: var(--caveat-clear);
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 0 0 24px 24px;
   background: linear-gradient(
     to bottom,
     transparent 0%,
     transparent 30%,
     var(--app-fade-bg, var(--dsw-alias-bg-base)) 30%,
-    var(--app-fade-bg, var(--dsw-alias-bg-base)) calc(100% - var(--caveat-clear)),
-    transparent calc(100% - var(--caveat-clear))
+    var(--app-fade-bg, var(--dsw-alias-bg-base)) 100%
   );
 }
 
