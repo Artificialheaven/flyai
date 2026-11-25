@@ -391,7 +391,7 @@ class AfdianSettings(BaseModel):
 
 
 class HistorySettings(BaseModel):
-    backend: Literal["memory", "json"] = "json"
+    backend: Literal["memory", "json", "sqlite"] = "sqlite"
 
 
 class AttributeDef(BaseModel):

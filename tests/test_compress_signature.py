@@ -49,15 +49,11 @@ def test_single_signatures_stable_with_idless_overrides():
 
 
 def test_room_compress_apply_with_real_idless_world(tmp_path):
-    """端到端：磁盘上 world_override 无 id 的真实房间，compress→apply 不得 409。
+    """端到端：world_override 无 id 的房间，compress→apply 不得 409。
 
-    AI 归纳用桩替换，全程不落盘。
+    AI 归纳用桩替换；会话建在临时目录，全程不落真实数据。
     """
     import flyai.lore.gen as gen
-    import pathlib
-
-    root = pathlib.Path(os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..")))
 
     async def fake_compress_room(_state, _session, _lore):
         return {"members": [], "world": {"content": "测试", "table": []}}
@@ -67,24 +63,34 @@ def test_room_compress_apply_with_real_idless_world(tmp_path):
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run_apply(root, tmp_path))
+        loop.run_until_complete(_run_apply(tmp_path))
     finally:
         gen.compress_room = orig
 
 
-async def _run_apply(root, tmp_path):
+async def _run_apply(tmp_path):
+    from flyai.sessions.models import RoomMember, Session, Thread
     from flyai.user import ADMIN_UID
 
     state = AppState(config=AppConfig())
-    sc = UserScope.build(ADMIN_UID, AppConfig(), root / "data", None)
-    sc.store.save = lambda *_a, **_k: None  # 只读复现，禁止落真实磁盘
+    data_dir = tmp_path / "data"
+    sc = UserScope.build(ADMIN_UID, AppConfig(), data_dir, None)
+    sid = "room-idless-world"
+    session = Session(
+        id=sid, title="测试房间",
+        members=[RoomMember(id="m1", name="小雪", override={"name": "小雪"})],
+        world_override={"content": "现代背景", "table": []},
+        threads=[Thread(id="t1", kind="dm", member_ids=["m1"])],
+    )
+    sc.store.save(session, touch=False)
+    sc.store.save = lambda *_a, **_k: None  # 只读复现，禁止落盘
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(flyai=state))
     )
     state.user = lambda _r: sc
 
-    resp = await session_compress(SID, request)
+    resp = await session_compress(sid, request)
     out = await session_compress_apply(
-        SID, CompressApplyBody(proposal_id=resp["proposal_id"]), request
+        sid, CompressApplyBody(proposal_id=resp["proposal_id"]), request
     )
     assert out["room"] is True
