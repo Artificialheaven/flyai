@@ -426,6 +426,8 @@ export const zh = {
   sessionBatchDeleteDescription: '将永久删除选中的 {count} 个对话及其文件，不可恢复。',
   sessionBatchDeleteDone: '已删除 {count} 个对话',
   tokenUsageLabel: 'Token {count}',
+  tokenUsageLabelContext: 'Token {total} · 上下文 {context}',
+  tokenUsageContext: '当前上下文 {count}',
   tokenUsagePrompt: '输入 {count}',
   tokenUsageCompletion: '输出 {count}',
   tokenUsageTotal: '合计 {count}',

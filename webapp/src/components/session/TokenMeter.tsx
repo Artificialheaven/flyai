@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate } from '../../i18n/index.js'
+import { getVisibleMessages } from '../../services/chat/branches.js'
 import type { Session } from '../../services/chat/types.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
@@ -28,6 +29,17 @@ export const TokenMeter = ({ session }: { session: Session }) => {
   const completion = usage?.completion_tokens ?? 0
   const cached = usage?.cached_tokens ?? 0
   const total = usage?.total_tokens ?? prompt + completion
+  // 当前上下文长度：取当前分支最近一条 AI 回复的输入 token（即上一轮实际送进模型的上下文）
+  const contextTokens = useMemo(() => {
+    const messages = getVisibleMessages(session)
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i]
+      if (message.role === 'assistant' && message.usage?.input_tokens) {
+        return message.usage.input_tokens
+      }
+    }
+    return 0
+  }, [session])
   if (total <= 0) {
     return null
   }
@@ -38,6 +50,9 @@ export const TokenMeter = ({ session }: { session: Session }) => {
   const detail = (
     <div className={styles.detail}>
       <div className={styles.detailTitle}>{t('tokenUsageTooltip')}</div>
+      {contextTokens > 0 ? (
+        <div>{t('tokenUsageContext', { count: contextTokens.toLocaleString() })}</div>
+      ) : null}
       <div>{t('tokenUsagePrompt', { count: prompt.toLocaleString() })}</div>
       <div>{t('tokenUsageCompletion', { count: completion.toLocaleString() })}</div>
       <div>{t('tokenUsageTotal', { count: total.toLocaleString() })}</div>
@@ -49,7 +64,13 @@ export const TokenMeter = ({ session }: { session: Session }) => {
       </div>
     </div>
   )
-  const label = t('tokenUsageLabel', { count: compact(total) })
+  const label =
+    contextTokens > 0
+      ? t('tokenUsageLabelContext', {
+          total: compact(total),
+          context: compact(contextTokens),
+        })
+      : t('tokenUsageLabel', { count: compact(total) })
   if (isMobile) {
     return (
       <>

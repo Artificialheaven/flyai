@@ -438,6 +438,8 @@ export const en = {
     'The {count} selected chats and their files will be permanently deleted. This cannot be undone.',
   sessionBatchDeleteDone: 'Deleted {count} chats',
   tokenUsageLabel: 'Token {count}',
+  tokenUsageLabelContext: 'Token {total} · Ctx {context}',
+  tokenUsageContext: 'Current context {count}',
   tokenUsagePrompt: '{count} in',
   tokenUsageCompletion: '{count} out',
   tokenUsageTotal: '{count} total',
