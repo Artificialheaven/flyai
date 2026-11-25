@@ -51,8 +51,6 @@ def _select_model(services: Dict[str, Any]):
         raise RuntimeError(
             "当前没有可用的生图模型：请在设置中添加自己的生图模型，或联系管理员共享"
         )
-    if not (model_cfg.api_key or "").strip():
-        raise RuntimeError("该生图模型未配置 API Key")
     return model_cfg
 
 

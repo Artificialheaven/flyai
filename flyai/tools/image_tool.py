@@ -134,11 +134,6 @@ class GenerateImageTool(Tool):
                     "或联系管理员共享"
                 ),
             )
-        if not (model_cfg.api_key or "").strip():
-            return ToolResult(
-                ok=False, output="[工具错误] 该生图模型未配置 API Key"
-            )
-
         try:
             content, ext, media_type = await self._generate(model_cfg, prompt, size)
         except Exception as exc:
@@ -205,20 +200,102 @@ async def ark_generate(
     ref_images: Optional[List[Tuple[str, str]]] = None,
     watermark: bool = True,
 ) -> Tuple[bytes, str, str]:
-    """提交生图任务并下载图片。
+    """按模型接口类型分发：Ark（默认）、OpenAI 图片接口、Google Gemini/Imagen。
+
+    函数名沿用 ark_generate 以兼容既有工具与测试；实际走哪个实现由
+    ``model_cfg.type`` 决定（ark / openai / google）。返回
+    (图片字节, 扩展名, media_type)。
+    """
+    fmt = _model_format(model_cfg)
+    if fmt == "google":
+        return await google_generate(
+            model_cfg, prompt, size, ref_images=ref_images
+        )
+    if fmt == "openai":
+        if ref_images:
+            return await _openai_image_edit(model_cfg, prompt, size, ref_images)
+        return await _openai_image_generate(model_cfg, prompt, size)
+    return await _ark_generate(model_cfg, prompt, size, ref_images, watermark)
+
+
+def _model_format(model_cfg: ImageModelConfig) -> str:
+    fmt = str(getattr(model_cfg, "type", "") or "ark").strip().lower()
+    return fmt if fmt in ("ark", "openai", "google") else "ark"
+
+
+def _auth_headers(model_cfg: ImageModelConfig) -> Dict[str, str]:
+    """OpenAI 兼容接口的请求头：key 留空时不发 Authorization（本地网关免鉴权）。"""
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    key = (model_cfg.api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _openai_image_size(size: str, model: str) -> str:
+    """把 1K/2K/4K 映射成 OpenAI 图片接口接受的像素尺寸。"""
+    s = (size or "2K").strip().upper()
+    if "dall-e-3" in (model or "").lower():
+        return {"1K": "1024x1024", "2K": "1792x1024", "4K": "1792x1024"}.get(
+            s, "1024x1024"
+        )
+    return {"1K": "1024x1024", "2K": "1024x1024", "4K": "1536x1024"}.get(
+        s, "1024x1024"
+    )
+
+
+def _sniff_image(raw: bytes) -> Tuple[str, str]:
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png", "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return ".jpg", "image/jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return ".png", "image/png"
+
+
+async def _decode_image_response(
+    client: httpx.AsyncClient, data: dict
+) -> Tuple[bytes, str, str]:
+    """解析 OpenAI 图片接口的返回：优先 b64_json，其次下载 url。"""
+    items = data.get("data") or []
+    if not items:
+        raise RuntimeError(f"返回中没有图片数据: {str(data)[:300]}")
+    item = items[0]
+    b64 = item.get("b64_json")
+    if b64:
+        raw = base64.b64decode(b64)
+        ext, media_type = _sniff_image(raw)
+        return raw, ext, media_type
+    url = item.get("url")
+    if not url:
+        raise RuntimeError(f"返回中既没有 b64_json 也没有 url: {str(item)[:300]}")
+    content, resp = await _guarded_image_get(client, url)
+    ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+    ext = {".jpg": ".jpg", ".jpeg": ".jpg", ".png": ".png", ".webp": ".webp"}.get(
+        __import__("os").path.splitext(urlsplit(url).path)[1].lower()
+    )
+    if ext is None:
+        ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(
+            ctype, ".jpg"
+        )
+    return content, ext, ctype or "image/jpeg"
+
+
+async def _ark_generate(
+    model_cfg: ImageModelConfig,
+    prompt: str,
+    size: str,
+    ref_images: Optional[List[Tuple[str, str]]] = None,
+    watermark: bool = True,
+) -> Tuple[bytes, str, str]:
+    """火山方舟 Ark 图片接口（doubao-seedream）。
 
     传 ref_images=[(media_type, base64), ...] 时为图生图（seedream 的 image 字段）。
-    1 张时 image 发字符串，多张时发数组（数组顺序即接口侧「图1、图2…」）。
-    参考图用 data URI（data:image/<格式>;base64,...，格式小写——seedream 5
-    文档规定的形态）；若接口报 image 相关 400，再兼容旧形态裸 base64 重试一次，
-    两次都失败时必须把两段错误都抛出，避免回退响应（invalid url specified）
-    掩盖真实原因。返回 (图片字节, 扩展名, media_type)。
+    1 张时 image 发字符串，多张时发数组；data URI 被拒时回退裸 base64。
     """
     url = model_cfg.base_url.rstrip("/") + "/images/generations"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {model_cfg.api_key}",
-    }
+    headers = _auth_headers(model_cfg)
 
     def payload(image_value):
         # image_value：str（单张）/ list[str]（多张）/ None（文生图）
@@ -243,7 +320,6 @@ async def ark_generate(
                 for mt, b64 in ref_images
             ]
             raw = [b64 for _mt, b64 in ref_images]
-            # 单张保持字符串（与单图文档一致），多张发数组
             data_value = data_uris[0] if len(data_uris) == 1 else data_uris
             raw_value = raw[0] if len(raw) == 1 else raw
         resp = await client.post(url, headers=headers, json=payload(data_value))
@@ -253,8 +329,6 @@ async def ark_generate(
             and resp.status_code == 400
             and _error_mentions_image(resp.text)
         ):
-            # 兼容旧形态：裸 base64。seedream 5 已将其按 URL 校验（invalid url specified），
-            # 两次都失败时一起抛出，第一次的错误才是 data URI 被拒的真实原因
             first_text = resp.text
             resp = await client.post(url, headers=headers, json=payload(raw_value))
         if resp.status_code >= 400:
@@ -268,9 +342,6 @@ async def ark_generate(
         images = data.get("data") or []
         if not images or not images[0].get("url"):
             raise RuntimeError(f"返回中没有图片地址: {data}")
-
-        # 图片地址由生图服务返回（外部可控输入）：SSRF 收口后再下载，
-        # 不能裸 client.get——否则可被用来读取内网/本机任意地址
         img_content, img_resp = await _guarded_image_get(client, images[0]["url"])
 
     content_type = img_resp.headers.get("content-type", "").split(";")[0].strip()
@@ -280,6 +351,167 @@ async def ark_generate(
         "image/webp": ".webp",
     }.get(content_type, ".jpg")
     return img_content, ext, content_type or "image/jpeg"
+
+
+async def _openai_image_generate(
+    model_cfg: ImageModelConfig, prompt: str, size: str
+) -> Tuple[bytes, str, str]:
+    """OpenAI 图片生成接口（gpt-image-1 / dall-e-3 等）。"""
+    base = (model_cfg.base_url or "https://api.openai.com/v1").rstrip("/")
+    url = base + "/images/generations"
+    body = {
+        "model": model_cfg.model,
+        "prompt": prompt,
+        "n": 1,
+        "size": _openai_image_size(size, model_cfg.model),
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+        resp = await client.post(url, headers=_auth_headers(model_cfg), json=body)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+        return await _decode_image_response(client, resp.json())
+
+
+async def _openai_image_edit(
+    model_cfg: ImageModelConfig,
+    prompt: str,
+    size: str,
+    ref_images: List[Tuple[str, str]],
+) -> Tuple[bytes, str, str]:
+    """OpenAI 图片编辑接口（/images/edits，multipart 上传参考图）。"""
+    base = (model_cfg.base_url or "https://api.openai.com/v1").rstrip("/")
+    url = base + "/images/edits"
+    headers: Dict[str, str] = {}
+    key = (model_cfg.api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    field = "image[]" if len(ref_images) > 1 else "image"
+    files = []
+    for index, (media_type, b64) in enumerate(ref_images):
+        raw = base64.b64decode(b64)
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}.get(
+            media_type, ".png"
+        )
+        files.append(
+            (field, (f"image{index}{ext}", raw, media_type or "image/png"))
+        )
+    data = {
+        "model": model_cfg.model,
+        "prompt": prompt,
+        "n": "1",
+        "size": _openai_image_size(size, model_cfg.model),
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+        resp = await client.post(url, headers=headers, data=data, files=files)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+        return await _decode_image_response(client, resp.json())
+
+
+_GOOGLE_IMAGE_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+def _google_model_id(model: str) -> str:
+    m = (model or "").strip()
+    return m[7:] if m.startswith("models/") else m
+
+
+async def google_generate(
+    model_cfg: ImageModelConfig,
+    prompt: str,
+    size: str,
+    ref_images: Optional[List[Tuple[str, str]]] = None,
+    watermark: bool = True,
+) -> Tuple[bytes, str, str]:
+    """Google Gemini 图片模型（generateContent）与 Imagen（predict）。
+
+    Gemini 参考图走 inline_data parts；返回 candidates[].content.parts[]
+    （inlineData）里的 base64。Imagen 走 :predict 的 predictions[]。
+    """
+    base = (model_cfg.base_url or _GOOGLE_IMAGE_BASE).rstrip("/")
+    model = _google_model_id(model_cfg.model)
+    if not model:
+        raise RuntimeError("生图模型未填写模型名")
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    key = (model_cfg.api_key or "").strip()
+    if key:
+        headers["x-goog-api-key"] = key
+    is_imagen = "imagen" in model.lower()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+        if is_imagen:
+            url = f"{base}/models/{model}:predict"
+            body = {
+                "instances": [{"prompt": prompt}],
+                "parameters": {"sampleCount": 1, "aspectRatio": "1:1"},
+            }
+        else:
+            url = f"{base}/models/{model}:generateContent"
+            parts: List[Dict[str, Any]] = [{"text": prompt}]
+            for media_type, b64 in ref_images or []:
+                parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": media_type or "image/jpeg",
+                            "data": b64,
+                        }
+                    }
+                )
+            generation: Dict[str, Any] = {"responseModalities": ["TEXT", "IMAGE"]}
+            # Gemini 3 系列支持 image_size；2.5 及更早不认该字段
+            if "gemini-3" in model.lower():
+                generation["imageConfig"] = {
+                    "aspectRatio": "1:1",
+                    "imageSize": size if size in _ALLOWED_SIZES else "2K",
+                }
+            body = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": generation,
+            }
+        resp = await client.post(url, headers=headers, json=body)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Google 生图 HTTP {resp.status_code}: {resp.text[:400]}")
+        data = resp.json()
+
+    if is_imagen:
+        preds = data.get("predictions") or []
+        if not preds:
+            raise RuntimeError(f"Google 返回中没有图片: {str(data)[:300]}")
+        first = preds[0]
+        b64 = first.get("bytesBase64Encoded") or first.get("bytes_base64_encoded")
+        if not b64:
+            raise RuntimeError(f"Google 返回中没有图片数据: {str(first)[:300]}")
+        media_type = first.get("mimeType") or first.get("mime_type") or "image/png"
+        raw = base64.b64decode(b64)
+        ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(
+            media_type, _sniff_image(raw)[0]
+        )
+        return raw, ext, media_type
+
+    candidates = data.get("candidates") or []
+    for candidate in candidates:
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            b64 = inline.get("data")
+            if b64:
+                media_type = (
+                    inline.get("mimeType") or inline.get("mime_type") or "image/png"
+                )
+                raw = base64.b64decode(b64)
+                ext = {
+                    "image/jpeg": ".jpg",
+                    "image/png": ".png",
+                    "image/webp": ".webp",
+                }.get(media_type, _sniff_image(raw)[0])
+                return raw, ext, media_type
+    text = ""
+    for candidate in candidates:
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            if part.get("text"):
+                text += str(part["text"])
+    raise RuntimeError(
+        "Google 未返回图片（可能被安全策略拦截）: " + (text[:300] or str(data)[:300])
+    )
 
 
 async def _guarded_image_get(

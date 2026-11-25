@@ -52,7 +52,7 @@ class EditImageTool(ReadImageTool):
         "严格一致；用户先后发了多张图时，先发的是图1。参考图最多 14 张，只传与"
         "任务有关的图。image 参数：单张传一个路径字符串，多张传路径数组；留空则"
         "按 image_count 自动从历史收集最近的图片（用户上传的与已生成的都算，"
-        "默认 1 张）。没有参考图、从零画图请用 generate_image。一次调用生成一张。"
+        "默认 1 张）。没有参考图、从零画图请用 generate_image。一次调用生成一张。支持 Ark、OpenAI 图片接口与 Google Gemini/Imagen（按模型配置的接口类型自动选择）。"
     )
     parameters = {
         "type": "object",
@@ -114,11 +114,6 @@ class EditImageTool(ReadImageTool):
                     "或联系管理员共享"
                 ),
             )
-        if not (model_cfg.api_key or "").strip():
-            return ToolResult(
-                ok=False, output="[工具错误] 该生图模型未配置 API Key"
-            )
-
         size = str(arguments.get("size") or self.settings.default_size or "2K").strip()
         if size not in _ALLOWED_SIZES:
             size = "2K"

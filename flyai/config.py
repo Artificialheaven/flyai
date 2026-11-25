@@ -164,19 +164,27 @@ class ProviderConfig(BaseModel):
 
 
 class ImageModelConfig(BaseModel):
-    """生图模型（火山方舟 Ark / 任意 OpenAI 兼容图片接口）。
+    """生图模型（火山方舟 Ark / OpenAI 图片接口 / Google Gemini、Imagen）。
 
-    与 ProviderConfig 同样支持归属与权限共享。
+    与 ProviderConfig 同样支持归属与权限共享。``type`` 选择调用协议：
+    ark（默认，seedream 风格）、openai（/images/generations 与 /images/edits）、
+    google（generateContent 或 Imagen predict）。API Key 可留空（本地/免鉴权网关）。
     """
 
     id: str
     name: str = ""
+    type: str = "ark"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     api_key: str = ""
     model: str = "doubao-seedream-5-0-260128"
     owner: str = "admin"
     shared: bool = False
     min_level: int = 0
+
+    @validator("type")
+    def _norm_type(cls, v):  # noqa: N805
+        value = str(v or "ark").strip().lower()
+        return value if value in ("ark", "openai", "google") else "ark"
 
     @validator("min_level")
     def _clamp_min_level(cls, v):  # noqa: N805

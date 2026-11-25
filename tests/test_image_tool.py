@@ -131,11 +131,17 @@ def test_fail_no_available_model(tmp_path):
     assert "没有可用的生图模型" in result.output
 
 
-def test_fail_missing_api_key(tmp_path):
+def test_empty_api_key_generates(tmp_path):
+    """API Key 可留空：本地/免鉴权网关不需要 Authorization。"""
+    tool = _tool()
+
+    async def fake_generate(model_cfg, prompt, size):
+        return b"x", ".jpg", "image/jpeg"
+
+    tool._generate = fake_generate
     ctx = _ctx(tmp_path, image_models=[_model(api_key="")])
-    result = asyncio.run(_tool().run({"prompt": "猫"}, ctx))
-    assert not result.ok
-    assert "API Key" in result.output
+    result = asyncio.run(tool.run({"prompt": "猫"}, ctx))
+    assert result.ok
 
 
 def test_fail_missing_upload_context():

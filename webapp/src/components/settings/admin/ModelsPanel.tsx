@@ -17,6 +17,7 @@ import {
   type AdminConfig,
   type ImageModelPayload,
   type ImageModelView,
+  type ImageModelType,
   type PricePeriod,
   type ProviderPayload,
   type ProviderView,
@@ -462,6 +463,11 @@ export const ModelsPanel = () => {
                 <div className={styles.itemMeta}>
                   {model.model}
                   {model.base_url ? ` · ${model.base_url}` : ''}
+                  {model.type === 'openai'
+                    ? ` · ${t('modelsImageType_openai')}`
+                    : model.type === 'google'
+                      ? ` · ${t('modelsImageType_google')}`
+                      : ''}
                 </div>
               </div>
               <div className={styles.itemActions}>
@@ -1212,8 +1218,31 @@ const ImageForm = ({
   const [modelName, setModelName] = useState(model?.model ?? '')
   const [baseUrl, setBaseUrl] = useState(model?.base_url ?? '')
   const [apiKey, setApiKey] = useState('')
+  const [type, setType] = useState<ImageModelType>(model?.type ?? 'ark')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  const typeDefaults: Record<ImageModelType, { baseUrl: string; model: string }> = {
+    ark: {
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: 'doubao-seedream-5-0-260128',
+    },
+    openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' },
+    google: {
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      model: 'gemini-2.5-flash-image',
+    },
+  }
+
+  const changeType = (next: ImageModelType) => {
+    setType(next)
+    if (!baseUrl.trim()) {
+      setBaseUrl(typeDefaults[next].baseUrl)
+    }
+    if (!modelName.trim()) {
+      setModelName(typeDefaults[next].model)
+    }
+  }
 
   const submit = async () => {
     if (busy) {
@@ -1225,8 +1254,9 @@ const ImageForm = ({
     }
     const payload: ImageModelPayload = {
       name: name.trim(),
-      model: modelName.trim(),
-      base_url: baseUrl.trim(),
+      type,
+      model: modelName.trim() || typeDefaults[type].model,
+      base_url: baseUrl.trim() || typeDefaults[type].baseUrl,
       api_key: apiKey.trim(),
     }
     setBusy(true)
@@ -1289,8 +1319,21 @@ const ImageForm = ({
         <input
           className={styles.input}
           value={modelName}
-          placeholder="doubao-seedream-5-0-260128"
+          placeholder={typeDefaults[type].model}
           onChange={(event) => setModelName(event.target.value)}
+        />
+      </label>
+      <label className={styles.field}>
+        <span className={styles.fieldLabel}>{t('modelsFieldImageType')}</span>
+        <Select<ImageModelType>
+          value={type}
+          ariaLabel={t('modelsFieldImageType')}
+          options={[
+            { value: 'ark', label: t('modelsImageTypeArk') },
+            { value: 'openai', label: t('modelsImageTypeOpenai') },
+            { value: 'google', label: t('modelsImageTypeGoogle') },
+          ]}
+          onChange={changeType}
         />
       </label>
       <label className={styles.field}>
@@ -1298,7 +1341,7 @@ const ImageForm = ({
         <input
           className={styles.input}
           value={baseUrl}
-          placeholder="https://ark.cn-beijing.volces.com/api/v3"
+          placeholder={typeDefaults[type].baseUrl}
           onChange={(event) => setBaseUrl(event.target.value)}
         />
       </label>

@@ -47,9 +47,12 @@ export type ProviderView = {
   pricing?: TokenPricing | null
 }
 
+export type ImageModelType = 'ark' | 'openai' | 'google'
+
 export type ImageModelView = {
   id: string
   name: string
+  type?: ImageModelType
   model: string
   base_url?: string
   api_key?: string
@@ -309,6 +312,7 @@ export type ProviderPayload = {
 export type ImageModelPayload = {
   id?: string
   name?: string
+  type?: ImageModelType
   base_url?: string
   api_key?: string
   model?: string

@@ -100,6 +100,7 @@ class DiscoverPayload(BaseModel):
 class ImageModelPayload(BaseModel):
     id: Optional[str] = None
     name: str = ""
+    type: str = ""
     base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -1071,12 +1072,19 @@ def create_image_model(payload: ImageModelPayload, request: Request):
         )
     if _find_image_model(state.config, mid) is not None:
         raise HTTPException(400, "模型 ID 已存在")
+    kind = (payload.type or "ark").strip().lower()
+    defaults = {
+        "ark": ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seedream-5-0-260128"),
+        "openai": ("https://api.openai.com/v1", "gpt-image-1"),
+        "google": ("https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash-image"),
+    }.get(kind, ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seedream-5-0-260128"))
     item = ImageModelConfig(
         id=mid,
         name=payload.name,
-        base_url=payload.base_url or "https://ark.cn-beijing.volces.com/api/v3",
+        type=kind,
+        base_url=payload.base_url or defaults[0],
         api_key=payload.api_key,
-        model=payload.model or "doubao-seedream-5-0-260128",
+        model=payload.model or defaults[1],
         owner=uid,
         shared=False,
         min_level=0,
@@ -1094,6 +1102,7 @@ def update_image_model(mid: str, payload: ImageModelPayload, request: Request):
     merged = {
         "id": item.id,
         "name": payload.name if payload.name else item.name,
+        "type": (payload.type or item.type),
         "base_url": payload.base_url if payload.base_url else item.base_url,
         "api_key": _credit_key(payload.api_key, item.api_key),
         "model": payload.model if payload.model else item.model,

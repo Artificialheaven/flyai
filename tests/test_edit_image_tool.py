@@ -258,13 +258,18 @@ def test_no_available_model(tmp_path):
     assert not result.ok and "没有可用的生图模型" in result.output
 
 
-def test_missing_api_key(tmp_path):
+def test_empty_api_key_allowed(tmp_path, monkeypatch):
+    captured = {}
+    _patch_ark(monkeypatch, captured)
+    history = [Message(role="user", content="看图", images=[
+        ImageAttachment(media_type="image/jpeg", data=JPEG_B64)
+    ])]
     result = asyncio.run(_tool().run(
         {"prompt": "p"},
-        _ctx(tmp_path, history=[], model=_model(api_key="")),
+        _ctx(tmp_path, history=history, model=_model(api_key="")),
     ))
-    assert not result.ok
-    assert result.output.startswith("[工具错误]")
+    assert result.ok
+    assert captured["model"] == "m1"
 
 
 # ---- Ark image 编码与退化（data URI → 裸 base64）----
