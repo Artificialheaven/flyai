@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import {
   activateProvider,
@@ -7,6 +7,7 @@ import {
   createProvider,
   deleteImageModel,
   deleteProvider,
+  discoverProviderModels,
   getConfig,
   shareImageModel,
   shareProvider,
@@ -52,6 +53,60 @@ export const ModelsPanel = () => {
   const [sharingImage, setSharingImage] = useState<ImageModelView | null>(null)
   const [billingProvider, setBillingProvider] = useState<ProviderView | null>(null)
   const [deleting, setDeleting] = useState<DeleteTarget | null>(null)
+  /** 普通用户：null=分组总览，否则进入某个分组（空串表示未分组） */
+  const [groupView, setGroupView] = useState<string | null>(null)
+  /** 管理端：按提供商合并后，哪些表头已展开 */
+  const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({})
+  /** 窄屏（手机）时次要操作收进「更多」菜单 */
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
+  )
+  const [moreOpenId, setMoreOpenId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 768px)')
+    const update = () => setIsNarrow(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+
+  /** 按 group 聚合：空串统一归入「未分组」，分组名按字母序，未分组置顶 */
+  const groups = useMemo(() => {
+    const map = new Map<string, ProviderView[]>()
+    for (const provider of providers) {
+      const key = (provider.group ?? '').trim()
+      const list = map.get(key) ?? []
+      list.push(provider)
+      map.set(key, list)
+    }
+    return [...map.entries()].sort((a, b) => {
+      if (!a[0] && b[0]) {
+        return -1
+      }
+      if (a[0] && !b[0]) {
+        return 1
+      }
+      return a[0].localeCompare(b[0], 'zh-Hans-CN')
+    })
+  }, [providers])
+  const groupLabel = (group: string) => group || t('modelsGroupUngrouped')
+
+  /** 管理端：同一提供商（同 base_url + 同 key）的模型合并成一组，点击表头展开 */
+  const providerGroups = useMemo(() => {
+    const map = new Map<string, { key: string; base_url: string; models: ProviderView[] }>()
+    for (const provider of providers) {
+      const key =
+        provider.provider_key || `${provider.base_url ?? ''}\n${provider.api_key ?? ''}`
+      const entry = map.get(key) ?? {
+        key,
+        base_url: provider.base_url ?? '',
+        models: [] as ProviderView[],
+      }
+      entry.models.push(provider)
+      map.set(key, entry)
+    }
+    return [...map.values()]
+  }, [providers])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -138,6 +193,151 @@ export const ModelsPanel = () => {
     }
   }
 
+
+  const renderProviderItem = (provider: ProviderView) => {
+    const active = provider.id === activeProviderId
+    const global = !activeProviderId && provider.id === globalActive
+    return (
+      <div
+        key={provider.id}
+        className={clsx(styles.item, (active || global) && styles.itemActive)}
+      >
+        <div className={styles.itemMain}>
+          <div className={styles.itemName}>
+            <span>{provider.id}</span>
+            {provider.group ? <span className={styles.badge}>{provider.group}</span> : null}
+            {active ? (
+              <span className={clsx(styles.badge, styles.badgeBrand)}>{t('adminActive')}</span>
+            ) : global ? (
+              <span className={clsx(styles.badge, styles.badgeBrand)}>
+                {t('modelsGlobalDefault')}
+              </span>
+            ) : null}
+            {provider.shared ? (
+              <span className={styles.badge}>{t('adminShared')}</span>
+            ) : null}
+            {provider.shared && (provider.min_level ?? 0) > 0 ? (
+              <span className={styles.badge}>
+                {t('modelsMinLevelBadge', { level: provider.min_level ?? 0 })}
+              </span>
+            ) : null}
+          </div>
+          <div className={styles.itemMeta}>
+            {provider.model || provider.id}
+            {provider.base_url ? ` · ${provider.base_url}` : ''}
+          </div>
+        </div>
+        <div className={styles.itemActions}>
+          <Button
+            size="s"
+            variant={active ? 'outlined' : 'primary'}
+            disabled={active || busyId === provider.id}
+            onClick={() => void activate(provider)}
+          >
+            {t(active ? 'adminActive' : 'adminUse')}
+          </Button>
+          <Button size="s" variant="outlined" onClick={() => setBillingProvider(provider)}>
+            {t('modelsBilling')}
+          </Button>
+          {isAdmin ? (
+            <Button
+              size="s"
+              variant="outlined"
+              disabled={busyId === provider.id}
+              onClick={() => void test(provider)}
+            >
+              {t('adminTest')}
+            </Button>
+          ) : null}
+          {isAdmin && !isNarrow ? (
+            <>
+              <Button size="s" variant="outlined" onClick={() => setEditingProvider(provider)}>
+                {t('adminEdit')}
+              </Button>
+              <Button size="s" variant="outlined" onClick={() => setSharingProvider(provider)}>
+                {t('modelsShare')}
+              </Button>
+              <Button
+                size="s"
+                variant="dangerOutlined"
+                onClick={() => setDeleting({ kind: 'llm', id: provider.id, name: provider.id })}
+              >
+                {t('adminDelete')}
+              </Button>
+            </>
+          ) : null}
+          {isAdmin && isNarrow ? (
+            <div className={styles.moreWrap}>
+              <Button
+                size="s"
+                variant="outlined"
+                aria-label={t('modelsMoreActions')}
+                aria-haspopup="menu"
+                aria-expanded={moreOpenId === provider.id}
+                onClick={() =>
+                  setMoreOpenId((prev) => (prev === provider.id ? null : provider.id))
+                }
+              >
+                ⋯
+              </Button>
+              {moreOpenId === provider.id ? (
+                <>
+                  <div className={styles.moreBackdrop} onClick={() => setMoreOpenId(null)} />
+                  <div className={styles.moreList} role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={styles.moreItem}
+                      onClick={() => {
+                        setMoreOpenId(null)
+                        void test(provider)
+                      }}
+                    >
+                      {t('adminTest')}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={styles.moreItem}
+                      onClick={() => {
+                        setMoreOpenId(null)
+                        setEditingProvider(provider)
+                      }}
+                    >
+                      {t('adminEdit')}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={styles.moreItem}
+                      onClick={() => {
+                        setMoreOpenId(null)
+                        setSharingProvider(provider)
+                      }}
+                    >
+                      {t('modelsShare')}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={clsx(styles.moreItem, styles.moreItemDanger)}
+                      onClick={() => {
+                        setMoreOpenId(null)
+                        setDeleting({ kind: 'llm', id: provider.id, name: provider.id })
+                      }}
+                    >
+                      {t('adminDelete')}
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className={styles.page}>
       <div className={styles.header}>
@@ -182,101 +382,63 @@ export const ModelsPanel = () => {
       {loading ? (
         <PanelEmpty text={t('adminLoading')} />
       ) : tab === 'llm' ? (
-        providers.length === 0 ? (
+        !isAdmin && groupView === null ? (
+          <div className={styles.groupGrid}>
+            {groups.map(([group, list]) => (
+              <button
+                key={group || '__ungrouped'}
+                type="button"
+                className={styles.groupCard}
+                onClick={() => setGroupView(group)}
+              >
+                <span className={styles.groupCardName}>{groupLabel(group)}</span>
+                <span className={styles.groupCardMeta}>
+                  {t('modelsGroupCount', { count: list.length })}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : providers.length === 0 ? (
           <PanelEmpty text={t('modelsEmpty')} />
-        ) : (
+        ) : isAdmin ? (
           <div className={styles.list}>
-            {providers.map((provider) => {
-              const active = provider.id === activeProviderId
-              const global = !activeProviderId && provider.id === globalActive
+            {providerGroups.map((group) => {
+              const open = expandedProviders[group.key] ?? providerGroups.length === 1
               return (
-                <div
-                  key={provider.id}
-                  className={clsx(styles.item, (active || global) && styles.itemActive)}
-                >
-                  <div className={styles.itemMain}>
-                    <div className={styles.itemName}>
-                      <span>{provider.id}</span>
-                      {active ? (
-                        <span className={clsx(styles.badge, styles.badgeBrand)}>
-                          {t('adminActive')}
-                        </span>
-                      ) : global ? (
-                        <span className={clsx(styles.badge, styles.badgeBrand)}>
-                          {t('modelsGlobalDefault')}
-                        </span>
-                      ) : null}
-                      {provider.shared ? (
-                        <span className={styles.badge}>{t('adminShared')}</span>
-                      ) : null}
-                      {provider.shared && (provider.min_level ?? 0) > 0 ? (
-                        <span className={styles.badge}>
-                          {t('modelsMinLevelBadge', { level: provider.min_level ?? 0 })}
-                        </span>
-                      ) : null}
+                <div key={group.key} className={styles.providerGroup}>
+                  <button
+                    type="button"
+                    className={styles.providerHead}
+                    onClick={() =>
+                      setExpandedProviders((prev) => ({ ...prev, [group.key]: !open }))
+                    }
+                  >
+                    <span className={styles.providerName}>
+                      {group.base_url || t('modelsProviderUnknown')}
+                    </span>
+                    <span className={styles.providerMeta} title={group.base_url}>
+                      {group.models[0]?.api_key ? `${group.models[0].api_key} · ` : ''}
+                      {t('modelsProviderCount', { count: group.models.length })}
+                    </span>
+                    <span className={styles.chevron}>{open ? '▾' : '▸'}</span>
+                  </button>
+                  {open ? (
+                    <div className={styles.providerModels}>
+                      {group.models.map((provider) => renderProviderItem(provider))}
                     </div>
-                    <div className={styles.itemMeta}>
-                      {provider.model || provider.id}
-                      {provider.base_url ? ` · ${provider.base_url}` : ''}
-                    </div>
-                  </div>
-                  <div className={styles.itemActions}>
-                    <Button
-                      size="s"
-                      variant={active ? 'outlined' : 'primary'}
-                      disabled={active || busyId === provider.id}
-                      onClick={() => void activate(provider)}
-                    >
-                      {t(active ? 'adminActive' : 'adminUse')}
-                    </Button>
-                    <Button
-                      size="s"
-                      variant="outlined"
-                      onClick={() => setBillingProvider(provider)}
-                    >
-                      {t('modelsBilling')}
-                    </Button>
-                    {isAdmin ? (
-                      <Button
-                        size="s"
-                        variant="outlined"
-                        disabled={busyId === provider.id}
-                        onClick={() => void test(provider)}
-                      >
-                        {t('adminTest')}
-                      </Button>
-                    ) : null}
-                    {isAdmin ? (
-                      <>
-                        <Button
-                          size="s"
-                          variant="outlined"
-                          onClick={() => setEditingProvider(provider)}
-                        >
-                          {t('adminEdit')}
-                        </Button>
-                        <Button
-                          size="s"
-                          variant="outlined"
-                          onClick={() => setSharingProvider(provider)}
-                        >
-                          {t('modelsShare')}
-                        </Button>
-                        <Button
-                          size="s"
-                          variant="dangerOutlined"
-                          onClick={() =>
-                            setDeleting({ kind: 'llm', id: provider.id, name: provider.id })
-                          }
-                        >
-                          {t('adminDelete')}
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
+                  ) : null}
                 </div>
               )
             })}
+          </div>
+        ) : (
+          <div className={styles.list}>
+            <button type="button" className={styles.backLink} onClick={() => setGroupView(null)}>
+              ← {t('modelsBackToGroups')}
+            </button>
+            {providers
+              .filter((provider) => (provider.group ?? '').trim() === groupView)
+              .map((provider) => renderProviderItem(provider))}
           </div>
         )
       ) : imageModels.length === 0 ? (
@@ -343,6 +505,7 @@ export const ModelsPanel = () => {
       {editingProvider !== null ? (
         <ProviderForm
           provider={editingProvider === 'new' ? null : editingProvider}
+          existingIds={providers.map((item) => item.id)}
           onClose={() => setEditingProvider(null)}
           onSaved={() => {
             setEditingProvider(null)
@@ -476,10 +639,13 @@ const parsePrice = (text: string): number | null => {
 /** 新建 / 编辑对话模型。api_key 留空表示保持原值（后端会按掩码识别）。 */
 const ProviderForm = ({
   provider,
+  existingIds,
   onClose,
   onSaved,
 }: {
   provider: ProviderView | null
+  /** 已存在的模型 ID，批量创建时用于生成唯一 ID */
+  existingIds: string[]
   onClose: () => void
   onSaved: () => void
 }) => {
@@ -507,6 +673,74 @@ const ProviderForm = ({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [group, setGroup] = useState(provider?.group ?? '')
+  /** 新建时可先拉取上游模型列表，勾选后批量建模型 */
+  const [discovering, setDiscovering] = useState(false)
+  const [discovered, setDiscovered] = useState<string[]>([])
+  const [selected, setSelected] = useState<Record<string, boolean>>({})
+  const [rowGroups, setRowGroups] = useState<Record<string, string>>({})
+  const [batchGroup, setBatchGroup] = useState('')
+  const selectedIds = discovered.filter((id) => selected[id])
+
+  const fetchModels = async () => {
+    if (discovering) {
+      return
+    }
+    if (!baseUrl.trim() || !apiKey.trim()) {
+      setError(t('modelsDiscoverRequired'))
+      return
+    }
+    setDiscovering(true)
+    setError('')
+    try {
+      const ids = await discoverProviderModels({
+        type,
+        base_url: baseUrl.trim(),
+        api_key: apiKey.trim(),
+      })
+      setDiscovered(ids)
+      setSelected(Object.fromEntries(ids.map((id) => [id, false])))
+      if (ids.length === 0) {
+        setError(t('modelsDiscoverEmpty'))
+      }
+    } catch (err) {
+      setError(t('modelsFetchFailed', { message: errorText(err) }))
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const applyBatchGroup = () => {
+    const value = batchGroup.trim()
+    if (!value) {
+      return
+    }
+    setRowGroups((prev) => {
+      const next = { ...prev }
+      for (const id of selectedIds) {
+        next[id] = value
+      }
+      return next
+    })
+  }
+
+  /** 用模型名生成合法且不重复的 provider id */
+  const makeId = (raw: string, used: Set<string>): string => {
+    let base = raw
+      .trim()
+      .replace(/[^A-Za-z0-9._-]/g, '-')
+      .replace(/^[^A-Za-z0-9]+/, '')
+    if (!base) {
+      base = 'model'
+    }
+    let candidate = base
+    let index = 2
+    while (used.has(candidate)) {
+      candidate = `${base}-${index++}`
+    }
+    used.add(candidate)
+    return candidate
+  }
 
   const updatePeriod = (index: number, patch: Partial<PeriodDraft>) =>
     setPeriods((list) => list.map((item, i) => (i === index ? { ...item, ...patch } : item)))
@@ -518,8 +752,9 @@ const ProviderForm = ({
     if (busy) {
       return
     }
+    const batchMode = !provider && selectedIds.length > 0
     const trimmedModel = model.trim()
-    if (!trimmedModel) {
+    if (!batchMode && !trimmedModel) {
       setError(t('modelsFieldModelRequired'))
       return
     }
@@ -585,11 +820,10 @@ const ProviderForm = ({
       }
       pricing = { cache_hit_input: cacheHitInput, input, output, periods: periodPayload }
     }
-    const payload: ProviderPayload = {
+    const basePayload: Omit<ProviderPayload, 'id' | 'model' | 'group'> = {
       type,
       base_url: baseUrl.trim(),
       api_key: apiKey.trim(),
-      model: trimmedModel,
       params: parsed,
       vision,
       rate: rateValue,
@@ -599,10 +833,29 @@ const ProviderForm = ({
     setBusy(true)
     setError('')
     try {
-      if (provider) {
-        await updateProvider(provider.id, payload)
+      if (batchMode) {
+        const used = new Set(existingIds)
+        for (const modelId of selectedIds) {
+          await createProvider({
+            ...basePayload,
+            id: makeId(modelId, used),
+            model: modelId,
+            group: (rowGroups[modelId] ?? batchGroup).trim(),
+          })
+        }
+      } else if (provider) {
+        await updateProvider(provider.id, {
+          ...basePayload,
+          model: trimmedModel,
+          group: group.trim(),
+        })
       } else {
-        await createProvider({ ...payload, id: id.trim() || undefined })
+        await createProvider({
+          ...basePayload,
+          id: id.trim() || undefined,
+          model: trimmedModel,
+          group: group.trim(),
+        })
       }
       onSaved()
     } catch (err) {
@@ -692,6 +945,82 @@ const ProviderForm = ({
           placeholder={provider ? t('modelsFieldApiKeyKeep') : t('modelsFieldApiKeyPlaceholder')}
           onChange={(event) => setApiKey(event.target.value)}
         />
+      </label>
+      {provider ? null : (
+        <div className={styles.discoverBox}>
+          <div className={styles.row}>
+            <div className={styles.rowText}>
+              <div className={styles.rowLabel}>{t('modelsFetchModels')}</div>
+              <div className={styles.rowDesc}>{t('modelsFetchHint')}</div>
+            </div>
+            <Button
+              size="s"
+              variant="outlined"
+              disabled={discovering}
+              onClick={() => void fetchModels()}
+            >
+              {t(discovering ? 'modelsFetching' : 'modelsFetchModels')}
+            </Button>
+          </div>
+          {discovered.length > 0 ? (
+            <>
+              <div className={styles.discoverHead}>
+                <span className={styles.hint}>
+                  {t('modelsSelected', { count: selectedIds.length })}
+                </span>
+                <div className={styles.discoverBatch}>
+                  <input
+                    className={styles.input}
+                    value={batchGroup}
+                    placeholder={t('modelsBatchGroup')}
+                    onChange={(event) => setBatchGroup(event.target.value)}
+                  />
+                  <Button
+                    size="s"
+                    variant="outlined"
+                    disabled={selectedIds.length === 0}
+                    onClick={applyBatchGroup}
+                  >
+                    {t('modelsBatchGroupApply')}
+                  </Button>
+                </div>
+              </div>
+              <div className={styles.discoverList}>
+                {discovered.map((modelId) => (
+                  <label key={modelId} className={styles.discoverRow}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selected[modelId])}
+                      onChange={(event) =>
+                        setSelected((prev) => ({ ...prev, [modelId]: event.target.checked }))
+                      }
+                    />
+                    <span className={styles.discoverName}>{modelId}</span>
+                    <input
+                      className={styles.input}
+                      value={rowGroups[modelId] ?? ''}
+                      placeholder={t('modelsGroupPlaceholder')}
+                      onChange={(event) =>
+                        setRowGroups((prev) => ({ ...prev, [modelId]: event.target.value }))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <span className={styles.hint}>{t('modelsGroupHint')}</span>
+            </>
+          ) : null}
+        </div>
+      )}
+      <label className={styles.field}>
+        <span className={styles.fieldLabel}>{t('modelsFieldGroup')}</span>
+        <input
+          className={styles.input}
+          value={group}
+          placeholder={t('modelsGroupPlaceholder')}
+          onChange={(event) => setGroup(event.target.value)}
+        />
+        <span className={styles.hint}>{t('modelsGroupHint')}</span>
       </label>
       <label className={styles.field}>
         <span className={styles.fieldLabel}>{t('modelsFieldParams')}</span>

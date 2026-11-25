@@ -397,6 +397,9 @@
   display: flex;
   flex-shrink: 0;
   gap: 6px;
+  /* 按钮较多时允许换行，避免窄屏横向溢出 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* 邀请码等定长编码：等宽显示，方便对照输入 */
@@ -858,6 +861,15 @@
     gap: 12px;
   }
 
+  .header {
+    flex-wrap: wrap;
+  }
+
+  .header .actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+
   .stats {
     gap: 8px;
   }
@@ -873,7 +885,9 @@
 
   .itemActions {
     width: 100%;
-    justify-content: flex-end;
+    flex-shrink: 1;
+    justify-content: flex-start;
+    gap: 8px;
   }
 
   .row {
@@ -918,4 +932,252 @@
   padding: 0 10px;
   font-size: 12px;
   min-width: 180px;
+}
+
+/* ---- 模型分组 / 拉取上游模型列表 ---- */
+.groupGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.groupCard {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.groupCard:hover {
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-interactive-bg-select);
+}
+
+.groupCardName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.groupCardMeta {
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.backLink {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-brand-text);
+  font-size: 12px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.discoverBox {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.discoverHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.discoverBatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.discoverBatch .input {
+  max-width: 180px;
+}
+
+.discoverList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.discoverRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.discoverName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.discoverRow .input {
+  width: 140px;
+  height: 28px;
+  font-size: 12px;
+}
+
+/* ---- 管理端：同一提供商的模型合并 ---- */
+.providerGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.providerHead {
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.providerHead:hover {
+  background: var(--dsw-alias-interactive-bg-select);
+}
+
+.providerName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.providerMeta {
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.chevron {
+  width: 16px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.providerModels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+
+.providerModels .item {
+  background: transparent;
+}
+
+/* 窄屏：操作按钮按两列排布，避免六个按钮挤成一行溢出 */
+@media not all and (min-width: 480px) {
+  .itemActions > * {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+/* 窄屏：提供商表头允许换行，避免长 URL 与计数挤爆一行 */
+.providerMeta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media not all and (min-width: 768px) {
+  .providerHead {
+    flex-wrap: wrap;
+  }
+
+  .providerName {
+    flex-basis: 100%;
+  }
+
+  .providerMeta {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* ---- 手机端「更多」操作菜单 ---- */
+.moreWrap {
+  position: relative;
+}
+
+.moreBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.moreList {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
+  padding: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+
+.moreItem {
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.moreItem:hover {
+  background: var(--dsw-alias-interactive-bg-select);
+}
+
+.moreItemDanger {
+  color: var(--dsw-alias-state-error-primary);
 }

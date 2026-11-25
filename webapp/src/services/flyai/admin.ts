@@ -28,6 +28,10 @@ export type TokenPricing = {
 export type ProviderView = {
   id: string
   model: string
+  /** 分组：用户模型页先展示分组；空串=未分组 */
+  group?: string
+  /** 同一提供商（同 base_url + 同 key）的稳定标识，仅管理端下发 */
+  provider_key?: string
   type?: string
   base_url?: string
   api_key?: string
@@ -293,6 +297,8 @@ export type ProviderPayload = {
   base_url?: string
   api_key?: string
   model?: string
+  /** 分组：留空=未分组；编辑时 undefined 保持原值 */
+  group?: string
   params?: Record<string, unknown>
   vision?: boolean
   rate?: number | null
@@ -410,6 +416,17 @@ export const createProvider = (payload: ProviderPayload): Promise<ProviderView> 
     method: 'POST',
     body: JSON.stringify(payload),
   })
+
+/** 管理员：用临时 base_url/api_key 拉取上游模型列表（不落库） */
+export const discoverProviderModels = (payload: {
+  type: string
+  base_url: string
+  api_key: string
+}): Promise<string[]> =>
+  request<{ models: string[] }>('/api/models/providers/discover', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((data) => data.models ?? [])
 
 export const updateProvider = (id: string, payload: ProviderPayload): Promise<ProviderView> =>
   request<ProviderView>(`/api/models/providers/${encodeURIComponent(id)}`, {
