@@ -81,7 +81,7 @@ FlyAI 是一个**可自托管、数据本地优先**的 AI 角色扮演聊天平
 |---|---|
 | 后端 | Python 3.9、FastAPI、Pydantic 2、httpx、WebSocket / SSE、Playwright（可选） |
 | 前端 | React 18、TypeScript、Rspack、Vitest；表现层参考 deepseek-ai/chat-demo |
-| 存储 | 用户目录下的 JSON（会话、内容库、配置） |
+| 存储 | SQLite（会话、用户、内容库、设置等，WAL 模式）；仅 `config/config.json` 保持 JSON |
 | 语音 / 音乐 | 豆包语音大模型 WebSocket 二进制协议、MIDI 渲染、FluidSynth WASM |
 | 移动端 | Capacitor 7（Android）、Gradle |
 
