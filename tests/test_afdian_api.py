@@ -363,3 +363,20 @@ def test_config_masks_preserves_and_hides(tmp_path):
     state.config.afdian.webhook_token = ""
     put_config(ConfigPayload(afdian={"enabled": True}), _req(state))
     assert len(state.config.afdian.webhook_token) >= 16
+
+
+def test_afdian_legacy_json_imported_once(tmp_path):
+    (tmp_path / "afdian.json").write_text(json.dumps({"orders": {
+        "ORD-1": {
+            "out_trade_no": "ORD-1", "state": "issued", "total_amount": 10,
+            "created_at": 1,
+        },
+    }}), encoding="utf-8")
+    store = AfdianOrderStore(tmp_path)
+    rec = store.get("ORD-1")
+    assert rec is not None and rec["state"] == "issued"
+    assert not (tmp_path / "afdian.json").exists()
+    assert len(list(tmp_path.glob("afdian.json.bak-*"))) == 1
+    again = AfdianOrderStore(tmp_path)
+    assert len(again.list()) == 1
+    assert len(list(tmp_path.glob("afdian.json.bak-*"))) == 1

@@ -40,7 +40,8 @@ def test_global_vars_roundtrip(tmp_path):
     assert get_global_vars(request)["variables"] == {}
     put_global_vars(GlobalVarsBody(variables={"phone": {"unread": 2}}), request)
     assert get_global_vars(request)["variables"] == {"phone": {"unread": 2}}
-    assert (tmp_path / "st_global_vars.json").is_file()
+    assert (tmp_path / "st_global_vars.db").is_file()
+    assert not (tmp_path / "st_global_vars.json").exists()
 
 
 def test_chat_view_st_shape():

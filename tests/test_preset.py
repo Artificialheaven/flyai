@@ -231,8 +231,11 @@ def test_preset_store_crud_and_corrupt_skip(tmp_path):
     store.save(p2)
     names = [x.name for x in store.list()]
     assert set(names) == {"p1", "p2"}
-    # 损坏文件跳过不炸
-    (tmp_path / "presets" / "broken.json").write_text("{不是 json", encoding="utf-8")
+    # 损坏文档跳过不炸（直接塞进库模拟坏行）
+    store._db.execute(
+        "INSERT INTO presets(k, doc, updated_at) VALUES(?,?,?)",
+        ("broken", "{不是 json", 0.0),
+    )
     assert len(store.list()) == 2
     assert store.get("broken") is None
     assert store.delete(p.id) is True
@@ -288,7 +291,10 @@ def test_preset_list_cache_skips_bad_file_once(tmp_path, monkeypatch):
 
     store = PresetStore(tmp_path / "presets")
     store.save(Preset(name="ok"))
-    (tmp_path / "presets" / "broken.json").write_text("{不是 json", encoding="utf-8")
+    store._db.execute(
+        "INSERT INTO presets(k, doc, updated_at) VALUES(?,?,?)",
+        ("broken", "{不是 json", 0.0),
+    )
     assert [x.name for x in store.list()] == ["ok"]
     # 坏 JSON 在 json.loads 阶段就失败，不计入 from_dict；第二次不再尝试
     before = calls["n"]

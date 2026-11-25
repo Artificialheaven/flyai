@@ -118,6 +118,9 @@ def test_ledger_persist_through_store(tmp_path):
     reloaded = store.load_ledger("TA")
     assert reloaded["item"][0].name == "银钥匙"
 
-    corrupt_p = store._ledger_path("TB")
-    corrupt_p.write_text("{bad", encoding="utf-8")
+    # 损坏文档跳过不炸（库里塞坏行）
+    store._db.execute(
+        "INSERT INTO ledger(k, doc, updated_at) VALUES(?,?,?)",
+        ("TB", "{bad", 0.0),
+    )
     assert store.load_ledger("TB")["item"] == []

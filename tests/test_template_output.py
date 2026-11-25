@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -212,6 +213,25 @@ def test_route_commit_output_and_global_vars(tmp_path):
     assert saved.threads[0].messages[1].template_rendered is True
     global_store = TemplateVarStore(tmp_path / "template_vars" / "u1.json")
     assert global_store.load() == {"g": 1}
+
+
+def test_global_vars_legacy_json_migrated(tmp_path):
+    path = tmp_path / "template_vars" / "u1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "version": 1, "vars": {"hp": 7}, "updated_at": "legacy",
+    }), "utf-8")
+
+    store = TemplateVarStore(path)
+    assert store.load() == {"hp": 7}
+    assert store.load_document()["updated_at"] == "legacy"
+    assert (path.parent / "template_vars.db").is_file()
+    # 旧文件改名备份，写入不再创建 JSON
+    assert not path.exists()
+    assert list(path.parent.glob("u1.json.bak-*"))
+    store.save({"hp": 8}, "now")
+    assert TemplateVarStore(path).load() == {"hp": 8}
+    assert not path.exists()
 
 
 def test_route_prompt_commit_resolves_waiter(tmp_path):

@@ -277,3 +277,48 @@ def test_panel_rejects_traversal(tmp_path):
     svc.install(data, "bad-panel")
     # manifest 解析阶段把非法路径清空，panel_state 因此不可用
     assert svc.panel_state("bad-panel") is None
+
+
+def test_store_migrates_legacy_json(tmp_path):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "registry.json").write_text(json.dumps({
+        "version": 1,
+        "extensions": {"demo": {
+            "name": "demo", "display_name": "Demo", "version": "1.0.0",
+            "sha256": "x", "installed_at": "2024-01-01T00:00:00",
+            "source": "zip", "compat": "L1", "manifest": {},
+        }},
+    }), "utf-8")
+    state = tmp_path / "admin" / "extensions" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps(
+        {"enabled": {"demo": True}, "order": {}, "settings": {}}), "utf-8")
+
+    store = ExtensionStore(root, user_root=tmp_path)
+    assert [r.name for r in store.records()] == ["demo"]
+    assert store.user_state("admin")["enabled"] == {"demo": True}
+    assert (root / "extensions.db").is_file()
+    # 旧 JSON 改名备份，不再留在原路径
+    assert not (root / "registry.json").exists()
+    assert list(root.glob("registry.json.bak-*"))
+    assert not state.exists()
+    assert list(state.parent.glob("state.json.bak-*"))
+    # 重复打开不重复导入
+    again = ExtensionStore(root, user_root=tmp_path)
+    assert [r.name for r in again.records()] == ["demo"]
+    # 新写入只落 DB
+    again.set_enabled("admin", "demo", False)
+    assert again.user_state("admin")["enabled"]["demo"] is False
+    assert not (root / "registry.json").exists()
+
+
+def test_store_tolerates_bad_legacy_json(tmp_path):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "registry.json").write_text("{not json", "utf-8")
+    store = ExtensionStore(root, user_root=tmp_path)
+    # 坏 JSON 跳过、不炸、不删原文件
+    assert store.records() == []
+    assert (root / "registry.json").exists()
+    assert (root / "extensions.db").is_file()

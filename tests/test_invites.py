@@ -159,3 +159,22 @@ def test_load_dedupes_owner_by_newest(tmp_path):
     store = _store(tmp_path)
     assert store.get_for_owner("u1")["code"] == "NEW-CODE"
     assert store.check("OLD-CODE") is None
+
+
+def test_legacy_json_imported_once(tmp_path):
+    import json
+
+    (tmp_path / "invites.json").write_text(json.dumps({"codes": {
+        "LEGACY-CODE": {
+            "code": "LEGACY-CODE", "owner": "u9", "max_uses": 5,
+            "created_at": 1, "uses": [],
+        },
+    }}), encoding="utf-8")
+    store = _store(tmp_path)
+    view = store.check("LEGACY-CODE")
+    assert view is not None and view["owner"] == "u9"
+    assert not (tmp_path / "invites.json").exists()
+    assert len(list(tmp_path.glob("invites.json.bak-*"))) == 1
+    again = _store(tmp_path)
+    assert again.get_for_owner("u9")["code"] == "LEGACY-CODE"
+    assert len(list(tmp_path.glob("invites.json.bak-*"))) == 1

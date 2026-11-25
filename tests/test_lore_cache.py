@@ -73,7 +73,7 @@ def test_delete_prunes_cache(stores):
     c = Character(name="待删")
     store.save_character(c)
     store.list_characters()
-    key = str(store._char_dir / (c.id + ".json"))
+    key = store._cache_key(store._chars, c.id)
     assert key in store._cache
 
     store.delete_character(c.id)
@@ -84,12 +84,16 @@ def test_delete_prunes_cache(stores):
 def test_bad_file_hidden_and_cached(stores, parses):
     store, _ = stores
     store.save_character(Character(name="正常卡"))
-    (store._char_dir / "bad.json").write_text("{不是 json", encoding="utf-8")
+    # 坏文档直接塞进库：列表跳过，且按内容哈希缓存 _INVALID 哨兵
+    store._db.execute(
+        "INSERT INTO characters(k, doc, updated_at) VALUES(?,?,?)",
+        ("bad", "{不是 json", 0.0),
+    )
 
     assert [x.name for x in store.list_characters()] == ["正常卡"]
     before = parses["n"]
     assert [x.name for x in store.list_characters()] == ["正常卡"]
-    # 坏文件写了 _INVALID 哨兵，第二次不重复尝试
+    # 坏文档写了 _INVALID 哨兵，第二次不重复尝试
     assert parses["n"] == before
 
 

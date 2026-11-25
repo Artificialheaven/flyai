@@ -1,7 +1,9 @@
 """Bearer 令牌 + 登录限速 + 管理员重置密码（接口级）。"""
 
+import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -217,7 +219,7 @@ def test_revoke_for_uid():
 # ---- 令牌磁盘持久化 ----
 
 def test_token_survives_new_store_instance(tmp_path):
-    path = tmp_path / "auth_sessions.json"
+    path = tmp_path / "auth_sessions.db"
     s1 = AuthSessionStore(path=path)
     tok = s1.issue("admin", "admin", "admin", 256)
     # 模拟服务重启：新实例绑定同一文件
@@ -227,7 +229,7 @@ def test_token_survives_new_store_instance(tmp_path):
 
 
 def test_revoke_persisted(tmp_path):
-    path = tmp_path / "auth_sessions.json"
+    path = tmp_path / "auth_sessions.db"
     s1 = AuthSessionStore(path=path)
     tok = s1.issue("u", "n", "user", 0)
     assert s1.revoke(tok)
@@ -235,15 +237,35 @@ def test_revoke_persisted(tmp_path):
 
 
 def test_expired_token_not_loaded(tmp_path):
-    path = tmp_path / "auth_sessions.json"
+    path = tmp_path / "auth_sessions.db"
     s1 = AuthSessionStore(ttl_seconds=-1, path=path)
     tok = s1.issue("u", "n", "user", 0)
     assert AuthSessionStore(path=path).resolve(tok) is None
 
 
-def test_corrupt_file_tolerated(tmp_path):
-    path = tmp_path / "auth_sessions.json"
-    path.write_text("{not json", encoding="utf-8")
-    store = AuthSessionStore(path=path)
+def test_corrupt_legacy_json_tolerated(tmp_path):
+    # 旧 JSON 损坏时忽略而不是崩溃，随后正常签发令牌
+    (tmp_path / "auth_sessions.json").write_text("{not json", encoding="utf-8")
+    store = AuthSessionStore(path=tmp_path / "auth_sessions.db")
     tok = store.issue("u", "n", "user", 0)
     assert store.resolve(tok) is not None
+
+
+def test_legacy_json_imported_once(tmp_path):
+    legacy = tmp_path / "auth_sessions.json"
+    legacy.write_text(json.dumps({
+        "legacy-token": {
+            "uid": "u1", "name": "n1", "role": "user", "level": 0,
+            "expires": time.time() + 3600,
+        },
+    }), encoding="utf-8")
+    store = AuthSessionStore(path=tmp_path / "auth_sessions.db")
+    rec = store.resolve("legacy-token")
+    assert rec is not None and rec["uid"] == "u1"
+    assert not legacy.exists()
+    backups = list(tmp_path.glob("auth_sessions.json.bak-*"))
+    assert len(backups) == 1
+    # 再次启动：不会重复导入，令牌仍在
+    again = AuthSessionStore(path=tmp_path / "auth_sessions.db")
+    assert again.resolve("legacy-token") is not None
+    assert len(list(tmp_path.glob("auth_sessions.json.bak-*"))) == 1

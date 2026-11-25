@@ -1,7 +1,9 @@
 """Galgame 存档点：SavePointStore 快照往返 + API（列表/保存/回档/删除）。"""
 
 import asyncio
+import json
 import os
+import sqlite3
 import sys
 from types import SimpleNamespace
 
@@ -18,6 +20,14 @@ from flyai.galgame.savepoints import MAX_SAVEPOINTS, SavePointStore
 from flyai.schemas import Message
 from flyai.sessions.json_store import JsonSessionStore, session_to_dict
 from flyai.sessions.models import RoomMember, Session, Thread
+
+
+def _count(db_path, table):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+    finally:
+        conn.close()
 
 
 def _run(coro):
@@ -63,8 +73,11 @@ def test_store_create_and_list(tmp_path):
     items = sp.list(s.id)
     assert len(items) == 1
     assert items[0].id == rec.id and items[0].file == rec.file
-    # 快照文件确实落盘
-    assert (tmp_path / "data" / "u1" / "savepoints" / s.id / rec.file).is_file()
+    # 清单行与快照分别落在 SQLite 两张表
+    db = tmp_path / "data" / "u1" / "savepoints.db"
+    assert db.is_file()
+    assert _count(db, "savepoints") == 1
+    assert _count(db, "savepoint_snapshots") == 1
 
 
 def test_store_default_name_and_message_count(tmp_path):
@@ -113,8 +126,9 @@ def test_store_cap_evicts_oldest(tmp_path):
     # 最旧的 3 个被淘汰：档3 是幸存者中最旧的
     assert items[0].name == "档3"
     assert sp.load_snapshot(s.id, recs[0].id) is None
-    assert not (tmp_path / "data" / "u1" / "savepoints" / s.id
-                / recs[0].file).exists()
+    assert _count(tmp_path / "data" / "u1" / "savepoints.db", "savepoints") == MAX_SAVEPOINTS
+    assert _count(tmp_path / "data" / "u1" / "savepoints.db",
+                  "savepoint_snapshots") == MAX_SAVEPOINTS
     # 新档完好
     assert sp.load_snapshot(s.id, recs[-1].id) is not None
 
@@ -128,12 +142,48 @@ def test_store_delete(tmp_path):
     sp = SavePointStore(tmp_path / "data", "u1")
     s = _session()
     rec = sp.create(s.id, session_to_dict(s))
-    fpath = tmp_path / "data" / "u1" / "savepoints" / s.id / rec.file
-    assert fpath.is_file()
+    db = tmp_path / "data" / "u1" / "savepoints.db"
+    assert _count(db, "savepoints") == 1
     assert sp.delete(s.id, rec.id) is True
-    assert not fpath.exists()
+    assert _count(db, "savepoints") == 0
+    assert _count(db, "savepoint_snapshots") == 0
     assert sp.list(s.id) == []
     assert sp.delete(s.id, rec.id) is False
+
+
+def test_store_legacy_files_migrated_once(tmp_path):
+    legacy = tmp_path / "data" / "u1" / "savepoints" / "sid1"
+    legacy.mkdir(parents=True)
+    (legacy / "sp_old.json").write_text(
+        json.dumps({"id": "sid1", "threads": []}), "utf-8")
+    (legacy / "index.json").write_text(json.dumps([{
+        "id": "sp0", "name": "旧档", "created_at": "2024-01-01T00:00:00",
+        "messages": 0, "file": "sp_old.json", "thumb": "",
+        "extra": 1,  # 旧格式未知字段应被忽略而不是让整条记录消失
+    }]), "utf-8")
+    broken = tmp_path / "data" / "u1" / "savepoints" / "sid2"
+    broken.mkdir(parents=True)
+    (broken / "index.json").write_text("{oops", "utf-8")
+
+    sp = SavePointStore(tmp_path / "data", "u1")
+    items = sp.list("sid1")
+    assert [i.name for i in items] == ["旧档"]
+    # 坏 JSON 跳过、不炸也不删原文件
+    assert sp.list("sid2") == []
+    assert (broken / "index.json").exists()
+    assert sp.load_snapshot("sid1", "sp0")["id"] == "sid1"
+    assert (tmp_path / "data" / "u1" / "savepoints.db").is_file()
+    # 旧文件改名备份，不再留在原路径
+    assert not (legacy / "index.json").exists()
+    assert list(legacy.glob("index.json.bak-*"))
+    assert list(legacy.glob("sp_old.json.bak-*"))
+    # 重复打开（含模拟重启：清进程内缓存）不重复导入
+    from flyai.galgame import savepoints as sp_mod
+    sp_mod._STORES.clear()
+    sp_mod._MIGRATED.clear()
+    again = SavePointStore(tmp_path / "data", "u1")
+    assert [i.id for i in again.list("sid1")] == ["sp0"]
+    assert _count(tmp_path / "data" / "u1" / "savepoints.db", "savepoints") == 1
 
 
 def test_store_sessions_isolated(tmp_path):

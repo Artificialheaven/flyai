@@ -146,3 +146,24 @@ def test_export_contains_header_and_rows(tmp_path):
     lines = text.splitlines()
     assert lines[0] == "代码,额度,可兑换次数,已兑换,有效期,状态"
     assert len(lines) == 3
+
+
+def test_legacy_json_imported_once(tmp_path):
+    import json
+
+    (tmp_path / "cdk.json").write_text(json.dumps({"codes": {
+        "LEGACY-CODE": {
+            "amount": 10, "max_uses": 5, "expires_at": "",
+            "created_at": 1, "disabled": False, "redemptions": {},
+        },
+    }}), encoding="utf-8")
+    store = _store(tmp_path)
+    view = store.list()[0]
+    assert view["code"] == "LEGACY-CODE" and view["amount"] == 10
+    # 旧文件已改名备份
+    assert not (tmp_path / "cdk.json").exists()
+    assert len(list(tmp_path.glob("cdk.json.bak-*"))) == 1
+    # 再次启动不重复导入
+    again = _store(tmp_path)
+    assert len(again.list()) == 1
+    assert len(list(tmp_path.glob("cdk.json.bak-*"))) == 1
