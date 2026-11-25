@@ -1,4 +1,4 @@
-"""爱发电订单流水：data/afdian.json，进程内锁 + 原子写入。
+"""爱发电订单流水：data/afdian.db（SQLite，JsonTable 文档表）。
 
 状态流转：
 
@@ -8,18 +8,18 @@
 
 同一订单号只登记一次（webhook 重试幂等）；「校验 → 算额度 → 上限判断 →
 发卡 → 落库」整体在 store.lock 内完成，防止并发回调重复发卡。
+首次打开时自动导入同目录下的旧 afdian.json，随后旧文件改名备份。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import PROJECT_ROOT
+from .sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
 
 # 计入累计销售额的状态（真正会发卡的订单）
 _PAID_STATES = ("issued", "pending_cap")
@@ -34,7 +34,9 @@ def _amount(value: Any) -> float:
 
 class AfdianOrderStore:
     def __init__(self, data_dir: Optional[Path] = None):
-        self._path = (data_dir or (PROJECT_ROOT / "data")) / "afdian.json"
+        self._path = (data_dir or (PROJECT_ROOT / "data")) / "afdian.db"
+        self._db = SqliteDB(self._path)
+        self._table = JsonTable(self._db, "orders")
         self._orders: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.RLock()
         self._load()
@@ -42,24 +44,41 @@ class AfdianOrderStore:
     # ---- 持久化 ----
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
+        # 首次使用（空库）时导入同目录旧 afdian.json；导入后旧文件已改名，不会重复导入。
+        if self._table.count() == 0:
+            migrate_legacy_file(
+                self._path.with_suffix(".json"), self._import_legacy
+            )
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            for key, entry in (data.get("orders") or {}).items():
+            for key, entry in self._table.items():
                 if isinstance(entry, dict):
                     entry.setdefault("state", "received")
                     self._orders[str(key)] = entry
         except Exception:
             self._orders = {}
 
+    def _import_legacy(self, data: Dict[str, Any]) -> None:
+        raw = data.get("orders")
+        if not isinstance(raw, dict):
+            return
+        for key, entry in raw.items():
+            if isinstance(entry, dict):
+                self._table.put(str(key), entry)
+
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"orders": self._orders}
-        tmp = self._path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._path)
+        live = set(self._orders)
+        stale = [key for key in self._table.keys() if key not in live]
+        conn = self._db.conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for key, entry in self._orders.items():
+                self._table.put(key, entry)
+            for key in stale:
+                self._table.delete(key)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
 
     # ---- 查询 ----
 

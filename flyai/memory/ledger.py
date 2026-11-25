@@ -91,6 +91,27 @@ def _empty_ledger() -> Dict[str, List[LedgerItem]]:
     return {k: [] for k in KINDS}
 
 
+def ledger_from_dict(data: Any) -> Dict[str, List[LedgerItem]]:
+    """把库里的 JSON 文档还原成台账；损坏/非 dict 返回空台账。"""
+    out = _empty_ledger()
+    raw_items = []
+    if isinstance(data, dict):
+        for k in KINDS:
+            for d in data.get(k) or []:
+                if isinstance(d, dict):
+                    try:
+                        raw_items.append(LedgerItem.from_dict(d))
+                    except Exception:
+                        continue
+    for item in raw_items:
+        out[item.kind].append(item)
+    return out
+
+
+def ledger_to_dict(ledger: Dict[str, List[LedgerItem]]) -> Dict[str, Any]:
+    return {k: [it.to_dict() for it in ledger.get(k) or []] for k in KINDS}
+
+
 def load_ledger(path) -> Dict[str, List[LedgerItem]]:
     """读台账；不存在/损坏返回空台账。"""
     try:
@@ -99,21 +120,12 @@ def load_ledger(path) -> Dict[str, List[LedgerItem]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return _empty_ledger()
-    out = _empty_ledger()
-    raw_items = []
-    if isinstance(data, dict):
-        for k in KINDS:
-            for d in data.get(k) or []:
-                if isinstance(d, dict):
-                    raw_items.append(LedgerItem.from_dict(d))
-    for item in raw_items:
-        out[item.kind].append(item)
-    return out
+    return ledger_from_dict(data)
 
 
 def save_ledger(path, ledger: Dict[str, List[LedgerItem]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {k: [it.to_dict() for it in ledger.get(k) or []] for k in KINDS}
+    payload = ledger_to_dict(ledger)
     tmp = path.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)

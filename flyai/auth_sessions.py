@@ -4,20 +4,22 @@
 
 - 登录成功后由 AuthSessionStore 签发随机 token（不透明、可吊销、有过期时间），
   之后所有请求带 ``Authorization: Bearer <token>``（也兼容 X-Auth-Token 头）。
-- 给 store 绑定文件路径后，令牌持久化到磁盘，重启进程不再掉线（文件含不透明
-  令牌，属敏感数据，必须放在 gitignore 的 data/ 下）；不绑定则纯进程内存储。
+- 给 store 绑定文件路径后，令牌持久化到 SQLite（``auth_sessions.db``，内容为
+  不透明令牌，属敏感数据，必须放在 gitignore 的 data/ 下）；不绑定则纯进程内
+  存储。首次打开时自动导入同目录下的旧 auth_sessions.json 并改名备份。
 - ``logout`` 与管理员重置密码仍会真正吊销凭证。
 - LoginRateLimiter 按「客户端 IP + 用户名」计数：15 分钟内 5 次失败锁定 5 分钟。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from .sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
 
 # 令牌默认有效期 7 天
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600
@@ -41,27 +43,44 @@ class AuthSessionStore:
         self._ttl = int(ttl_seconds)
         self._tokens: Dict[str, Dict[str, Any]] = {}
         self._path: Optional[Path] = None
+        self._db: Optional[SqliteDB] = None
+        self._table: Optional[JsonTable] = None
         if path is not None:
             self.bind_file(Path(path))
 
     def bind_file(self, path: Path) -> None:
-        """绑定持久化文件并载入其中未过期的令牌。"""
+        """绑定持久化数据库（.db）并载入其中未过期的令牌。"""
+        path = Path(path)
+        if path.suffix.lower() != ".db":
+            path = path.with_suffix(".db")
+        if self._db is not None:
+            self._db.close()
         self._path = path
-        if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                now = time.time()
-                if isinstance(data, dict):
-                    self._tokens = {
-                        str(t): rec
-                        for t, rec in data.items()
-                        if isinstance(rec, dict)
-                        and float(rec.get("expires", 0)) >= now
-                    }
-            except (ValueError, OSError, TypeError):
-                # 损坏文件不阻断启动，当作空库重新签发
-                self._tokens = {}
+        self._db = SqliteDB(path)
+        self._table = JsonTable(self._db, "sessions")
+        self._tokens = {}
+        # 首次使用（空库）时导入同目录旧 auth_sessions.json；导入后旧文件已改名，
+        # 不会重复导入。
+        if self._table.count() == 0:
+            migrate_legacy_file(path.with_suffix(".json"), self._import_legacy)
+        now = time.time()
+        tokens: Dict[str, Dict[str, Any]] = {}
+        try:
+            for token, rec in self._table.items():
+                if not isinstance(rec, dict):
+                    continue
+                if float(rec.get("expires", 0)) >= now:
+                    tokens[str(token)] = rec
+        except (TypeError, ValueError):
+            # 损坏数据不阻断启动，当作空库重新签发
+            tokens = {}
+        self._tokens = tokens
         self._save()
+
+    def _import_legacy(self, data: Dict[str, Any]) -> None:
+        for token, rec in data.items():
+            if isinstance(rec, dict):
+                self._table.put(str(token), rec)
 
     def issue(self, uid: str, name: str, role: str, level: int) -> str:
         token = secrets.token_urlsafe(32)
@@ -112,17 +131,24 @@ class AuthSessionStore:
             self._save()
 
     def _save(self) -> None:
-        """原子写回（tmp + replace），避免写一半损坏导致全部登录态丢失。"""
-        if self._path is None:
+        """把内存令牌集合事务性同步到 SQLite，避免写一半损坏导致登录态丢失。"""
+        if self._table is None:
             return
+        conn = self._db.conn()
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_name(self._path.name + ".tmp")
-            tmp.write_text(
-                json.dumps(self._tokens, ensure_ascii=False), encoding="utf-8"
-            )
-            os.replace(tmp, self._path)
-        except OSError:
+            live = set(self._tokens)
+            stale = [token for token in self._table.keys() if token not in live]
+            conn.execute("BEGIN IMMEDIATE")
+            for token, rec in self._tokens.items():
+                self._table.put(token, rec)
+            for token in stale:
+                self._table.delete(token)
+            conn.execute("COMMIT")
+        except (OSError, sqlite3.Error):
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
             # 磁盘不可写时降级为进程内语义，不阻断登录
             pass
 

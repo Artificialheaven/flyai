@@ -36,22 +36,33 @@ from ..user import ADMIN_UID
 router = APIRouter(prefix="/api/st", tags=["st"])
 
 
-def _global_vars_path(sc) -> Path:
+def _global_vars_db(sc) -> Path:
     base = getattr(sc, "settings_path", None)
     if base is not None:
-        return Path(base).parent / "st_global_vars.json"
+        return Path(base).parent / "st_global_vars.db"
     data_dir = getattr(sc, "data_dir", None)
     if data_dir is None:
         raise HTTPException(503, "用户存储不可用")
-    return Path(data_dir) / str(sc.uid) / "st_global_vars.json"
+    return Path(data_dir) / str(sc.uid) / "st_global_vars.db"
+
+
+def _global_vars_table(sc):
+    from ..sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
+
+    db_path = _global_vars_db(sc)
+    db = SqliteDB(db_path)
+    table = JsonTable(db, "vars")
+    if table.count() == 0:
+        migrate_legacy_file(db_path.with_suffix(".json"),
+                            lambda data: table.put("global", data))
+    return table
 
 
 def _read_global_vars(sc) -> dict:
-    path = _global_vars_path(sc)
-    if not path.is_file():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = _global_vars_table(sc).get("global")
+    except HTTPException:
+        raise
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -75,12 +86,10 @@ def put_global_vars(body: GlobalVarsBody, request: Request):
     raw = json.dumps(body.variables, ensure_ascii=False)
     if len(raw.encode("utf-8")) > 1024 * 1024:
         raise HTTPException(413, "全局变量超过 1MB")
-    path = _global_vars_path(sc)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(raw, encoding="utf-8")
-    os.replace(tmp, path)
+    _global_vars_table(sc).put("global", body.variables)
     return {"ok": True}
+
+
 log = logging.getLogger(__name__)
 
 _MAX_REDIRECTS = 5

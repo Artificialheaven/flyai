@@ -555,7 +555,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         state.self_memory_store.prompts = state.prompt_registry
         state.reload_tools()
         # 令牌持久化：重启服务不再全部掉登录态（data/ 在 .gitignore 中）
-        state.auth_sessions.bind_file(data_dir / "auth_sessions.json")
+        state.auth_sessions.bind_file(data_dir / "auth_sessions.db")
         state.user_store = UserStore(data_dir)
         # 邀请码库（注册）：每个用户（含 admin）同一时间只有一个有效码
         from .invites import InviteStore

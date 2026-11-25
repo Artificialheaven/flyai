@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import AppConfig, PROJECT_ROOT
+from .sqlite_store import SqliteDB, backup_path
 from .lore.store import LoreStore
-from .sessions import JsonSessionStore, MemorySessionStore, SessionStore
+from .sessions import MemorySessionStore, SessionStore, SqliteSessionStore
 
 
 # 管理员标识：管理员不在 user 库中，凭据存于 config/auth（config.auth.admin）
@@ -100,33 +101,93 @@ def _hash_password(password: str, salt: str = "") -> str:
 
 
 class UserStore:
-    """data/users.json 普通用户清单。管理员不在库里（凭据在 config）。"""
+    """普通用户清单（SQLite：data/users.db）。管理员不在库里（凭据在 config）。
+
+    旧版 data/users.json 首次打开时自动导入并改名备份。
+    """
+
+    _SCHEMA = (
+        """CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            password_hash TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            last_login_at TEXT NOT NULL DEFAULT '',
+            level INTEGER NOT NULL DEFAULT 0,
+            quota_total REAL NOT NULL DEFAULT 0,
+            quota_used REAL NOT NULL DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_users_name ON users(name)",
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    )
 
     def __init__(self, data_dir: Path = None):
-        self._path = (data_dir or (PROJECT_ROOT / "data")) / "users.json"
+        base = Path(data_dir or (PROJECT_ROOT / "data"))
+        base.mkdir(parents=True, exist_ok=True)
+        self._db = SqliteDB(base / "users.db")
+        self._db.ensure(*self._SCHEMA)
         self._users: Dict[str, User] = {}
-        self._load()
+        self._migrate_legacy(base / "users.json")
+        self._reload()
 
-    def _load(self) -> None:
-        if not self._path.exists():
+    def _migrate_legacy(self, path: Path) -> None:
+        if not path.exists():
             return
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            for ud in data.get("users", []):
-                u = User.from_dict(ud)
-                if u.id == "default":
-                    continue  # 清理旧版自动创建的管理员账号（新模型管理员在 config）
-                self._users[u.id] = u
+            data = json.loads(path.read_text(encoding="utf-8"))
+            rows = data.get("users", []) if isinstance(data, dict) else []
         except Exception:
-            self._users = {}
+            rows = []
+        with self._db.conn() as c:
+            for ud in rows:
+                if not isinstance(ud, dict) or not ud.get("id"):
+                    continue
+                if ud.get("id") == "default":
+                    continue  # 清理旧版自动创建的管理员账号
+                u = User.from_dict(ud)
+                c.execute(
+                    "INSERT OR IGNORE INTO users(id,name,email,password_hash,"
+                    "created_at,last_login_at,level,quota_total,quota_used) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (u.id, u.name, u.email, u.password_hash, u.created_at,
+                     u.last_login_at, int(u.level or 0), float(u.quota_total or 0),
+                     float(u.quota_used or 0)),
+                )
+        try:
+            path.replace(backup_path(path))
+        except OSError:
+            pass
+
+    def _reload(self) -> None:
+        self._users = {}
+        for r in self._db.query(
+            "SELECT id,name,email,password_hash,created_at,last_login_at,"
+            "level,quota_total,quota_used FROM users"
+        ):
+            u = User(
+                id=r[0], name=r[1], email=r[2], password_hash=r[3],
+                created_at=r[4], last_login_at=r[5], level=int(r[6] or 0),
+                quota_total=float(r[7] or 0), quota_used=float(r[8] or 0),
+            )
+            self._users[u.id] = u
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"users": [u.to_dict() for u in self._users.values()]}
-        tmp = self._path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._path)
+        with self._db.conn() as c:
+            for u in self._users.values():
+                c.execute(
+                    "INSERT INTO users(id,name,email,password_hash,created_at,"
+                    "last_login_at,level,quota_total,quota_used) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "name=excluded.name, email=excluded.email,"
+                    "password_hash=excluded.password_hash,"
+                    "created_at=excluded.created_at,"
+                    "last_login_at=excluded.last_login_at, level=excluded.level,"
+                    "quota_total=excluded.quota_total, quota_used=excluded.quota_used",
+                    (u.id, u.name, u.email, u.password_hash, u.created_at,
+                     u.last_login_at, int(u.level or 0), float(u.quota_total or 0),
+                     float(u.quota_used or 0)),
+                )
 
     def list(self) -> List[User]:
         return sorted(self._users.values(), key=lambda u: u.created_at)
@@ -170,7 +231,8 @@ class UserStore:
         if uid not in self._users:
             return False
         del self._users[uid]
-        self._save()
+        with self._db.conn() as c:
+            c.execute("DELETE FROM users WHERE id=?", (uid,))
         return True
 
     def valid(self, uid: str) -> bool:
@@ -496,6 +558,59 @@ def save_user_settings(path: Path, settings: UserSettings) -> None:
     os.replace(tmp, path)
 
 
+class UserSettingsStore:
+    """单个用户的个人设置（SQLite：data/{uid}/settings.db）。
+
+    旧版 settings.json 首次打开时自动导入并改名备份。settings_path 仍保留
+    指向旧路径，供 usage.jsonl 等同目录附属文件继续使用。
+    """
+
+    _SCHEMA = (
+        "CREATE TABLE IF NOT EXISTS settings ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL)",
+    )
+
+    def __init__(self, legacy_path: Path):
+        self.path = Path(legacy_path)
+        self.db = SqliteDB(self.path.parent / "settings.db")
+        self.db.ensure(*self._SCHEMA)
+        self._migrate_legacy()
+
+    def _migrate_legacy(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            self.db.execute(
+                "INSERT OR REPLACE INTO settings(id, doc) VALUES(1, ?)",
+                (json.dumps(data, ensure_ascii=False, separators=(",", ":")),),
+            )
+        try:
+            self.path.replace(backup_path(self.path))
+        except OSError:
+            pass
+
+    def load(self) -> UserSettings:
+        row = self.db.one("SELECT doc FROM settings WHERE id=1")
+        if row is None:
+            return UserSettings()
+        try:
+            data = json.loads(row[0])
+        except Exception:
+            return UserSettings()
+        return UserSettings.from_dict(data) if isinstance(data, dict) else UserSettings()
+
+    def save(self, settings: UserSettings) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO settings(id, doc) VALUES(1, ?)",
+            (json.dumps(settings.to_dict(), ensure_ascii=False,
+                        separators=(",", ":")),),
+        )
+
+
 def migrate_legacy(data_dir: Path) -> None:
     """旧数据并入管理员目录：单用户时代的 data/characters|worlds|sessions，
     以及旧版默认用户目录 data/default/*。
@@ -537,7 +652,8 @@ class UserScope:
     presets: Any = None          # PresetStore：该用户的模型预设库
     level: int = 0
     user_settings: Any = None    # UserSettings：该用户的个人设置（keep_turns 等）
-    settings_path: Any = None    # Path：data/{uid}/settings.json
+    settings_path: Any = None    # Path：data/{uid}/settings.json（旧路径/附属文件目录）
+    settings_store: Any = None   # UserSettingsStore：data/{uid}/settings.db
     # LoreQuerier 复用缓存：key=角色/世界内容签名，容量 32 FIFO
     _querier_cache: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -560,17 +676,20 @@ class UserScope:
         return q
 
     def save_user_settings(self) -> None:
-        """把当前 user_settings 原子写回 settings.json。"""
-        save_user_settings(self.settings_path, self.user_settings)
+        """把当前 user_settings 写回 settings.db（旧构造兜底 JSON）。"""
+        if self.settings_store is not None:
+            self.settings_store.save(self.user_settings)
+        else:
+            save_user_settings(self.settings_path, self.user_settings)
 
     @classmethod
     def build(cls, uid: str, config: AppConfig, data_dir: Path,
               user_store: Optional["UserStore"] = None) -> "UserScope":
         user_dir = data_dir / uid
-        if config.history.backend == "json":
-            store = JsonSessionStore(user_dir / "sessions")
-        else:
+        if config.history.backend == "memory":
             store = MemorySessionStore()
+        else:
+            store = SqliteSessionStore(user_dir / "sessions")
         upload_dir = (data_dir / "uploads" / uid)
         upload_dir.mkdir(parents=True, exist_ok=True)
         lore = LoreStore(user_dir, shared_base=data_dir / "shared")
@@ -580,7 +699,8 @@ class UserScope:
         char_memory = CharacterMemoryStore(user_dir)
         presets = PresetStore(user_dir / "presets")
         settings_path = user_dir / "settings.json"
-        user_settings = load_user_settings(settings_path)
+        settings_store = UserSettingsStore(settings_path)
+        user_settings = settings_store.load()
         if uid == ADMIN_UID:
             level = ADMIN_LEVEL
         elif user_store is not None:
@@ -590,4 +710,5 @@ class UserScope:
             level = 0
         return cls(uid=uid, store=store, lore=lore, upload_dir=upload_dir,
                    char_memory=char_memory, presets=presets, level=level,
-                   user_settings=user_settings, settings_path=settings_path)
+                   user_settings=user_settings, settings_path=settings_path,
+                   settings_store=settings_store)

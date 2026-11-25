@@ -21,13 +21,8 @@ def _store(request: Request):
 
 
 def _book_ids(store) -> List[str]:
-    """该用户记忆目录下所有记忆簿的角色 id（文件名来自磁盘，去掉 .ledger.json）。"""
-    out: List[str] = []
-    for p in sorted(store._dir.glob("*.json")):
-        if p.name.endswith(".ledger.json"):
-            continue
-        out.append(p.name[: -len(".json")])
-    return out
+    """该用户记忆库里所有记忆簿的角色 id（台账-only 的 id 不算）。"""
+    return list(store.ids())
 
 
 def _entry_dict(entry, char_id: str) -> dict:

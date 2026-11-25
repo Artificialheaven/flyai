@@ -1,13 +1,12 @@
-"""CDK（兑换码）存储：data/cdk.json，原子写入。
+"""CDK（兑换码）存储：data/cdk.db（SQLite，JsonTable 文档表）。
 
 每张 CDK 三个核心属性：额度（点数）、有效期（含端点，空=永久）、
 全站可兑换总次数（<=0 表示不限）。每张 CDK 同一用户只能兑换一次。
+首次打开时自动导入同目录下的旧 cdk.json，随后旧文件改名备份。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
 import time
 from datetime import date
@@ -16,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import PROJECT_ROOT
 from .proactor.clock import local_date_str, parse_due_at
+from .sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
 
 # 生成用字母表：去掉易混淆的 0/O/1/I
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -43,7 +43,9 @@ def _fmt_money(v: float) -> float:
 
 class CdkStore:
     def __init__(self, data_dir: Optional[Path] = None, tzname: str = "Asia/Shanghai"):
-        self._path = (data_dir or (PROJECT_ROOT / "data")) / "cdk.json"
+        self._path = (data_dir or (PROJECT_ROOT / "data")) / "cdk.db"
+        self._db = SqliteDB(self._path)
+        self._table = JsonTable(self._db, "codes")
         self.tzname = tzname or "Asia/Shanghai"
         self._codes: Dict[str, Dict[str, Any]] = {}
         self._load()
@@ -51,24 +53,41 @@ class CdkStore:
     # ---- 持久化 ----
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
+        # 首次使用（空库）时导入同目录旧 cdk.json；导入后旧文件已改名，不会重复导入。
+        if self._table.count() == 0:
+            migrate_legacy_file(
+                self._path.with_suffix(".json"), self._import_legacy
+            )
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            for code, entry in (data.get("codes") or {}).items():
+            for code, entry in self._table.items():
                 if isinstance(entry, dict):
                     entry.setdefault("redemptions", {})
                     self._codes[_norm_code(code)] = entry
         except Exception:
             self._codes = {}
 
+    def _import_legacy(self, data: Dict[str, Any]) -> None:
+        raw = data.get("codes")
+        if not isinstance(raw, dict):
+            return
+        for code, entry in raw.items():
+            if isinstance(entry, dict):
+                self._table.put(_norm_code(str(code)), entry)
+
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"codes": self._codes}
-        tmp = self._path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._path)
+        live = set(self._codes)
+        stale = [code for code in self._table.keys() if code not in live]
+        conn = self._db.conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for code, entry in self._codes.items():
+                self._table.put(code, entry)
+            for code in stale:
+                self._table.delete(code)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
 
     # ---- 工具 ----
 

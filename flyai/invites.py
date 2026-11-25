@@ -1,13 +1,12 @@
-"""邀请码存储：data/invites.json，原子写入。
+"""邀请码存储：data/invites.db（SQLite，JsonTable 文档表）。
 
 每个用户（含 admin）同一时间只保留一个有效邀请码；重新生成或换码时旧码
 立即作废。注册时必须提供邀请码，邀请次数用尽后需重新生成。
+首次打开时自动导入同目录下的旧 invites.json，随后旧文件改名备份。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
 import threading
 import time
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import PROJECT_ROOT
+from .sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
 
 # 生成用字母表：去掉易混淆的 0/O/1/I
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -65,7 +65,9 @@ def _validate_custom_code(code: str) -> str:
 
 class InviteStore:
     def __init__(self, data_dir: Optional[Path] = None):
-        self._path = (data_dir or (PROJECT_ROOT / "data")) / "invites.json"
+        self._path = (data_dir or (PROJECT_ROOT / "data")) / "invites.db"
+        self._db = SqliteDB(self._path)
+        self._table = JsonTable(self._db, "codes")
         self._lock = threading.RLock()
         self._codes: Dict[str, Dict[str, Any]] = {}
         with self._lock:
@@ -74,21 +76,12 @@ class InviteStore:
     # ---- 持久化 ----
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:
-            self._codes = {}
-            return
-        if not isinstance(data, dict):
-            self._codes = {}
-            return
-        # 兼容 {"codes": {...}} 包装与顶层以码为 key 两种形态
-        raw = data.get("codes")
-        if not isinstance(raw, dict):
-            raw = data
-        for code, entry in raw.items():
+        # 首次使用（空库）时导入同目录旧 invites.json；导入后旧文件已改名，不会重复导入。
+        if self._table.count() == 0:
+            migrate_legacy_file(
+                self._path.with_suffix(".json"), self._import_legacy
+            )
+        for code, entry in self._table.items():
             if not isinstance(entry, dict):
                 continue
             owner = str(entry.get("owner") or "")
@@ -108,6 +101,19 @@ class InviteStore:
             self._codes[key] = entry
         self._dedupe_owners()
 
+    def _import_legacy(self, data: Dict[str, Any]) -> None:
+        # 兼容 {"codes": {...}} 包装与顶层以码为 key 两种形态
+        raw = data.get("codes")
+        if not isinstance(raw, dict):
+            raw = data
+        for code, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            key = _norm_code(str(entry.get("code") or code))
+            if len(key) < 4:
+                continue
+            self._table.put(key, entry)
+
     def _dedupe_owners(self) -> None:
         """防御历史脏数据：同一 owner 只保留 created_at 最新的码。"""
         chosen: Dict[str, str] = {}
@@ -126,11 +132,19 @@ class InviteStore:
                 self._codes.pop(code, None)
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._codes, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._path)
+        live = set(self._codes)
+        stale = [code for code in self._table.keys() if code not in live]
+        conn = self._db.conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for code, entry in self._codes.items():
+                self._table.put(code, entry)
+            for code in stale:
+                self._table.delete(code)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
 
     # ---- 工具 ----
 

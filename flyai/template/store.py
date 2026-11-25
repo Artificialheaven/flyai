@@ -1,14 +1,25 @@
-"""EJS 模板 global 作用域存储：每用户一个 JSON 文件，原子写入。"""
+"""EJS 模板 global 作用域存储：每用户一行，落在同目录 ``template_vars.db``。
+
+构造参数仍是旧的 ``template_vars.json`` 路径（路由层不用改）：数据库固定为
+该文件同目录的 ``template_vars.db``，行 key 取旧文件名（如 ``u1``）。
+首次打开自动导入旧 JSON 并改名 ``.bak-<时间戳>``。
+"""
 
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
+
+from ..sqlite_store import JsonTable, SqliteDB, migrate_legacy_file
 
 MAX_FILE_BYTES = 1024 * 1024
+
+# 同一个 db 只建一个 JsonTable（连接是线程本地的，缓存跨线程安全）。
+_TABLES: Dict[str, JsonTable] = {}
+_MIGRATED: set = set()
+_GUARD = threading.Lock()
 
 
 def _empty() -> Dict[str, Any]:
@@ -39,7 +50,7 @@ def user_store(state: Any, sc: Any) -> TemplateVarStore:
 
 
 class TemplateVarStore:
-    """按文件路径缓存数据；同一文件的读写用 RLock 串行化。"""
+    """按路径缓存数据；同一文件的读写用 RLock 串行化。"""
 
     _locks: Dict[str, threading.RLock] = {}
     _guard = threading.Lock()
@@ -54,38 +65,51 @@ class TemplateVarStore:
                 TemplateVarStore._locks[key] = lock
         self._lock = lock
 
+    # ---------- 存储定位 / 迁移 ----------
+    def _table(self) -> Tuple[JsonTable, str]:
+        if self.path.suffix == ".db":
+            db_path = self.path
+            row_key = "global"
+        else:
+            db_path = self.path.parent / "template_vars.db"
+            row_key = self.path.stem
+        with _GUARD:
+            table = _TABLES.get(str(db_path))
+            if table is None:
+                table = JsonTable(SqliteDB(db_path), "vars")
+                _TABLES[str(db_path)] = table
+            if self.path.suffix != ".db" and str(self.path) not in _MIGRATED:
+                migrate_legacy_file(self.path, lambda doc: self._import(table, row_key, doc))
+                _MIGRATED.add(str(self.path))
+        return table, row_key
+
+    @staticmethod
+    def _import(table: JsonTable, row_key: str, doc: Any) -> None:
+        if not isinstance(doc, dict) or not isinstance(doc.get("vars"), dict):
+            return
+        if not table.exists(row_key):
+            table.put(row_key, doc)
+
+    # ---------- 读写 ----------
     def load(self) -> Dict[str, Any]:
         with self._lock:
-            try:
-                raw = self.path.read_text(encoding="utf-8")
-            except OSError:
-                return {}
-            try:
-                data = json.loads(raw)
-            except (TypeError, ValueError):
-                return {}
-            return _valid_vars(data)
+            table, row_key = self._table()
+            return _valid_vars(table.get(row_key))
 
     def load_document(self) -> Dict[str, Any]:
         """完整文档（含 version/updated_at）；损坏时返回空结构。"""
         with self._lock:
-            try:
-                raw = self.path.read_text(encoding="utf-8")
-            except OSError:
+            table, row_key = self._table()
+            doc = table.get(row_key)
+            if not isinstance(doc, dict) or doc.get("version") != 1:
                 return _empty()
-            try:
-                data = json.loads(raw)
-            except (TypeError, ValueError):
-                return _empty()
-            if not isinstance(data, dict) or data.get("version") != 1:
-                return _empty()
-            vars_ = data.get("vars")
+            vars_ = doc.get("vars")
             if not isinstance(vars_, dict):
                 return _empty()
             return {
                 "version": 1,
                 "vars": vars_,
-                "updated_at": str(data.get("updated_at") or ""),
+                "updated_at": str(doc.get("updated_at") or ""),
             }
 
     def save(self, vars_: Dict[str, Any], updated_at: str = "") -> None:
@@ -98,8 +122,5 @@ class TemplateVarStore:
         if len(text.encode("utf-8")) > MAX_FILE_BYTES:
             raise ValueError("模板变量超过 1MB 上限")
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, self.path)
+            table, row_key = self._table()
+            table.put(row_key, payload)

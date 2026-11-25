@@ -123,15 +123,9 @@ class EntryBook:
         return [e for e in self.entries if not e.superseded]
 
 
-def load_book(path) -> EntryBook:
-    """读记忆簿；文件不存在/损坏时返回空簿。旧字符串条目自动包装。"""
-    try:
-        if not path.exists():
-            return EntryBook()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return EntryBook()
-    except Exception:
+def book_from_dict(data: Any) -> EntryBook:
+    """把库里的 JSON 文档还原成记忆簿；损坏/非 dict 返回空簿。"""
+    if not isinstance(data, dict):
         return EntryBook()
     entries: List[MemoryEntry] = []
     for item in data.get("entries") or []:
@@ -151,14 +145,30 @@ def load_book(path) -> EntryBook:
     return EntryBook(entries=entries, extract_markers=markers)
 
 
-def save_book(path, book: EntryBook) -> None:
-    """原子写入记忆簿 v2。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+def book_to_dict(book: EntryBook) -> Dict[str, Any]:
+    """序列化为入库文档（v2 结构，与旧文件格式一致）。"""
+    return {
         "version": ENTRY_VERSION,
         "extract_markers": dict(book.extract_markers),
         "entries": [e.to_dict() for e in book.entries],
     }
+
+
+def load_book(path) -> EntryBook:
+    """读记忆簿；文件不存在/损坏时返回空簿。旧字符串条目自动包装。"""
+    try:
+        if not path.exists():
+            return EntryBook()
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return EntryBook()
+    return book_from_dict(data)
+
+
+def save_book(path, book: EntryBook) -> None:
+    """原子写入记忆簿 v2。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = book_to_dict(book)
     tmp = path.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
