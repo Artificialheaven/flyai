@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import secrets
 import uuid
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
@@ -70,6 +72,8 @@ class ProviderPayload(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    # 分组（空串=未分组）；None=不传（保留原值）
+    group: Optional[str] = None
     params: dict = {}
     # 深度思考开关开启时合并的请求参数；None=不传（保留原值）
     thinking_params: Optional[dict] = None
@@ -83,6 +87,14 @@ class ProviderPayload(BaseModel):
     rate: Optional[float] = None
     # 按 token 计费配置（每 1M token 的点数+时段）；None=不改，{}=关闭
     pricing: Optional[dict] = None
+
+
+class DiscoverPayload(BaseModel):
+    """管理员拉取上游模型列表：只带临时凭据，不落库。"""
+
+    type: str = "openai"
+    base_url: str = ""
+    api_key: str = ""
 
 
 class ImageModelPayload(BaseModel):
@@ -168,9 +180,16 @@ def _merge_pricing(payload_pricing, current):
     return payload_pricing
 
 
+def _provider_key(p: ProviderConfig) -> str:
+    """同一提供商（同 base_url + 同 key）的稳定标识，供管理端合并展示。"""
+    raw = f"{p.base_url.strip()}\n{p.api_key}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
 def _masked_provider(p: ProviderConfig) -> dict:
     d = p.dict()
     d["api_key"] = mask_api_key(p.api_key) if p.api_key else ""
+    d["provider_key"] = _provider_key(p)
     return d
 
 
@@ -185,6 +204,7 @@ def _public_provider(p: ProviderConfig) -> dict:
     return {
         "id": p.id,
         "model": p.model,
+        "group": p.group,
         "vision": p.vision,
         "rate": p.rate,
         "pricing": p.pricing.dict() if p.pricing is not None else None,
@@ -916,6 +936,7 @@ def create_provider_model(payload: ProviderPayload, request: Request):
         base_url=payload.base_url,
         api_key=payload.api_key,
         model=payload.model,
+        group=payload.group or "",
         params=payload.params or {},
         thinking_params=payload.thinking_params or {},
         thinking_off_params=payload.thinking_off_params or {},
@@ -931,6 +952,49 @@ def create_provider_model(payload: ProviderPayload, request: Request):
     return _masked_provider(item)
 
 
+@router.post("/models/providers/discover")
+async def discover_provider_models(payload: DiscoverPayload, request: Request):
+    """管理员：用临时 base_url/api_key 拉取上游 /models 列表，供批量建模型。"""
+    _require_admin(request)
+    base = (payload.base_url or "").strip().rstrip("/")
+    api_key = (payload.api_key or "").strip()
+    if not base:
+        raise HTTPException(400, "请先填写 Base URL")
+    if not api_key:
+        raise HTTPException(400, "请先填写 API Key")
+    kind = "anthropic" if (payload.type or "").lower() == "anthropic" else "openai"
+    if kind == "anthropic":
+        url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    else:
+        url = base + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+    except Exception as exc:  # noqa: BLE001 - 统一回显网络错误
+        raise HTTPException(502, f"请求模型列表失败：{type(exc).__name__}: {str(exc)[:200]}")
+    if resp.status_code >= 400:
+        detail = (resp.text or "").strip()[:200]
+        raise HTTPException(502, f"上游返回 {resp.status_code}：{detail}")
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(502, "上游返回的不是 JSON，无法解析模型列表")
+    items = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        items = []
+    models = []
+    for item in items:
+        mid = item.get("id") if isinstance(item, dict) else None
+        if isinstance(mid, str):
+            mid = mid.strip()
+            if mid and mid not in models:
+                models.append(mid)
+    models.sort()
+    return {"models": models}
+
+
 @router.put("/models/providers/{mid}")
 def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
     _require_admin(request)
@@ -943,6 +1007,7 @@ def update_provider_model(mid: str, payload: ProviderPayload, request: Request):
         "base_url": payload.base_url if payload.base_url else item.base_url,
         "api_key": _credit_key(payload.api_key, item.api_key),
         "model": payload.model if payload.model else item.model,
+        "group": payload.group if payload.group is not None else item.group,
         "params": payload.params or item.params,
         "thinking_params": payload.thinking_params or item.thinking_params,
         "thinking_off_params": payload.thinking_off_params or item.thinking_off_params,

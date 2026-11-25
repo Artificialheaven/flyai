@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, validator
 
@@ -127,6 +128,8 @@ class ProviderConfig(BaseModel):
     base_url: str
     api_key: str = ""
     model: str
+    # 分组：模型页先展示分组再进入选择；空串归入「未分组」
+    group: str = ""
     params: Dict[str, Any] = {}
     # 「深度思考」开关开启时才合并进请求体的参数（各厂商协议不同，
     # 如 {"reasoning_effort":"high"} / {"enable_thinking":true} /
@@ -154,6 +157,10 @@ class ProviderConfig(BaseModel):
     @validator("rate")
     def _clamp_rate(cls, v):  # noqa: N805
         return max(0.0, float(v))
+
+    @validator("group", pre=True)
+    def _normalize_group(cls, v):  # noqa: N805
+        return str(v or "").strip()[:40]
 
 
 class ImageModelConfig(BaseModel):
@@ -1319,6 +1326,8 @@ class MvuSettings(BaseModel):
 class AppConfig(BaseModel):
     server: ServerSettings = ServerSettings()
     active_provider: str = ""
+    # 旧配置的模型是否已完成「按 base_url + api_key 自动分组」；旧文件无该字段时视为 False
+    legacy_grouping_done: bool = False
     providers: List[ProviderConfig] = []
     tools: ToolSettings = ToolSettings()
     history: HistorySettings = HistorySettings()
@@ -1365,8 +1374,12 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        _migrate_config_data(data)
-        return AppConfig.parse_obj(data)
+        migrated = _migrate_config_data(data)
+        cfg = AppConfig.parse_obj(data)
+        if migrated:
+            # 一次性迁移：把自动分组结果与标记落盘，避免下次启动重新分组
+            save_config(cfg, cfg_path)
+        return cfg
     except Exception as exc:  # JSON 或校验失败给出友好错误
         raise ConfigError(f"配置加载失败: {cfg_path}: {exc}") from exc
 
@@ -1391,14 +1404,19 @@ def get_active_provider(cfg: AppConfig) -> Optional[ProviderConfig]:
     return None
 
 
-def _migrate_config_data(data: dict) -> None:
+def _migrate_config_data(data: dict) -> bool:
     """旧配置就地升级到新结构（parse 前）：
 
     - 旧 providers 无 owner 字段 → admin 归属、默认共享（min_level 0），
       保持「所有用户可用」的现状；
+    - 旧 providers 无 group → 按 base_url + api_key 自动分组（同名端点
+      共享一个分组名，同一主机不同 key 追加序号），只执行一次；
     - 旧 image_generation 含 base_url/model/api_key，且 image_models 为空
       → 转成一条共享生图模型。
+
+    返回 True 表示写入了需要持久化的迁移标记。
     """
+    changed = False
     providers = data.get("providers") or []
     for p in providers:
         if not isinstance(p, dict) or "owner" in p:
@@ -1406,6 +1424,11 @@ def _migrate_config_data(data: dict) -> None:
         p["owner"] = "admin"
         p["shared"] = True
         p["min_level"] = 0
+
+    if not data.get("legacy_grouping_done"):
+        _assign_legacy_groups(providers)
+        data["legacy_grouping_done"] = True
+        changed = True
 
     ig = data.get("image_generation") or {}
     image_models = data.get("image_models") or []
@@ -1423,6 +1446,30 @@ def _migrate_config_data(data: dict) -> None:
     # 生图全局段不再需要旧字段（多余键 pydantic 默认忽略，但顺手清掉）
     for key in ("base_url", "model", "api_key"):
         ig.pop(key, None)
+
+    return changed
+
+
+def _assign_legacy_groups(providers: List[dict]) -> None:
+    """按 base_url + api_key 给缺少分组的旧模型自动命名分组。
+
+    同一个端点（同 base_url 且同 key）共用一个分组名，取 base_url 的主机名；
+    同一主机下出现不同 key 时按出现顺序追加序号，避免不同凭据混进一组。
+    """
+    seen: Dict[tuple, str] = {}
+    per_host: Dict[str, int] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        if str(provider.get("group") or "").strip():
+            continue
+        base = str(provider.get("base_url") or "").strip()
+        identity = (base, str(provider.get("api_key") or ""))
+        if identity not in seen:
+            host = urlparse(base).hostname or base or "自建提供商"
+            per_host[host] = per_host.get(host, 0) + 1
+            seen[identity] = host if per_host[host] == 1 else f"{host} ({per_host[host]})"
+        provider["group"] = seen[identity]
 
 
 def _env_config_path() -> Path:

@@ -304,7 +304,7 @@ def test_user_low_level_get_filtered(tmp_path):
     assert mids == {"img-open"}  # img-gated 完全消失
     # 他人共享模型：只露必要字段，不下发 base_url/归属/api_key/参数
     p = view["providers"][0]
-    assert set(p.keys()) == {"id", "model", "vision", "rate", "pricing",
+    assert set(p.keys()) == {"id", "model", "group", "vision", "rate", "pricing",
                              "min_level"}
     assert p["model"] == "deepseek-chat"
     m = view["image_models"][0]

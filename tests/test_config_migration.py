@@ -64,3 +64,38 @@ def test_migration_without_legacy_fields_noop():
     data = {"providers": [], "image_generation": {"enabled": False}}
     _migrate_config_data(data)
     assert data.get("image_models") is None
+
+
+def test_legacy_providers_auto_grouped_by_endpoint():
+    data = {"providers": [
+        {"id": "a", "base_url": "https://gw.example.com/v1", "api_key": "k1", "model": "m1"},
+        {"id": "b", "base_url": "https://gw.example.com/v1", "api_key": "k1", "model": "m2"},
+        {"id": "c", "base_url": "https://gw.example.com/v1", "api_key": "k2", "model": "m3"},
+        {"id": "d", "base_url": "https://other.example.com/v1", "api_key": "k3", "model": "m4"},
+    ]}
+    assert _migrate_config_data(data) is True
+    groups = [p["group"] for p in data["providers"]]
+    # 同 base_url + 同 key 共享分组；同主机不同 key 追加序号
+    assert groups[0] == groups[1] == "gw.example.com"
+    assert groups[2] == "gw.example.com (2)"
+    assert groups[3] == "other.example.com"
+    assert data["legacy_grouping_done"] is True
+    # 迁移只执行一次：手工清空的分组不会被重新填回
+    data["providers"][0]["group"] = ""
+    assert _migrate_config_data(data) is False
+    assert data["providers"][0]["group"] == ""
+
+
+def test_load_config_persists_grouping_marker(tmp_path):
+    import json
+
+    from flyai.config import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"providers": [
+        {"id": "a", "base_url": "https://h.example.com/v1", "api_key": "k", "model": "m"},
+    ]}), encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.providers[0].group == "h.example.com"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["legacy_grouping_done"] is True
