@@ -65,10 +65,11 @@ class AnthropicProvider(BaseProvider):
                 "budget_tokens": int(tcfg.get("budget_tokens", 2048)),
             }
         headers = {
-            "x-api-key": self.cfg.api_key,
             "anthropic-version": _ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
+        if (self.cfg.api_key or "").strip():
+            headers["x-api-key"] = self.cfg.api_key
         headers.update(self._gateway_headers(session_id))
 
         async with self._client.stream("POST", url, json=body, headers=headers) as resp:

@@ -686,7 +686,7 @@ const ProviderForm = ({
     if (discovering) {
       return
     }
-    if (!baseUrl.trim() || !apiKey.trim()) {
+    if (!baseUrl.trim()) {
       setError(t('modelsDiscoverRequired'))
       return
     }

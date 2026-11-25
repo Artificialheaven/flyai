@@ -82,14 +82,9 @@ class BaseProvider(ABC):
         )
 
     def _assert_key_ascii(self) -> None:
-        """校验 API Key：空 key 会让 ``Authorization: Bearer `` 触发 httpx
-        LocalProtocolError，非 ASCII 同样不是合法头值，提前给出清晰错误。"""
+        """校验 API Key 头值：允许留空（自建/本地网关通常不鉴权），
+        但非 ASCII 不是合法头值，提前给出清晰错误。"""
         key = self.cfg.api_key or ""
-        if not key.strip():
-            raise ProviderError(
-                "该模型未配置 API Key，请在「模型设置」中填写后重试",
-                status_code=400,
-            )
         if any(ord(c) > 127 for c in key):
             raise ProviderError("API Key 含非 ASCII 字符，请在设置中检查", status_code=400)
 

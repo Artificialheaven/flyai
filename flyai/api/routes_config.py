@@ -960,15 +960,17 @@ async def discover_provider_models(payload: DiscoverPayload, request: Request):
     api_key = (payload.api_key or "").strip()
     if not base:
         raise HTTPException(400, "请先填写 Base URL")
-    if not api_key:
-        raise HTTPException(400, "请先填写 API Key")
     kind = "anthropic" if (payload.type or "").lower() == "anthropic" else "openai"
     if kind == "anthropic":
         url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
     else:
         url = base + "/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)

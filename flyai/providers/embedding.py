@@ -104,7 +104,9 @@ class EmbeddingClient:
         self._assert_key_ascii()
         url = self.cfg.base_url.rstrip("/") + "/embeddings"
         body = {"model": self.cfg.model, "input": texts}
-        headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
+        headers = {}
+        if (self.cfg.api_key or "").strip():
+            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         async with self._lock:
             try:
                 resp = await self._client.post(url, json=body, headers=headers)

@@ -155,7 +155,9 @@ class OpenAICompatProvider(BaseProvider):
         elif is_opencode_gateway(self.cfg.base_url):
             body["reasoning_effort"] = OPENCODE_THINKING_OFF_EFFORT
             auto_reasoning = True
-        headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
+        headers = {}
+        if (self.cfg.api_key or "").strip():
+            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         headers.update(self._gateway_headers(session_id))
 
         # stream_options 拿 token 用量；个别兼容厂商不认该字段（400），去掉重试一次
