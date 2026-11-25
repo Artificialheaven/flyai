@@ -1,6 +1,6 @@
 """用量流水接口：按本地日期聚合近 N 天的 token / 花费 / 回复数。
 
-数据源为 data/<uid>/usage.jsonl，混合两类行：
+数据源为 data/<uid>/usage.db（旧 JSONL 自动导入），混合两类记录：
 - token 结算行（无 kind）：对话 token 计费；
 - metering 行（kind ∈ search/fetch/tts/asr）：按次/字符/秒计费。
 两类行都计入每日花费；另按 kind 汇总出项目消耗（categories）。
@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import timedelta
 from typing import Dict, List
@@ -80,19 +79,13 @@ def my_usage(request: Request, days: int = 7):
     ]
     buckets = {d: _empty_day(d) for d in dates}
     categories: Dict[str, Dict] = {}
-    ledger = None
+    records = ()
     if getattr(sc, "settings_path", None):
-        ledger = sc.settings_path.parent / "usage.jsonl"
-    if ledger is not None and ledger.exists():
-        try:
-            lines = ledger.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
-        for line in lines:
-            try:
-                rec = json.loads(line)
-            except (ValueError, TypeError):
-                continue
+        from ..usage_store import UsageLedger
+
+        records = UsageLedger(sc.settings_path.parent / "usage.jsonl").records()
+    if records:
+        for rec in records:
             bucket = buckets.get(str(rec.get("date") or ""))
             if bucket is None:
                 continue

@@ -68,9 +68,9 @@ def _meter(tmp_path, uid="u1", admin=False):
 
 
 def _ledger_rows(path: Path):
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    from flyai.usage_store import UsageLedger
+
+    return list(UsageLedger(path).records())
 
 
 def test_charge_deducts_and_writes_ledger(tmp_path):

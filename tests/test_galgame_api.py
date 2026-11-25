@@ -428,9 +428,9 @@ def _enable_billing(state, sc, tmp_path, total=10.0, used=0.0):
 
 
 def _ledger(tmp_path):
-    path = tmp_path / "data" / "u1" / "usage.jsonl"
-    return [json.loads(x)
-            for x in path.read_text(encoding="utf-8").splitlines()]
+    from flyai.usage_store import UsageLedger
+
+    return list(UsageLedger(tmp_path / "data" / "u1" / "usage.jsonl").records())
 
 
 def test_tts_deepseek_success_uses_default_voice_and_bills(

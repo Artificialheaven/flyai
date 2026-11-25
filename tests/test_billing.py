@@ -281,7 +281,9 @@ def test_settle_usage_deducts_and_appends_ledger(tmp_path):
     assert rec["cost"] == pytest.approx(0.0054)
     assert rec["total_tokens"] == 1500 and rec["cached_tokens"] == 400
     assert quota_view(store, u.id)["used"] == pytest.approx(0.0054)
-    line = json.loads(ledger.read_text(encoding="utf-8").strip())
+    from flyai.usage_store import UsageLedger
+
+    line = next(UsageLedger(ledger).records())
     assert line["session_id"] == "s1" and line["messages"] == 1
     assert line["date"] == "2026-11-16"
 

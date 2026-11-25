@@ -53,11 +53,9 @@ def _env(tmp_path, tts=None, deepseek=None, level=5, uid="u1", total=10.0):
 
 
 def _ledger(tmp_path, uid="u1"):
-    path = tmp_path / "data" / uid / "usage.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(x)
-            for x in path.read_text(encoding="utf-8").splitlines()]
+    from flyai.usage_store import UsageLedger
+
+    return list(UsageLedger(tmp_path / "data" / uid / "usage.jsonl").records())
 
 
 async def _collect(response):

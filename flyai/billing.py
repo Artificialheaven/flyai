@@ -106,12 +106,12 @@ def precheck_or_402(state, uid: str) -> None:
 
 
 def append_ledger(path: Path, record: Dict[str, Any]) -> None:
-    """追加一行用量流水（JSONL）；写失败不影响主流程。"""
+    """追加一条用量流水（SQLite）；写失败不影响主流程。"""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
+        from .usage_store import UsageLedger
+
+        UsageLedger(path).append(record)
+    except Exception:
         pass
 
 
