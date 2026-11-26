@@ -8,6 +8,7 @@ import type { FileAttachment } from '../../services/chat/types.js'
 import { IconPhotoErrorFill20, IconRefreshOutline16 } from '../base/icons.js'
 import { Tooltip } from '../base/Tooltip.js'
 import { FileCard } from '../files/FileCard.js'
+import { ImageViewer } from '../images/ImageViewer.js'
 import styles from './MessageFile.module.css'
 
 /** 原件从 IndexedDB 读出并生成本地地址；undefined 表示加载中，null 表示原件缺失。 */
@@ -59,6 +60,8 @@ export const MessageFile = ({
   const t = useTranslate()
   const url = useFileUrl(file.id)
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  /** 用户自己发的图片同样可以点开全屏查看（缩放/拖动/下载） */
+  const [viewerSrc, setViewerSrc] = useState<string | null>(null)
   const upload = useUploadState(file)
   const uploading = upload?.status === 'uploading'
   const failed = upload?.status === 'error'
@@ -135,17 +138,25 @@ export const MessageFile = ({
       )
     }
 
-    // 正常态：链接到原件
+    // 正常态：点开全屏查看器（缩放/拖动/下载）
     return url ? (
-      <a
-        className={clsx(styles.image, styles.imageThumb)}
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        title={file.name}
-      >
-        {preview}
-      </a>
+      <>
+        <button
+          type="button"
+          className={clsx(styles.image, styles.imageThumb)}
+          title={file.name}
+          aria-label={t('imageViewerAlt')}
+          onClick={() => setViewerSrc(url)}
+        >
+          {preview}
+        </button>
+        {viewerSrc ? (
+          <ImageViewer
+            image={{ src: viewerSrc, name: file.name }}
+            onClose={() => setViewerSrc(null)}
+          />
+        ) : null}
+      </>
     ) : (
       // 原件还没加载出来（极短暂）
       <div className={styles.image} />

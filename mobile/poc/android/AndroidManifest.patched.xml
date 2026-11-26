@@ -57,4 +57,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 保活悬浮窗：1×1 透明窗，仅用户手动开启时使用 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 应用内相册选图：读取设备照片（targetSdk 28 走 READ_EXTERNAL_STORAGE 兼容授权） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 </manifest>

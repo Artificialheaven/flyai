@@ -5,7 +5,7 @@ import { readServerSentEvents } from './sse.js'
 export type ChatImagePayload = {
   /** image/jpeg | image/png | image/webp | image/gif */
   media_type: string
-  /** 不含 data: 前缀的 base64；最多 4 张、单张 8MB */
+  /** 不含 data: 前缀的 base64；单张 8MB，数量不设上限 */
   data: string
 }
 

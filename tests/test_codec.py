@@ -228,10 +228,11 @@ def test_build_images_validation():
         _build_images(ChatRequest(images=[{"media_type": "text/plain", "data": "ZmFrZWltZw=="}]))
     with pytest.raises(HTTPException):  # 坏 base64
         _build_images(ChatRequest(images=[{"media_type": "image/png", "data": "!!!notb64"}]))
-    with pytest.raises(HTTPException):  # 超张数
-        _build_images(ChatRequest(images=[
-            {"media_type": "image/png", "data": "ZmFrZWltZw=="} for _ in range(5)
-        ]))
+    # 图片数量不再设上限：10 张也应原样通过
+    many = _build_images(ChatRequest(images=[
+        {"media_type": "image/png", "data": "ZmFrZWltZw=="} for _ in range(10)
+    ]))
+    assert many is not None and len(many) == 10
     with pytest.raises(HTTPException):  # 空图片
         _build_images(ChatRequest(images=[{"media_type": "image/png", "data": ""}]))
 

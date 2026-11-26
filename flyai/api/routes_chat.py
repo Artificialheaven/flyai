@@ -802,7 +802,6 @@ def _schedule_auto_title(*, sc, run, session_id: str, provider,
 
 # 图片输入约束
 _ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
-_MAX_IMAGES = 4
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
@@ -1104,8 +1103,7 @@ def _build_images(req) -> Optional[List[ImageAttachment]]:
     raw_images = getattr(req, "images", None)
     if not raw_images:
         return None
-    if len(raw_images) > _MAX_IMAGES:
-        raise HTTPException(400, f"每条消息最多附带 {_MAX_IMAGES} 张图片")
+    # 图片数量不设上限（每张仍限制 8MB），避免长图文消息被硬截断
     out: List[ImageAttachment] = []
     for img in raw_images:
         if img.media_type not in _ALLOWED_IMAGE_TYPES:

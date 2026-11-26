@@ -4,6 +4,7 @@ import {
   IconAtOutline16,
   IconGlobeLanguageOutline14,
   IconPaperclipOutline16,
+  IconPhotoOutline16,
   IconSendOutline16,
   IconStopFill16,
   IconThinkOutline14,
@@ -30,7 +31,9 @@ import { Tooltip } from '../base/Tooltip.js'
 import { DragMask, useFileDrop } from './DragMask.js'
 import { showToast } from '../base/toastState.js'
 import { ACCEPT, useUploads } from '../../services/attachments.js'
+import { isGallerySupported } from '../../services/pocGallery.js'
 import { DraftAttachments } from './DraftAttachments.js'
+import { GalleryPicker } from './GalleryPicker.js'
 import { useVoiceInput } from './useVoiceInput.js'
 import { VoiceButton } from './VoiceButton.js'
 import { Spectrum } from './Spectrum.js'
@@ -70,6 +73,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
     sessionId === null ? undefined : state.sessionCache[sessionId]?.threadId
   )
   const [shuffle, setShuffle] = useState(false)
+  const [galleryOpen, setGalleryOpen] = useState(false)
   const mentionable = useMemo(() => {
     if (!group) {
       return []
@@ -336,6 +340,15 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               }
             }}
           />
+          {isGallerySupported() ? (
+            <IconButton
+              size="m"
+              icon={<IconPhotoOutline16 />}
+              tooltip={t('galleryOpen')}
+              disabled={importingHistory}
+              onClick={() => setGalleryOpen(true)}
+            />
+          ) : null}
           <IconButton
             size="m"
             tone="primary"
@@ -381,6 +394,9 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
         </div>
       </div>
       {dragging ? <DragMask /> : null}
+      {galleryOpen ? (
+        <GalleryPicker onClose={() => setGalleryOpen(false)} onPick={acceptFiles} />
+      ) : null}
     </div>
   )
 }

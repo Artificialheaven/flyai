@@ -568,6 +568,25 @@ export const IconPlayMediaOutline16 = () => (
   </svg>
 )
 
+/** 相册选图：相框 + 山 + 太阳 */
+export const IconPhotoOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v8a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 12V4Z"
+      stroke="currentColor"
+      strokeWidth="1.25"
+    />
+    <circle cx="6" cy="6" r="1.15" fill="currentColor" />
+    <path
+      d="m2.8 11.4 2.9-2.9a1 1 0 0 1 1.41 0l1.6 1.6 1.8-1.8a1 1 0 0 1 1.41 0l1.9 1.9"
+      stroke="currentColor"
+      strokeWidth="1.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
+
 export const IconPhotoErrorFill20 = () => (
   <svg width={20} height={20} viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path

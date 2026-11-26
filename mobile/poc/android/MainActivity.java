@@ -10,10 +10,14 @@ import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -31,6 +35,7 @@ import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
 import android.util.Base64;
+import android.util.Size;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -57,6 +62,7 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -80,6 +86,11 @@ public class MainActivity extends Activity {
     private static final long CONSOLE_INTERVAL = 700;
     /** 页面返回处理超过该时间仍未回调就按未消费处理，避免 WebView 卡死时退不出去 */
     private static final long BACK_JS_TIMEOUT = 700;
+    /** 应用内相册选图 */
+    private static final int GALLERY_PERMISSION_REQUEST = 2002;
+    private static final int GALLERY_THUMB_SIZE = 240;
+    private static final int GALLERY_PAGE_MAX = 100;
+    private static final int GALLERY_MAX_BYTES = 25 * 1024 * 1024;
 
     /** 后台回答完成提醒（对应标准壳的 FlyNotify 插件） */
     private static final String REPLY_CHANNEL = "flyai_reply";
@@ -431,6 +442,7 @@ public class MainActivity extends Activity {
                 return;
             }
             final String name = URLUtil.guessFileName(url, contentDisposition, mimetype);
+            final boolean image = mimetype != null && mimetype.startsWith("image/");
             new Thread(() -> {
                 String result = downloadToStorage(url, name);
                 boolean ok = false;
@@ -440,7 +452,7 @@ public class MainActivity extends Activity {
                 }
                 final boolean saved = ok;
                 runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this,
-                        saved ? "已保存到下载目录" : "下载失败",
+                        saved ? (image ? "已保存到相册" : "已保存到下载目录") : "下载失败",
                         android.widget.Toast.LENGTH_SHORT).show());
             }, "flyai-download").start();
         });
@@ -786,6 +798,233 @@ public class MainActivity extends Activity {
             });
             return "{\"ok\":true}";
         }
+
+        /** 相册选图：权限状态 */
+        @JavascriptInterface
+        public String galleryPermission(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            JSONObject out = new JSONObject();
+            try {
+                out.put("ok", true);
+                out.put("granted", hasGalleryPermission());
+                out.put("sdk", Build.VERSION.SDK_INT);
+            } catch (Exception ignored) {
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
+        public String requestGalleryPermission(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            requestGalleryPermissionImpl();
+            return "{\"ok\":true}";
+        }
+
+        /** 分页列出系统相册图片（缩略图为 data URI） */
+        @JavascriptInterface
+        public String listGallery(String token, String offsetRaw, String limitRaw) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            return listGalleryImages(offsetRaw, limitRaw);
+        }
+
+        /** 读取相册原图，返回 base64（网页侧转成 File 走正常附件流程） */
+        @JavascriptInterface
+        public String readGalleryImage(String token, String idRaw) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            return readGalleryImageBytes(idRaw);
+        }
+
+        @JavascriptInterface
+        public String openAppSettings(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            try {
+                Intent intent = new Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                return "{\"ok\":true}";
+            } catch (Exception e) {
+                return errorJson(e.getMessage());
+            }
+        }
+    }
+
+    private boolean hasGalleryPermission() {
+        if (Build.VERSION.SDK_INT < 23) return true;
+        if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        return Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestGalleryPermissionImpl() {
+        if (Build.VERSION.SDK_INT < 23 || hasGalleryPermission()) return;
+        // targetSdk 28：Android 13+ 仍走 READ_EXTERNAL_STORAGE 兼容授权
+        runOnUiThread(() -> {
+            try {
+                requestPermissions(
+                        new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
+                        GALLERY_PERMISSION_REQUEST);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private static int parseInt(String raw, int fallback) {
+        try {
+            return Integer.parseInt((raw == null ? "" : raw).trim());
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private String listGalleryImages(String offsetRaw, String limitRaw) {
+        if (!hasGalleryPermission()) {
+            return "{\"ok\":false,\"error\":\"permission\"}";
+        }
+        int offset = Math.max(0, parseInt(offsetRaw, 0));
+        int limit = Math.max(1, Math.min(GALLERY_PAGE_MAX, parseInt(limitRaw, 60)));
+        ContentResolver resolver = getContentResolver();
+        Uri collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        String[] projection = {
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.MIME_TYPE,
+                MediaStore.Images.Media.DATE_ADDED,
+        };
+        Cursor cursor = null;
+        JSONArray images = new JSONArray();
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                Bundle args = new Bundle();
+                args.putInt(ContentResolver.QUERY_ARG_LIMIT, limit);
+                args.putInt(ContentResolver.QUERY_ARG_OFFSET, offset);
+                args.putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS,
+                        new String[]{MediaStore.Images.Media.DATE_ADDED});
+                args.putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION,
+                        ContentResolver.QUERY_SORT_DIRECTION_DESCENDING);
+                cursor = resolver.query(collection, projection, args, null);
+            } else {
+                cursor = resolver.query(collection, projection, null, null,
+                        MediaStore.Images.Media.DATE_ADDED + " DESC LIMIT "
+                                + limit + " OFFSET " + offset);
+            }
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    long id = cursor.getLong(0);
+                    String name = cursor.getString(1);
+                    String mime = cursor.getString(2);
+                    long date = cursor.getLong(3);
+                    String thumb = encodeGalleryThumb(
+                            resolver, ContentUris.withAppendedId(collection, id));
+                    JSONObject item = new JSONObject();
+                    item.put("id", String.valueOf(id));
+                    item.put("name", name == null || name.isEmpty() ? "image" : name);
+                    item.put("mime", mime == null ? "" : mime);
+                    item.put("date", date);
+                    if (thumb != null) item.put("thumb", thumb);
+                    images.put(item);
+                }
+            }
+            JSONObject out = new JSONObject();
+            out.put("ok", true);
+            out.put("images", images);
+            out.put("hasMore", images.length() >= limit);
+            return out.toString();
+        } catch (Exception e) {
+            return errorJson(e.getMessage());
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+    }
+
+    /** 生成 240px JPEG 缩略图 data URI；失败返回 null（前端显示占位） */
+    private String encodeGalleryThumb(ContentResolver resolver, Uri uri) {
+        Bitmap bitmap = null;
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                bitmap = resolver.loadThumbnail(
+                        uri, new Size(GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE), null);
+            } else {
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                try (InputStream in = resolver.openInputStream(uri)) {
+                    BitmapFactory.decodeStream(in, null, bounds);
+                }
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+                int sample = 1;
+                int longest = Math.max(bounds.outWidth, bounds.outHeight);
+                while (longest / (sample * 2) >= GALLERY_THUMB_SIZE) sample *= 2;
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inSampleSize = sample;
+                try (InputStream in = resolver.openInputStream(uri)) {
+                    bitmap = BitmapFactory.decodeStream(in, null, options);
+                }
+            }
+            if (bitmap == null) return null;
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 72, buffer);
+            String prefix = "data:" + "image/jpeg" + ";" + "base64,";
+            return prefix + Base64.encodeToString(buffer.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (bitmap != null) bitmap.recycle();
+        }
+    }
+
+    private String readGalleryImageBytes(String idRaw) {
+        if (!hasGalleryPermission()) {
+            return "{\"ok\":false,\"error\":\"permission\"}";
+        }
+        long id;
+        try {
+            id = Long.parseLong((idRaw == null ? "" : idRaw).trim());
+        } catch (Exception e) {
+            return errorJson("bad id");
+        }
+        ContentResolver resolver = getContentResolver();
+        Uri uri = ContentUris.withAppendedId(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id);
+        String name = "image_" + id;
+        String mime = "";
+        try (Cursor cursor = resolver.query(uri,
+                new String[]{
+                        MediaStore.Images.Media.DISPLAY_NAME,
+                        MediaStore.Images.Media.MIME_TYPE,
+                }, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String value = cursor.getString(0);
+                if (value != null && !value.isEmpty()) name = value;
+                String type = cursor.getString(1);
+                if (type != null) mime = type;
+            }
+        } catch (Exception ignored) {
+        }
+        try (InputStream in = resolver.openInputStream(uri)) {
+            if (in == null) return errorJson("open failed");
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+                if (buffer.size() > GALLERY_MAX_BYTES) {
+                    return errorJson("image too large");
+                }
+            }
+            JSONObject out = new JSONObject();
+            out.put("ok", true);
+            out.put("name", name);
+            out.put("mime", mime);
+            out.put("data", Base64.encodeToString(buffer.toByteArray(), Base64.NO_WRAP));
+            return out.toString();
+        } catch (Exception e) {
+            return errorJson(e.getMessage());
+        }
     }
 
     private synchronized void startRunWatch(final String runId, final String statusUrl,
@@ -962,28 +1201,40 @@ public class MainActivity extends Activity {
         String type = mime == null || mime.trim().isEmpty()
                 ? guessMime(name) : mime.split(";")[0].trim();
         if (type.isEmpty()) type = "application/octet-stream";
+        // 图片进系统相册（Pictures/FlyAI），其它文件进下载目录
+        boolean image = type.startsWith("image/");
         if (Build.VERSION.SDK_INT >= 29) {
             ContentValues values = new ContentValues();
             values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
             values.put(MediaStore.MediaColumns.MIME_TYPE, type);
-            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    image
+                            ? Environment.DIRECTORY_PICTURES + "/FlyAI"
+                            : Environment.DIRECTORY_DOWNLOADS);
             values.put(MediaStore.MediaColumns.IS_PENDING, 1);
-            Uri uri = getContentResolver()
-                    .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) throw new IOException("无法创建下载文件");
+            Uri collection = image
+                    ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+            Uri uri = getContentResolver().insert(collection, values);
+            if (uri == null) throw new IOException("无法创建保存条目");
             try (OutputStream out = getContentResolver().openOutputStream(uri)) {
-                if (out == null) throw new IOException("无法写入下载文件");
+                if (out == null) throw new IOException("无法写入文件");
                 copyStream(in, out);
             }
             values.clear();
             values.put(MediaStore.MediaColumns.IS_PENDING, 0);
             getContentResolver().update(uri, values, null, null);
-            return "{\"ok\":true}";
+            JSONObject result = new JSONObject();
+            result.put("ok", true);
+            result.put("album", image);
+            return result.toString();
         }
-        // Android 9 及以下：落到应用专属下载目录（无需存储权限）
-        File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-        if (dir == null) dir = new File(getFilesDir(), "downloads");
-        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建下载目录");
+        // Android 9 及以下：落到应用专属目录（无需存储权限）
+        File dir = getExternalFilesDir(
+                image ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) dir = new File(getFilesDir(), image ? "pictures" : "downloads");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建保存目录");
         File target = new File(dir, name);
         if (target.exists()) target = new File(dir, System.currentTimeMillis() + "-" + name);
         try (OutputStream out = new FileOutputStream(target)) {
@@ -991,6 +1242,7 @@ public class MainActivity extends Activity {
         }
         JSONObject out = new JSONObject();
         out.put("ok", true);
+        out.put("album", image);
         out.put("path", target.getAbsolutePath());
         return out.toString();
     }

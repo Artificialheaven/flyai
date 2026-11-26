@@ -17,7 +17,7 @@ import {
 import { isTopOverlay, pushOverlay } from '../base/overlayStack.js'
 import { showToast } from '../base/toastState.js'
 import { assetUrl } from '../../services/flyai/client.js'
-import { downloadUrl } from '../../services/native.js'
+import { canNativeSave, downloadUrl } from '../../services/native.js'
 import type { GeneratedImageMeta } from '../../services/chat/markers.js'
 import { copyText } from '../../utils/clipboard.js'
 import styles from './ImageViewer.module.css'
@@ -26,6 +26,8 @@ export type ViewerImage = {
   src: string
   /** 生图工具产出的参数 JSON（SD / 云端）；用户上传图没有 */
   meta?: GeneratedImageMeta | null
+  /** 下载时优先使用的文件名（用户上传的原件名） */
+  name?: string
 }
 
 /** 查看器手势：单指拖动 / 双指缩放 / 双击/滚轮缩放 */
@@ -218,6 +220,7 @@ export const ImageViewer = ({ image, onClose }: { image: ViewerImage; onClose: (
   const [current, setCurrent] = useState<ViewerImage>(() => ({
     src: assetUrl(image.src),
     meta: image.meta ?? null,
+    name: image.name,
   }))
   const [panelOpen, setPanelOpen] = useState(false)
   const onCloseRef = useRef(onClose)
@@ -525,11 +528,15 @@ export const ImageViewer = ({ image, onClose }: { image: ViewerImage; onClose: (
     if (!src) {
       return
     }
-    const name = suggestImageName(src)
-    // APK 内交给 FlySaver 写入下载目录，Web 端走浏览器下载
+    const name = current.name || suggestImageName(src)
+    // APK 内交给原生桥写入系统相册，Web 端走浏览器下载
     const ok = await downloadUrl(src, name)
     if (!ok) {
       showToast(t('imageDownloadFailed'))
+    } else if (canNativeSave()) {
+      showToast(t('imageSavedToGallery'))
+    } else {
+      showToast(t('imageDownloadStarted'))
     }
   }
 

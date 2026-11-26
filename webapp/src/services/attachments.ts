@@ -8,9 +8,8 @@ import type { LinkedMessage, TranslationMessage } from '../i18n/index.js'
 export const ACCEPTED_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif']
 /** 选择文件对话框的过滤条件 */
 export const ACCEPT = ACCEPTED_EXTS.map((ext) => `.${ext}`).join(',')
-/** 后端 /api/chat 的硬上限：单张 8MB、最多 4 张；GIF 不经压缩，仍以此为准 */
+/** 后端 /api/chat 的单张上限 8MB；图片数量不设上限。GIF 不经压缩，仍以此为准 */
 export const MAX_SIZE_MB = 8
-export const MAX_COUNT = 4
 
 const MB = 1024 * 1024
 /** 自动压缩目标：超过该大小的非 GIF 图片在添加前会被压缩到 5MB 以内 */
@@ -35,8 +34,8 @@ export const isAcceptedExt = (name: string) => ACCEPTED_EXTS.includes(getFileExt
 /** GIF 会丢帧，不做重编码压缩，超限直接拒绝 */
 const isGifFile = (file: File) => getFileExt(file.name) === 'gif'
 
-/** 添加前校验：格式 → 大小 → 数量，任一不满足即整批不添加 */
-export const validateFiles = (files: File[], currentCount: number): TranslationMessage | null => {
+/** 添加前校验：格式 → 单张大小，任一不满足即整批不添加（数量不设上限） */
+export const validateFiles = (files: File[]): TranslationMessage | null => {
   if (files.some((file) => !isAcceptedExt(file.name))) {
     return { key: 'uploadUnsupportedFormat' }
   }
@@ -44,9 +43,6 @@ export const validateFiles = (files: File[], currentCount: number): TranslationM
   const oversizedGif = files.find((file) => isGifFile(file) && file.size > MAX_SIZE_MB * MB)
   if (oversizedGif) {
     return { key: 'uploadMaxMBSize', params: { size: MAX_SIZE_MB } }
-  }
-  if (currentCount + files.length > MAX_COUNT) {
-    return { key: 'uploadMaxFiles', params: { count: MAX_COUNT } }
   }
   return null
 }

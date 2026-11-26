@@ -191,3 +191,85 @@ def test_localdream_without_control_plane_uses_manual_model():
     content, _, _ = _run(httpx.MockTransport(handler), cfg)
     assert content == PNG
     assert "/select" not in calls
+
+
+def test_localdream_uses_supported_resolution_pair():
+    calls = []
+
+    def handler(request):
+        calls.append((request.url.path, request.content))
+        if request.url.path == "/models":
+            return httpx.Response(200, json={
+                "use_img2img": True,
+                "models": [{
+                    "id": "sd15", "generation_size": 512,
+                    "resolutions": [[512, 768], [512, 512], [768, 512]],
+                    "defaults": {"steps": 20, "cfg": 7.0, "scheduler": "dpm"},
+                }],
+            })
+        if request.url.path == "/select":
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"state": "running", "serving_model_id": "sd15"})
+        if request.url.path == "/generate":
+            return _sse([{"type": "complete", "image": PNG_B64, "format": "png",
+                          "width": 512, "height": 512, "channels": 3}])
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="sd15")
+    _run(httpx.MockTransport(handler), cfg)
+    select = json.loads([c for p, c in calls if p == "/select"][0])
+    assert (select["width"], select["height"]) == (512, 512)
+    gen = json.loads([c for p, c in calls if p == "/generate"][0])
+    assert (gen["width"], gen["height"]) == (512, 512)
+
+
+def test_localdream_blank_model_reuses_serving_model():
+    calls = []
+
+    def handler(request):
+        calls.append((request.url.path, request.content))
+        if request.url.path == "/models":
+            return httpx.Response(200, json={"models": [
+                {"id": "first", "generation_size": 512},
+                {"id": "second", "generation_size": 768},
+            ]})
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"state": "running", "serving_model_id": "second"})
+        if request.url.path == "/select":
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/generate":
+            return _sse([{"type": "complete", "image": PNG_B64, "format": "png",
+                          "width": 768, "height": 768, "channels": 3}])
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="")
+    _run(httpx.MockTransport(handler), cfg)
+    select = json.loads([c for p, c in calls if p == "/select"][0])
+    assert select["model_id"] == "second"
+    assert (select["width"], select["height"]) == (768, 768)
+
+
+def test_localdream_rejects_img2img_when_host_disabled():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/models":
+            return httpx.Response(200, json={
+                "use_img2img": False,
+                "models": [{"id": "sd15", "generation_size": 512}],
+            })
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="sd15")
+    try:
+        _run(httpx.MockTransport(handler), cfg, refs=[("image/png", PNG_B64)])
+    except RuntimeError as exc:
+        assert "图生图" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+    assert "/select" not in calls and "/generate" not in calls

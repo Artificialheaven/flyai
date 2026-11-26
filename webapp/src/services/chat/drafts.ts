@@ -5,7 +5,6 @@ import {
   cancelUpload,
   compressImageFile,
   isImage,
-  MAX_COUNT,
   resolveMimeType,
   uploadAttachment,
   validateFiles,
@@ -69,7 +68,7 @@ export const addDraftFiles = async (
   if (files.length === 0) {
     return null
   }
-  const error = validateFiles(files, getDraft(sessionId).attachments.length)
+  const error = validateFiles(files)
   if (error) {
     return error
   }
@@ -78,10 +77,6 @@ export const addDraftFiles = async (
     prepared = await Promise.all(files.map((file) => compressImageFile(file)))
   } catch {
     return { key: 'uploadCompressFailed' }
-  }
-  // 压缩期间草稿可能已被其它批次追加，落草稿前重新核对数量上限
-  if (getDraft(sessionId).attachments.length + prepared.length > MAX_COUNT) {
-    return { key: 'uploadMaxFiles', params: { count: MAX_COUNT } }
   }
   const added = prepared.map((file): DraftAttachment => {
     const image = isImage(resolveMimeType(file))

@@ -570,20 +570,67 @@ def _localdream_pick_model(
     return models[0] if models else None
 
 
-def _localdream_resolution(model: Optional[Dict[str, Any]], size: str) -> int:
-    """手机端分辨率：优先模型自带的 generation_size，DiT 才按 1K/2K/4K 放大。"""
+async def _localdream_status(
+    client: httpx.AsyncClient, control: str
+) -> Dict[str, Any]:
+    """控制面状态快照；不可达时返回空 dict（不影响按已加载模型出图）。"""
+    try:
+        resp = await client.get(control + "/status", timeout=2.0)
+    except Exception:
+        return {}
+    if resp.status_code != 200:
+        return {}
+    try:
+        data = resp.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _localdream_size(model: Optional[Dict[str, Any]], size: str) -> Tuple[int, int]:
+    """手机端分辨率（宽, 高）。
+
+    优先使用模型目录里的 ``resolutions``（SD1.5 NPU 的 QNN patch 只支持特定
+    宽高对）；没有列表时退回 ``generation_size``。DiT 才按 1K/2K/4K 放大，
+    并要求 24 像素步进。
+    """
     try:
         base = int((model or {}).get("generation_size") or 512)
     except (TypeError, ValueError):
         base = 512
     base = max(256, min(2048, base))
+    pairs: List[Tuple[int, int]] = []
+    raw_pairs = (model or {}).get("resolutions") or []
+    if isinstance(raw_pairs, list):
+        for item in raw_pairs:
+            try:
+                width, height = int(item[0]), int(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if width > 0 and height > 0:
+                pairs.append((width, height))
     is_dit = bool(model and (model.get("dit_kind") or model.get("is_anima")))
-    if not is_dit:
-        return base
-    px = _LOCAL_DREAM_SIZE_PX.get((size or "").strip().upper(), base)
-    # DiT 要求 512..2048 且为 24 的倍数
-    px = max(512, min(2024, px - px % 24))
-    return px
+    if is_dit:
+        px = _LOCAL_DREAM_SIZE_PX.get((size or "").strip().upper(), base)
+        # DiT 要求 512..2048 且为 24 的倍数
+        px = max(512, min(2024, px - px % 24))
+        if pairs:
+            # 有明确支持列表时以列表为准（DiT 通常为空）
+            return min(
+                pairs,
+                key=lambda wh: abs(wh[0] * wh[1] - px * px) + abs(wh[0] - wh[1]),
+            )
+        return px, px
+    if pairs:
+        for width, height in pairs:
+            if width == base and height == base:
+                return base, base
+        squares = [(w, h) for w, h in pairs if w == h]
+        return min(
+            squares or pairs,
+            key=lambda wh: abs(wh[0] * wh[1] - base * base) + abs(wh[0] - wh[1]),
+        )
+    return base, base
 
 
 async def _localdream_select(
@@ -663,11 +710,36 @@ async def _localdream_generate(
     timeout = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         catalog = await _localdream_catalog(client, control)
-        model = _localdream_pick_model(catalog, model_cfg.model)
-        model_id = str((model or {}).get("id") or model_cfg.model or "").strip()
-        px = _localdream_resolution(model, size)
+        requested = (model_cfg.model or "").strip()
+        model: Optional[Dict[str, Any]] = None
+        model_id = requested
+        if catalog is not None:
+            # 模型名留空时优先复用 App 里已经在跑的模型，避免无谓重启加载
+            status = {} if requested else await _localdream_status(client, control)
+            serving = ""
+            if status.get("state") == "running":
+                serving = str(status.get("serving_model_id") or "")
+            if not requested and serving:
+                model_id = serving
+                model = next(
+                    (
+                        item
+                        for item in (catalog.get("models") or [])
+                        if str(item.get("id") or "") == serving
+                    ),
+                    None,
+                )
+            else:
+                model = _localdream_pick_model(catalog, requested)
+                model_id = str((model or {}).get("id") or requested).strip()
+
+        width, height = _localdream_size(model, size)
+        if ref_images and catalog is not None and catalog.get("use_img2img") is False:
+            raise RuntimeError(
+                "手机端 Local Dream 未启用图生图：请在 App 设置里开启后重试"
+            )
         if catalog is not None and model_id:
-            await _localdream_select(client, control, model_id, px, px)
+            await _localdream_select(client, control, model_id, width, height)
 
         defaults = (model or {}).get("defaults") or {}
         body: Dict[str, Any] = {
@@ -676,8 +748,8 @@ async def _localdream_generate(
             "steps": int(defaults.get("steps") or 20),
             "cfg": float(defaults.get("cfg") or 7.5),
             "scheduler": str(defaults.get("scheduler") or "dpm"),
-            "width": px,
-            "height": px,
+            "width": width,
+            "height": height,
             "seed": random.randint(1, 2**31 - 1),
             # 请求 PNG 省掉裸 RGB 转换；服务端不支持时仍按 raw 回退
             "output_format": "png",
