@@ -432,6 +432,23 @@ export const discoverProviderModels = (payload: {
     body: JSON.stringify(payload),
   }).then((data) => data.models ?? [])
 
+/** 管理员：用已保存提供商的凭据重新拉取上游模型列表 */
+export const discoverSavedProviderModels = (providerId: string): Promise<string[]> =>
+  request<{ models: string[] }>(
+    `/api/models/providers/${encodeURIComponent(providerId)}/discover`,
+    { method: 'POST' }
+  ).then((data) => data.models ?? [])
+
+/** 管理员：按现有提供商批量补建缺失模型（沿用同一接口/Key/参数） */
+export const cloneProviderModels = (
+  providerId: string,
+  payload: { models: string[]; group?: string }
+): Promise<{ created: ProviderView[]; skipped: string[] }> =>
+  request<{ created: ProviderView[]; skipped: string[] }>(
+    `/api/models/providers/${encodeURIComponent(providerId)}/clone-models`,
+    { method: 'POST', body: JSON.stringify(payload) }
+  )
+
 export const updateProvider = (id: string, payload: ProviderPayload): Promise<ProviderView> =>
   request<ProviderView>(`/api/models/providers/${encodeURIComponent(id)}`, {
     method: 'PUT',

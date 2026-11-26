@@ -97,6 +97,14 @@ class DiscoverPayload(BaseModel):
     api_key: str = ""
 
 
+class CloneModelsPayload(BaseModel):
+    """按已保存提供商批量补建模型：只传模型名，凭据由服务端复用，不下发密钥。"""
+
+    models: Optional[list] = None
+    # None=沿用源提供商的分组；空串=未分组
+    group: Optional[str] = None
+
+
 class ImageModelPayload(BaseModel):
     id: Optional[str] = None
     name: str = ""
@@ -953,16 +961,13 @@ def create_provider_model(payload: ProviderPayload, request: Request):
     return _masked_provider(item)
 
 
-@router.post("/models/providers/discover")
-async def discover_provider_models(payload: DiscoverPayload, request: Request):
-    """管理员：用临时 base_url/api_key 拉取上游 /models 列表，供批量建模型。"""
-    _require_admin(request)
-    base = (payload.base_url or "").strip().rstrip("/")
-    api_key = (payload.api_key or "").strip()
+async def _fetch_upstream_models(kind: str, base_url: str, api_key: str) -> list:
+    """按上游协议拉取 /models 列表；临时凭据与已保存提供商共用。"""
+    base = (base_url or "").strip().rstrip("/")
+    api_key = (api_key or "").strip()
     if not base:
         raise HTTPException(400, "请先填写 Base URL")
-    kind = "anthropic" if (payload.type or "").lower() == "anthropic" else "openai"
-    if kind == "anthropic":
+    if (kind or "").lower() == "anthropic":
         url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
         headers = {"anthropic-version": "2023-06-01"}
         if api_key:
@@ -995,7 +1000,87 @@ async def discover_provider_models(payload: DiscoverPayload, request: Request):
             if mid and mid not in models:
                 models.append(mid)
     models.sort()
+    return models
+
+
+@router.post("/models/providers/discover")
+async def discover_provider_models(payload: DiscoverPayload, request: Request):
+    """管理员：用临时 base_url/api_key 拉取上游 /models 列表，供批量建模型。"""
+    _require_admin(request)
+    models = await _fetch_upstream_models(payload.type, payload.base_url, payload.api_key)
     return {"models": models}
+
+
+@router.post("/models/providers/{mid}/discover")
+async def discover_saved_provider_models(mid: str, request: Request):
+    """管理员：用已保存的 base_url/api_key 重新拉取上游模型列表。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    item = _require_item(_find_provider(state.config, mid))
+    models = await _fetch_upstream_models(item.type, item.base_url, item.api_key)
+    return {"models": models}
+
+
+def _model_id_for(name: str, used: set) -> str:
+    """把上游模型名转成合法且唯一的 provider id（与前端批量建模型规则一致）。"""
+    base = re.sub(r"[^A-Za-z0-9._-]", "-", (name or "").strip())
+    base = re.sub(r"^[^A-Za-z0-9]+", "", base) or "model"
+    candidate = base
+    index = 2
+    while candidate in used:
+        candidate = f"{base}-{index}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+@router.post("/models/providers/{mid}/clone-models")
+def clone_provider_models(mid: str, payload: CloneModelsPayload, request: Request):
+    """管理员：按现有提供商批量补建缺失模型（复用同一接口/Key/参数，不泄露密钥）。"""
+    uid = _require_admin(request)
+    state = request.app.state.flyai
+    src = _require_item(_find_provider(state.config, mid))
+    names = []
+    for name in payload.models or []:
+        if isinstance(name, str):
+            name = name.strip()
+            if name and name not in names:
+                names.append(name)
+    if not names:
+        raise HTTPException(400, "请选择要添加的模型")
+    # 同一 base_url + key 视为同一提供商：已有模型不重复创建
+    existing = {
+        p.model
+        for p in state.config.providers
+        if p.base_url == src.base_url and p.api_key == src.api_key
+    }
+    used_ids = {p.id for p in state.config.providers}
+    base_data = src.dict()
+    group = payload.group if payload.group is not None else src.group
+    created = []
+    skipped = []
+    for name in names:
+        if name in existing:
+            skipped.append(name)
+            continue
+        data = dict(base_data)
+        data.update(
+            {
+                "id": _model_id_for(name, used_ids),
+                "model": name,
+                "group": (group or "").strip(),
+                "owner": uid,
+                "shared": False,
+                "min_level": 0,
+            }
+        )
+        item = ProviderConfig.parse_obj(data)
+        state.config.providers.append(item)
+        existing.add(name)
+        created.append(_masked_provider(item))
+    if created:
+        _persist(state)
+    return {"created": created, "skipped": skipped}
 
 
 @router.put("/models/providers/{mid}")

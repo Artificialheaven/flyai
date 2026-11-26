@@ -3,11 +3,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import {
   activateProvider,
+  cloneProviderModels,
   createImageModel,
   createProvider,
   deleteImageModel,
   deleteProvider,
   discoverProviderModels,
+  discoverSavedProviderModels,
   getConfig,
   shareImageModel,
   shareProvider,
@@ -63,6 +65,12 @@ export const ModelsPanel = () => {
     () => typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
   )
   const [moreOpenId, setMoreOpenId] = useState<string | null>(null)
+  /** 管理端：对某个提供商重新拉取上游模型列表（按同 base_url + key 合并的组） */
+  const [refetchGroup, setRefetchGroup] = useState<{
+    key: string
+    base_url: string
+    models: ProviderView[]
+  } | null>(null)
 
   useEffect(() => {
     const query = window.matchMedia('(max-width: 768px)')
@@ -407,22 +415,34 @@ export const ModelsPanel = () => {
               const open = expandedProviders[group.key] ?? providerGroups.length === 1
               return (
                 <div key={group.key} className={styles.providerGroup}>
-                  <button
-                    type="button"
-                    className={styles.providerHead}
-                    onClick={() =>
-                      setExpandedProviders((prev) => ({ ...prev, [group.key]: !open }))
-                    }
-                  >
-                    <span className={styles.providerName}>
-                      {group.base_url || t('modelsProviderUnknown')}
-                    </span>
-                    <span className={styles.providerMeta} title={group.base_url}>
-                      {group.models[0]?.api_key ? `${group.models[0].api_key} · ` : ''}
-                      {t('modelsProviderCount', { count: group.models.length })}
-                    </span>
-                    <span className={styles.chevron}>{open ? '▾' : '▸'}</span>
-                  </button>
+                  <div className={styles.providerHead}>
+                    <button
+                      type="button"
+                      className={styles.providerToggle}
+                      aria-expanded={open}
+                      onClick={() =>
+                        setExpandedProviders((prev) => ({ ...prev, [group.key]: !open }))
+                      }
+                    >
+                      <span className={styles.providerName}>
+                        {group.base_url || t('modelsProviderUnknown')}
+                      </span>
+                      <span className={styles.providerMeta} title={group.base_url}>
+                        {group.models[0]?.api_key ? `${group.models[0].api_key} · ` : ''}
+                        {t('modelsProviderCount', { count: group.models.length })}
+                      </span>
+                      <span className={styles.chevron}>{open ? '▾' : '▸'}</span>
+                    </button>
+                    <Button
+                      size="s"
+                      variant="outlined"
+                      className={styles.providerRefresh}
+                      disabled={group.models.length === 0}
+                      onClick={() => setRefetchGroup(group)}
+                    >
+                      {t('modelsRefetch')}
+                    </Button>
+                  </div>
                   {open ? (
                     <div className={styles.providerModels}>
                       {group.models.map((provider) => renderProviderItem(provider))}
@@ -527,6 +547,19 @@ export const ModelsPanel = () => {
           onSaved={() => {
             setEditingImage(null)
             showToast({ key: 'adminSaved' })
+            void load()
+          }}
+        />
+      ) : null}
+      {refetchGroup && refetchGroup.models.length > 0 ? (
+        <RefreshModelsDialog
+          baseUrl={refetchGroup.base_url}
+          sourceId={refetchGroup.models[0].id}
+          existingModels={refetchGroup.models.map((item) => item.model)}
+          onClose={() => setRefetchGroup(null)}
+          onAdded={(count) => {
+            setRefetchGroup(null)
+            showToast({ key: 'modelsRefetchAdded', params: { count } })
             void load()
           }}
         />
@@ -1354,6 +1387,143 @@ const ImageForm = ({
           onChange={(event) => setApiKey(event.target.value)}
         />
       </label>
+    </Modal>
+  )
+}
+
+/** 重新获取某个提供商的上游模型列表，勾选后按原配置批量补建缺失模型 */
+const RefreshModelsDialog = ({
+  baseUrl,
+  sourceId,
+  existingModels,
+  onClose,
+  onAdded,
+}: {
+  baseUrl: string
+  /** 组内任一模型 ID：后端据此读取已保存的 base_url / Key / 参数 */
+  sourceId: string
+  /** 同一提供商下已配置的模型名，用于标记「已添加」 */
+  existingModels: string[]
+  onClose: () => void
+  onAdded: (count: number) => void
+}) => {
+  const t = useTranslate()
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [models, setModels] = useState<string[]>([])
+  const [selected, setSelected] = useState<Record<string, boolean>>({})
+  const existing = useMemo(() => new Set(existingModels), [existingModels])
+  const selectedIds = models.filter((id) => selected[id] && !existing.has(id))
+
+  useEffect(() => {
+    let alive = true
+    const run = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const ids = await discoverSavedProviderModels(sourceId)
+        if (!alive) {
+          return
+        }
+        setModels(ids)
+        setSelected(Object.fromEntries(ids.map((id) => [id, false])))
+      } catch (err) {
+        if (alive) {
+          setError(t('modelsFetchFailed', { message: errorText(err) }))
+        }
+      } finally {
+        if (alive) {
+          setLoading(false)
+        }
+      }
+    }
+    void run()
+    return () => {
+      alive = false
+    }
+  }, [sourceId, t])
+
+  const submit = async () => {
+    if (saving) {
+      return
+    }
+    if (selectedIds.length === 0) {
+      setError(t('modelsRefetchNoneSelected'))
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      const result = await cloneProviderModels(sourceId, { models: selectedIds })
+      onAdded(result.created.length)
+    } catch (err) {
+      setError(t('adminSaveFailed', { message: errorText(err) }))
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      title={t('modelsRefetchTitle')}
+      closable
+      className={styles.dialog}
+      mainClassName={styles.dialogMain}
+      onClose={() => (saving ? undefined : onClose())}
+      footer={
+        <div className={styles.dialogFooter}>
+          <Button variant="outlined" size="m" disabled={saving} onClick={onClose}>
+            {t('cancel')}
+          </Button>
+          <Button
+            size="m"
+            disabled={saving || loading || selectedIds.length === 0}
+            onClick={() => void submit()}
+          >
+            {t('modelsAddSelected', { count: selectedIds.length })}
+          </Button>
+        </div>
+      }
+    >
+      {error ? <PanelError message={error} /> : null}
+      <div className={styles.row}>
+        <div className={styles.rowText}>
+          <div className={styles.rowLabel}>{baseUrl || t('modelsProviderUnknown')}</div>
+          <div className={styles.rowDesc}>{t('modelsRefetchHint')}</div>
+        </div>
+      </div>
+      {loading ? (
+        <PanelEmpty text={t('modelsFetching')} />
+      ) : models.length === 0 ? (
+        <PanelEmpty text={t('modelsRefetchEmpty')} />
+      ) : (
+        <div className={styles.discoverBox}>
+          <div className={styles.discoverHead}>
+            <span className={styles.hint}>
+              {t('modelsSelected', { count: selectedIds.length })}
+            </span>
+          </div>
+          <div className={styles.discoverList}>
+            {models.map((modelId) => {
+              const added = existing.has(modelId)
+              return (
+                <label key={modelId} className={styles.discoverRow}>
+                  <input
+                    type="checkbox"
+                    disabled={added}
+                    checked={added || Boolean(selected[modelId])}
+                    onChange={(event) =>
+                      setSelected((prev) => ({ ...prev, [modelId]: event.target.checked }))
+                    }
+                  />
+                  <span className={styles.discoverName}>{modelId}</span>
+                  {added ? <span className={styles.badge}>{t('modelsAlreadyAdded')}</span> : null}
+                </label>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }

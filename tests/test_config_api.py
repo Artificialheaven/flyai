@@ -1101,3 +1101,93 @@ def test_email_test_failure_and_permission(tmp_path):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(test_email(TestEmailPayload(), _req(state, "u10")))
     assert ei.value.status_code == 403
+
+
+# ---- 重新获取上游模型列表 / 按供应商补建模型 ----
+
+def test_clone_provider_models_inherits_settings(tmp_path):
+    from flyai.api.routes_config import CloneModelsPayload, clone_provider_models
+
+    state = _mkstate(tmp_path)
+    state.config.providers.append(
+        ProviderConfig(
+            id="gw", base_url="https://api.gw.com/v1", api_key="sk-gw",
+            model="gpt-4o", group="通用", params={"temperature": 0.5},
+            vision=True, rate=1.5,
+            pricing={"cache_hit_input": 1, "input": 2, "output": 3},
+        )
+    )
+    out = clone_provider_models(
+        "gw", CloneModelsPayload(models=["gpt-4o", "o3-mini", "vendor/x:beta"]),
+        _req(state),
+    )
+    assert [v["model"] for v in out["created"]] == ["o3-mini", "vendor/x:beta"]
+    assert [v["id"] for v in out["created"]] == ["o3-mini", "vendor-x-beta"]
+    assert out["skipped"] == ["gpt-4o"]
+    created = {p.id: p for p in state.config.providers}
+    assert created["o3-mini"].base_url == "https://api.gw.com/v1"
+    assert created["o3-mini"].api_key == "sk-gw"
+    assert created["o3-mini"].group == "通用"
+    assert created["o3-mini"].params == {"temperature": 0.5}
+    assert created["o3-mini"].vision is True
+    assert created["o3-mini"].rate == 1.5
+    assert created["o3-mini"].pricing.input == 2
+    assert created["o3-mini"].shared is False
+    assert created["vendor-x-beta"].model == "vendor/x:beta"
+    # 密钥不回显
+    assert out["created"][0]["api_key"] != "sk-gw"
+
+
+def test_clone_provider_models_id_collision_and_empty(tmp_path):
+    from flyai.api.routes_config import CloneModelsPayload, clone_provider_models
+
+    state = _mkstate(tmp_path)
+    state.config.providers.append(
+        ProviderConfig(id="gw", base_url="https://api.gw.com/v1",
+                       api_key="k", model="m")
+    )
+    state.config.providers.append(
+        ProviderConfig(id="a-b", base_url="https://other/v1",
+                       api_key="k2", model="x")
+    )
+    out = clone_provider_models("gw", CloneModelsPayload(models=["a/b"]), _req(state))
+    assert out["created"][0]["id"] == "a-b-2"
+
+    with pytest.raises(HTTPException) as ei:
+        clone_provider_models("gw", CloneModelsPayload(models=[]), _req(state))
+    assert ei.value.status_code == 400
+
+    with pytest.raises(HTTPException) as ei:
+        clone_provider_models("nope", CloneModelsPayload(models=["m2"]), _req(state))
+    assert ei.value.status_code == 404
+
+
+def test_clone_provider_models_requires_admin(tmp_path):
+    from flyai.api.routes_config import CloneModelsPayload, clone_provider_models
+
+    state = _mkstate(tmp_path)
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        clone_provider_models("deepseek", CloneModelsPayload(models=["x"]),
+                              _req(state, "u10"))
+    assert ei.value.status_code == 403
+
+
+def test_discover_saved_provider_models_uses_saved_credentials(tmp_path, monkeypatch):
+    import asyncio
+
+    import flyai.api.routes_config as routes_config
+
+    calls = []
+
+    async def fake_fetch(kind, base_url, api_key):
+        calls.append((kind, base_url, api_key))
+        return ["m1", "m2"]
+
+    monkeypatch.setattr(routes_config, "_fetch_upstream_models", fake_fetch)
+    state = _mkstate(tmp_path)
+    out = asyncio.run(
+        routes_config.discover_saved_provider_models("deepseek", _req(state))
+    )
+    assert out == {"models": ["m1", "m2"]}
+    assert calls == [("openai", "https://api.deepseek.com/v1", CHAT_KEY)]

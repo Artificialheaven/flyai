@@ -1054,11 +1054,19 @@
 }
 
 .providerHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
+}
+
+.providerToggle {
+  flex: 1;
+  min-width: 0;
   border-radius: 12px;
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
   padding: 10px 12px;
   border: 0;
   background: transparent;
@@ -1067,8 +1075,12 @@
   text-align: left;
 }
 
-.providerHead:hover {
+.providerToggle:hover {
   background: var(--dsw-alias-interactive-bg-select);
+}
+
+.providerRefresh {
+  flex-shrink: 0;
 }
 
 .providerName {
@@ -1120,7 +1132,7 @@
 }
 
 @media not all and (min-width: 768px) {
-  .providerHead {
+  .providerToggle {
     flex-wrap: wrap;
   }
 
