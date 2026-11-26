@@ -66,6 +66,60 @@ const webDownloadBlob = (blob: Blob, filename: string) => {
 }
 
 /**
+ * POC 裸 WebView 没有 Capacitor：下载、后台完成通知、状态栏颜色都走
+ * 主页面的 FlyAIPoc 原生桥（由 MainActivity 注入）。
+ */
+type PocAppBridge = {
+  saveUrl?: (token: string, url: string, name: string) => string
+  saveBase64?: (token: string, data: string, name: string, mime: string) => string
+  watchRun?: (
+    token: string,
+    runId: string,
+    statusUrl: string,
+    title: string,
+    body: string,
+    iconUrl: string
+  ) => string
+  cancelWatch?: (token: string) => string
+  setStatusBar?: (token: string, color: string, dark: string) => string
+}
+
+const pocBridge = (): { token: string; bridge: PocAppBridge } | null => {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  const win = window as unknown as {
+    __flyaiPoc?: { token?: string }
+    FlyAIPoc?: PocAppBridge
+  }
+  const token = win.__flyaiPoc?.token
+  if (!token || !win.FlyAIPoc) {
+    return null
+  }
+  return { token, bridge: win.FlyAIPoc }
+}
+
+/** 当前环境是否支持原生保存（Capacitor FlySaver 或 POC 下载桥） */
+export const canNativeSave = (): boolean => {
+  if (isNativeApp()) {
+    return true
+  }
+  const poc = pocBridge()
+  return Boolean(poc?.bridge.saveUrl || poc?.bridge.saveBase64)
+}
+
+const bridgeSaved = (raw: string | null | undefined): boolean => {
+  if (!raw) {
+    return false
+  }
+  try {
+    return (JSON.parse(raw) as { ok?: boolean }).ok === true
+  } catch {
+    return false
+  }
+}
+
+/**
  * 保存文件：APK 内交给 FlySaver（Android 10+ 走 MediaStore，无需存储权限），
  * 其余环境走浏览器下载。返回是否成功（调用方据此提示失败）。
  */
@@ -87,12 +141,42 @@ export const downloadBlob = async (
       return false
     }
   }
+  const poc = pocBridge()
+  if (poc?.bridge.saveBase64) {
+    try {
+      const data = await blobToBase64(blob)
+      return bridgeSaved(
+        poc.bridge.saveBase64(
+          poc.token,
+          data,
+          filename,
+          mime || blob.type || 'application/octet-stream'
+        )
+      )
+    } catch {
+      return false
+    }
+  }
   webDownloadBlob(blob, filename)
   return true
 }
 
 /** 下载远程资源（服务端图片/语音）：APK 内先取回再交给 FlySaver */
 export const downloadUrl = async (url: string, filename: string): Promise<boolean> => {
+  const poc = pocBridge()
+  if (poc?.bridge.saveUrl) {
+    try {
+      if (/^(data|blob):/i.test(url)) {
+        // data/blob URL 无法交给原生网络层，转 blob 走 base64 通道
+        const res = await fetch(url)
+        return await downloadBlob(await res.blob(), filename)
+      }
+      const absolute = new URL(url, window.location.href).href
+      return bridgeSaved(poc.bridge.saveUrl(poc.token, absolute, filename))
+    } catch {
+      return false
+    }
+  }
   if (!isNativeApp()) {
     anchorDownload(url, filename)
     return true
@@ -128,11 +212,42 @@ let watchActive = false
 let appActive = true
 
 const runStatusUrl = (runId: string): string => {
-  const base = getApiBase()
-  return base ? `${base}/api/chat/runs/${encodeURIComponent(runId)}` : ''
+  const path = `/api/chat/runs/${encodeURIComponent(runId)}`
+  try {
+    return new URL(`${getApiBase()}${path}`, window.location.href).href
+  } catch {
+    return ''
+  }
 }
 
 const startWatch = () => {
+  // POC：没有 Capacitor appStateChange，注册即交给原生轮询；
+  // 原生在完成时判断前后台，前台完成不打扰。
+  const poc = pocBridge()
+  if (poc?.bridge.watchRun && pendingWatch) {
+    const statusUrl = runStatusUrl(pendingWatch.runId)
+    if (!statusUrl) {
+      return
+    }
+    let iconUrl = pendingWatch.iconUrl ?? ''
+    if (iconUrl) {
+      try {
+        iconUrl = new URL(iconUrl, window.location.href).href
+      } catch {
+        iconUrl = ''
+      }
+    }
+    watchActive = true
+    poc.bridge.watchRun(
+      poc.token,
+      pendingWatch.runId,
+      statusUrl,
+      pendingWatch.title,
+      pendingWatch.body,
+      iconUrl
+    )
+    return
+  }
   const notify = plugin('FlyNotify')
   if (!isNativeApp() || appActive || watchActive || !pendingWatch || !notify?.watchRun) {
     return
@@ -157,8 +272,13 @@ const startWatch = () => {
 }
 
 const stopWatch = () => {
-  const notify = plugin('FlyNotify')
   watchActive = false
+  const poc = pocBridge()
+  if (poc?.bridge.cancelWatch) {
+    poc.bridge.cancelWatch(poc.token)
+    return
+  }
+  const notify = plugin('FlyNotify')
   if (notify?.cancelWatch) {
     void Promise.resolve(notify.cancelWatch({})).catch(() => {})
   }

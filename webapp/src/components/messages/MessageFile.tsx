@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { useUploads } from '../../services/attachments.js'
 import { loadFile } from '../../services/chat/db.js'
-import { downloadUrl, isNativeApp } from '../../services/native.js'
+import { canNativeSave, downloadUrl } from '../../services/native.js'
 import type { FileAttachment } from '../../services/chat/types.js'
 import { IconPhotoErrorFill20, IconRefreshOutline16 } from '../base/icons.js'
 import { Tooltip } from '../base/Tooltip.js'
@@ -162,8 +162,8 @@ export const MessageFile = ({
       onOpen={
         url && !upload
           ? () => {
-              // APK 无法用外部浏览器打开 blob 地址：直接存进下载目录
-              if (isNativeApp()) {
+              // APK/POC 无法用外部浏览器打开 blob 地址：直接存进下载目录
+              if (canNativeSave()) {
                 void downloadUrl(url, file.name)
               } else {
                 window.open(url, '_blank', 'noreferrer')

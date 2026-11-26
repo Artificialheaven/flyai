@@ -2,13 +2,20 @@ package top.eastcloud.flyai.poc;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
@@ -16,11 +23,14 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Message;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
+import android.util.Base64;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -32,6 +42,8 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.MimeTypeMap;
+import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -47,10 +59,19 @@ import android.widget.TextView;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URL;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 本地一体化 POC：前台服务拉起 rootfs 里的 FlyAI，WebView 连 127.0.0.1:8000。 */
 public class MainActivity extends Activity {
@@ -59,6 +80,14 @@ public class MainActivity extends Activity {
     private static final long CONSOLE_INTERVAL = 700;
     /** 页面返回处理超过该时间仍未回调就按未消费处理，避免 WebView 卡死时退不出去 */
     private static final long BACK_JS_TIMEOUT = 700;
+
+    /** 后台回答完成提醒（对应标准壳的 FlyNotify 插件） */
+    private static final String REPLY_CHANNEL = "flyai_reply";
+    private static final int REPLY_NOTIFY_ID = 2001;
+    private static final long WATCH_INTERVAL_MS = 4000;
+    private static final long WATCH_MAX_MS = 10 * 60 * 1000;
+    private static final Pattern STATUS_RE =
+            Pattern.compile("\"status\"\\s*:\\s*\"([^\"]+)\"");
 
     private FrameLayout rootView;
     private WebView webView;
@@ -73,6 +102,10 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling;
     private int backSeq;
+    /** 后台完成提醒：只保留最新一个 run；切前台不取消，完成时按前后台决定是否通知 */
+    private volatile String watchRunId;
+    private Thread watchThread;
+    private volatile boolean appForeground = true;
     /** 注入主页面的随机 token；卡片 iframe 读不到主页面闭包，不能调用更新桥。 */
     private final String updateToken = UUID.randomUUID().toString();
 
@@ -392,6 +425,25 @@ public class MainActivity extends Activity {
             WebView.setWebContentsDebuggingEnabled(true);
         }
         webView.addJavascriptInterface(new UpdateBridge(), "FlyAIPoc");
+        // 兜底：页面里直接 <a download> 的 http(s) 资源（WebView 默认不处理）
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
+            if (url == null || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+                return;
+            }
+            final String name = URLUtil.guessFileName(url, contentDisposition, mimetype);
+            new Thread(() -> {
+                String result = downloadToStorage(url, name);
+                boolean ok = false;
+                try {
+                    ok = new JSONObject(result).optBoolean("ok");
+                } catch (Exception ignored) {
+                }
+                final boolean saved = ok;
+                runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this,
+                        saved ? "已保存到下载目录" : "下载失败",
+                        android.widget.Toast.LENGTH_SHORT).show());
+            }, "flyai-download").start();
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -663,6 +715,307 @@ public class MainActivity extends Activity {
             openOverlaySettings();
             return "{\"ok\":true,\"permission\":false}";
         }
+
+        /** 下载远程资源（图片/音频）：裸 WebView 不接管 <a download>，由原生落盘 */
+        @JavascriptInterface
+        public String saveUrl(String token, String url, String name) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            return downloadToStorage(url, name);
+        }
+
+        /** 保存前端生成的 Blob（导出 JSON / 图片转码后的数据） */
+        @JavascriptInterface
+        public String saveBase64(String token, String data, String name, String mime) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            try {
+                byte[] bytes = Base64.decode(data, Base64.DEFAULT);
+                try (InputStream in = new java.io.ByteArrayInputStream(bytes)) {
+                    return saveStream(in, name, mime);
+                }
+            } catch (Exception e) {
+                return errorJson(e.getMessage());
+            }
+        }
+
+        /** 后台回答完成提醒：native 线程轮询 run 状态（对应标准壳的 FlyNotify） */
+        @JavascriptInterface
+        public String watchRun(String token, String runId, String statusUrl,
+                               String title, String body, String iconUrl) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            if (runId == null || runId.isEmpty()
+                    || statusUrl == null || statusUrl.isEmpty()) {
+                return errorJson("missing runId/statusUrl");
+            }
+            startRunWatch(runId, statusUrl, token, title, body, iconUrl);
+            return "{\"ok\":true}";
+        }
+
+        @JavascriptInterface
+        public String cancelWatch(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            stopRunWatch();
+            return "{\"ok\":true}";
+        }
+
+        /** 系统状态栏/导航栏颜色随页面主题同步（对应 StatusBar 插件） */
+        @JavascriptInterface
+        public String setStatusBar(String token, String color, String dark) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            final int parsed;
+            try {
+                parsed = Color.parseColor(color);
+            } catch (Exception e) {
+                return errorJson("bad color");
+            }
+            final boolean darkTheme = "1".equals(dark) || "true".equalsIgnoreCase(dark);
+            runOnUiThread(() -> {
+                try {
+                    getWindow().setStatusBarColor(parsed);
+                    getWindow().setNavigationBarColor(parsed);
+                    int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        getWindow().getInsetsController().setSystemBarsAppearance(
+                                darkTheme ? 0 : lightBars, lightBars);
+                    } else if (Build.VERSION.SDK_INT >= 23) {
+                        getWindow().getDecorView().setSystemUiVisibility(
+                                darkTheme ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+                    }
+                } catch (Exception ignored) {
+                }
+            });
+            return "{\"ok\":true}";
+        }
+    }
+
+    private synchronized void startRunWatch(final String runId, final String statusUrl,
+                                            final String token, final String title,
+                                            final String body, final String iconUrl) {
+        stopRunWatch();
+        watchRunId = runId;
+        Thread thread = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + WATCH_MAX_MS;
+            while (runId.equals(watchRunId) && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(WATCH_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (!runId.equals(watchRunId)) return;
+                String status = pollRunStatus(statusUrl, token);
+                if (status == null) continue; // 网络抖动：下轮再试
+                if ("not-found".equals(status) || "error".equals(status)
+                        || "cancelled".equals(status)) {
+                    return;
+                }
+                if ("done".equals(status)) {
+                    if (!runId.equals(watchRunId)) return;
+                    watchRunId = null;
+                    // 前台完成时用户能直接看到，不打扰
+                    if (!appForeground) postReplyNotification(title, body, iconUrl);
+                    return;
+                }
+            }
+        }, "flyai-run-watch");
+        thread.setDaemon(true);
+        watchThread = thread;
+        thread.start();
+    }
+
+    private synchronized void stopRunWatch() {
+        watchRunId = null;
+        if (watchThread != null) {
+            watchThread.interrupt();
+            watchThread = null;
+        }
+    }
+
+    /** 轮询 run 状态：running / done / error / cancelled / not-found / null(网络错误) */
+    private String pollRunStatus(String statusUrl, String token) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(statusUrl).openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setRequestProperty("User-Agent", "FlyAI-POC");
+            if (token != null && !token.isEmpty()) {
+                conn.setRequestProperty("Authorization", "Bearer " + token);
+            }
+            int code = conn.getResponseCode();
+            if (code == 404) return "not-found";
+            if (code != HttpURLConnection.HTTP_OK) return null;
+            String resp;
+            try (InputStream is = conn.getInputStream();
+                 ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[2048];
+                int read;
+                while ((read = is.read(buf)) != -1) {
+                    bos.write(buf, 0, read);
+                }
+                resp = bos.toString("UTF-8");
+            }
+            Matcher m = STATUS_RE.matcher(resp);
+            return m.find() ? m.group(1) : null;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private void postReplyNotification(String title, String body, String iconUrl) {
+        try {
+            ensureReplyChannel();
+            Intent open = new Intent(this, MainActivity.class);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent pending = PendingIntent.getActivity(this, 0, open, flags);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, REPLY_CHANNEL)
+                    : new Notification.Builder(this);
+            builder.setContentTitle(title == null || title.isEmpty() ? "FlyAI" : title)
+                    .setContentText(body == null || body.isEmpty() ? "回答已完成，点击查看" : body)
+                    .setSmallIcon(android.R.drawable.stat_notify_chat)
+                    .setContentIntent(pending)
+                    .setAutoCancel(true);
+            if (Build.VERSION.SDK_INT < 26) {
+                builder.setPriority(Notification.PRIORITY_DEFAULT);
+            }
+            Bitmap icon = loadNotificationIcon(iconUrl);
+            if (icon != null) {
+                builder.setLargeIcon(icon);
+            }
+            NotificationManager manager =
+                    (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager != null) {
+                manager.notify(REPLY_NOTIFY_ID, builder.build());
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void ensureReplyChannel() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        NotificationManager manager =
+                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        NotificationChannel channel = new NotificationChannel(
+                REPLY_CHANNEL, "回复提醒", NotificationManager.IMPORTANCE_DEFAULT);
+        channel.setDescription("AI 在后台回答完毕时提醒");
+        manager.createNotificationChannel(channel);
+    }
+
+    /** 通知大图：下载角色头像，失败时退化为默认小图标 */
+    private Bitmap loadNotificationIcon(String iconUrl) {
+        if (iconUrl == null || iconUrl.isEmpty()) return null;
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(iconUrl).openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setRequestProperty("User-Agent", "FlyAI-POC");
+            if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) return null;
+            try (InputStream in = conn.getInputStream()) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int read;
+                while ((read = in.read(buf)) != -1) {
+                    bos.write(buf, 0, read);
+                    if (bos.size() > 4 * 1024 * 1024) return null;
+                }
+                byte[] data = bos.toByteArray();
+                return BitmapFactory.decodeByteArray(data, 0, data.length);
+            }
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private String downloadToStorage(String url, String name) {
+        HttpURLConnection conn = null;
+        try {
+            URL parsed = new URL(url);
+            String scheme = parsed.getProtocol();
+            if (!"http".equals(scheme) && !"https".equals(scheme)) {
+                return errorJson("unsupported scheme");
+            }
+            conn = (HttpURLConnection) parsed.openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(120000);
+            conn.setInstanceFollowRedirects(true);
+            int code = conn.getResponseCode();
+            if (code >= 400) return errorJson("HTTP " + code);
+            try (InputStream in = conn.getInputStream()) {
+                return saveStream(in, name, conn.getContentType());
+            }
+        } catch (Exception e) {
+            return errorJson(e.getMessage());
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private String saveStream(InputStream in, String rawName, String mime) throws Exception {
+        String name = sanitizeFileName(rawName);
+        String type = mime == null || mime.trim().isEmpty()
+                ? guessMime(name) : mime.split(";")[0].trim();
+        if (type.isEmpty()) type = "application/octet-stream";
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, type);
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = getContentResolver()
+                    .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) throw new IOException("无法创建下载文件");
+            try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new IOException("无法写入下载文件");
+                copyStream(in, out);
+            }
+            values.clear();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            getContentResolver().update(uri, values, null, null);
+            return "{\"ok\":true}";
+        }
+        // Android 9 及以下：落到应用专属下载目录（无需存储权限）
+        File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) dir = new File(getFilesDir(), "downloads");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建下载目录");
+        File target = new File(dir, name);
+        if (target.exists()) target = new File(dir, System.currentTimeMillis() + "-" + name);
+        try (OutputStream out = new FileOutputStream(target)) {
+            copyStream(in, out);
+        }
+        JSONObject out = new JSONObject();
+        out.put("ok", true);
+        out.put("path", target.getAbsolutePath());
+        return out.toString();
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+    }
+
+    private static String sanitizeFileName(String raw) {
+        String name = raw == null ? "" : raw.trim();
+        if (name.isEmpty()) name = "download";
+        name = name.replaceAll("[\\\\/:*?\"<>|\\r\\n\\t]", "_");
+        return name.length() > 120 ? name.substring(name.length() - 120) : name;
+    }
+
+    private static String guessMime(String name) {
+        int dot = name.lastIndexOf('.');
+        if (dot < 0 || dot == name.length() - 1) return "application/octet-stream";
+        String ext = name.substring(dot + 1).toLowerCase(java.util.Locale.US);
+        String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        return type == null ? "application/octet-stream" : type;
     }
 
     private SharedPreferences keepAlivePrefs() {
@@ -703,6 +1056,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        appForeground = true;
         try {
             SharedPreferences prefs = keepAlivePrefs();
             boolean pending = prefs.getBoolean(BootService.KEY_KEEPALIVE_PENDING, false);
@@ -718,6 +1072,12 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    @Override
+    protected void onPause() {
+        appForeground = false;
+        super.onPause();
     }
 
     /** 站外 http(s) 链接一律交给系统浏览器，避免把 App 自身导航走 */
@@ -933,6 +1293,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopRunWatch();
         stopConsole();
         if (webView != null) {
             webView.destroy();

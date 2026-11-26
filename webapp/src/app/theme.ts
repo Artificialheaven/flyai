@@ -34,6 +34,22 @@ const toNativeColor = (color: string): string => {
 
 /** APK 内的原生状态栏（overlaysWebView=false）：底色与图标明暗跟随页面主题。 */
 const syncNativeStatusBar = (backgroundColor: string, dark: boolean) => {
+  // POC 裸 WebView 没有 Capacitor StatusBar 插件，走 FlyAIPoc 桥同步系统栏
+  const poc = window as unknown as {
+    __flyaiPoc?: { token?: string }
+    FlyAIPoc?: { setStatusBar?: (token: string, color: string, dark: string) => string }
+  }
+  if (poc.__flyaiPoc?.token && poc.FlyAIPoc?.setStatusBar) {
+    try {
+      poc.FlyAIPoc.setStatusBar(
+        poc.__flyaiPoc.token,
+        toNativeColor(backgroundColor),
+        dark ? '1' : '0'
+      )
+    } catch {
+      // 桥不可用时忽略，不影响主题切换
+    }
+  }
   const statusBar = (
     window as unknown as {
       Capacitor?: {

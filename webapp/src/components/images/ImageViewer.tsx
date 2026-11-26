@@ -1,5 +1,11 @@
 import clsx from 'clsx'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate } from '../../i18n/index.js'
 import {
@@ -21,6 +27,14 @@ export type ViewerImage = {
   /** 生图工具产出的参数 JSON（SD / 云端）；用户上传图没有 */
   meta?: GeneratedImageMeta | null
 }
+
+/** 查看器手势：单指拖动 / 双指缩放 / 双击/滚轮缩放 */
+type Point = { x: number; y: number }
+type View = { scale: number; x: number; y: number }
+
+const MIN_SCALE = 1
+const MAX_SCALE = 6
+const DOUBLE_TAP_SCALE = 2.5
 
 /** data URL / 站点资源 → 下载文件名（对照旧版 suggestImageName） */
 export const suggestImageName = (src: string): string => {
@@ -211,6 +225,268 @@ export const ImageViewer = ({ image, onClose }: { image: ViewerImage; onClose: (
   const panelOpenRef = useRef(panelOpen)
   panelOpenRef.current = panelOpen
 
+  // ---- 手势状态 ----
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const imgRef = useRef<HTMLImageElement | null>(null)
+  const [view, setView] = useState<View>({ scale: 1, x: 0, y: 0 })
+  const viewRef = useRef(view)
+  viewRef.current = view
+  /** 当前按下的指针（多指缩放需要至少两个） */
+  const pointersRef = useRef(new Map<number, Point>())
+  const pinchRef = useRef<{
+    distance: number
+    scale: number
+    center: Point
+    x: number
+    y: number
+  } | null>(null)
+  const dragRef = useRef<{ px: number; py: number; x: number; y: number } | null>(null)
+  /** 拖动/缩放后抑制舞台的关闭点击 */
+  const suppressClickRef = useRef(false)
+  const suppressTimerRef = useRef(0)
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null)
+
+  const markGesture = useCallback(() => {
+    suppressClickRef.current = true
+    window.clearTimeout(suppressTimerRef.current)
+    suppressTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false
+    }, 400)
+  }, [])
+
+  /** 舞台内容区（去掉 padding）的尺寸与中心：手势坐标都以此为准 */
+  const stageMetrics = useCallback(() => {
+    const stage = stageRef.current
+    if (!stage) {
+      return null
+    }
+    const style = window.getComputedStyle(stage)
+    const pl = parseFloat(style.paddingLeft) || 0
+    const pr = parseFloat(style.paddingRight) || 0
+    const pt = parseFloat(style.paddingTop) || 0
+    const pb = parseFloat(style.paddingBottom) || 0
+    const width = stage.clientWidth - pl - pr
+    const height = stage.clientHeight - pt - pb
+    return {
+      centerX: pl + width / 2,
+      centerY: pt + height / 2,
+      width,
+      height,
+    }
+  }, [])
+
+  /** 限制缩放倍数，并把平移量约束在图片边界内 */
+  const clampView = useCallback(
+    (next: View): View => {
+      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next.scale))
+      if (scale <= 1.001) {
+        return { scale: 1, x: 0, y: 0 }
+      }
+      const img = imgRef.current
+      const metrics = stageMetrics()
+      if (!img || !metrics) {
+        return { scale, x: next.x, y: next.y }
+      }
+      const maxX = Math.max(0, (img.offsetWidth * scale - metrics.width) / 2)
+      const maxY = Math.max(0, (img.offsetHeight * scale - metrics.height) / 2)
+      return {
+        scale,
+        x: Math.max(-maxX, Math.min(maxX, next.x)),
+        y: Math.max(-maxY, Math.min(maxY, next.y)),
+      }
+    },
+    [stageMetrics]
+  )
+
+  const stagePoint = useCallback((event: ReactPointerEvent<HTMLDivElement>): Point => {
+    const rect = stageRef.current?.getBoundingClientRect()
+    return {
+      x: event.clientX - (rect?.left ?? 0),
+      y: event.clientY - (rect?.top ?? 0),
+    }
+  }, [])
+
+  const zoomAt = useCallback(
+    (point: Point, nextScale: number) => {
+      const current = viewRef.current
+      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, nextScale))
+      if (scale <= 1.001) {
+        setView({ scale: 1, x: 0, y: 0 })
+        return
+      }
+      const metrics = stageMetrics()
+      const cx = point.x - (metrics?.centerX ?? 0)
+      const cy = point.y - (metrics?.centerY ?? 0)
+      const ratio = scale / current.scale
+      setView(
+        clampView({
+          scale,
+          x: cx - ratio * (cx - current.x),
+          y: cy - ratio * (cy - current.y),
+        })
+      )
+    },
+    [clampView, stageMetrics]
+  )
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const point = stagePoint(event)
+    pointersRef.current.set(event.pointerId, point)
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // 部分 WebView 不支持
+    }
+    if (pointersRef.current.size >= 2) {
+      const [a, b] = [...pointersRef.current.values()]
+      const metrics = stageMetrics()
+      pinchRef.current = {
+        distance: Math.hypot(b.x - a.x, b.y - a.y) || 1,
+        scale: viewRef.current.scale,
+        center: {
+          x: (a.x + b.x) / 2 - (metrics?.centerX ?? 0),
+          y: (a.y + b.y) / 2 - (metrics?.centerY ?? 0),
+        },
+        x: viewRef.current.x,
+        y: viewRef.current.y,
+      }
+      dragRef.current = null
+    } else {
+      dragRef.current = {
+        px: point.x,
+        py: point.y,
+        x: viewRef.current.x,
+        y: viewRef.current.y,
+      }
+      suppressClickRef.current = false
+    }
+  }
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) {
+      return
+    }
+    const point = stagePoint(event)
+    pointersRef.current.set(event.pointerId, point)
+
+    if (pointersRef.current.size >= 2 && pinchRef.current) {
+      const [a, b] = [...pointersRef.current.values()]
+      const metrics = stageMetrics()
+      if (!metrics) {
+        return
+      }
+      const distance = Math.hypot(b.x - a.x, b.y - a.y) || 1
+      const pinch = pinchRef.current
+      const scale = Math.min(
+        MAX_SCALE,
+        Math.max(MIN_SCALE, pinch.scale * (distance / pinch.distance))
+      )
+      const ratio = scale / pinch.scale
+      const cx = (a.x + b.x) / 2 - metrics.centerX
+      const cy = (a.y + b.y) / 2 - metrics.centerY
+      setView(
+        clampView({
+          scale,
+          x: cx - ratio * (pinch.center.x - pinch.x),
+          y: cy - ratio * (pinch.center.y - pinch.y),
+        })
+      )
+      markGesture()
+      return
+    }
+
+    if (dragRef.current && pointersRef.current.size === 1) {
+      if (viewRef.current.scale <= 1) {
+        return
+      }
+      const dx = point.x - dragRef.current.px
+      const dy = point.y - dragRef.current.py
+      if (Math.abs(dx) + Math.abs(dy) > 3) {
+        markGesture()
+      }
+      setView(
+        clampView({
+          scale: viewRef.current.scale,
+          x: dragRef.current.x + dx,
+          y: dragRef.current.y + dy,
+        })
+      )
+    }
+  }
+
+  const onPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const point = stagePoint(event)
+    const hadPinch = pointersRef.current.size >= 2 || pinchRef.current !== null
+    pointersRef.current.delete(event.pointerId)
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      // 忽略
+    }
+    if (pointersRef.current.size < 2) {
+      pinchRef.current = null
+    }
+    if (pointersRef.current.size === 1) {
+      // 双指松开一指：以剩余手指为新基准继续拖动
+      const [rest] = [...pointersRef.current.values()]
+      dragRef.current = {
+        px: rest.x,
+        py: rest.y,
+        x: viewRef.current.x,
+        y: viewRef.current.y,
+      }
+      return
+    }
+    dragRef.current = null
+
+    // 双击缩放：两次轻点（未被拖动/缩放打断）且位置接近
+    if (!hadPinch && !suppressClickRef.current) {
+      const now = Date.now()
+      const last = lastTapRef.current
+      if (last && now - last.time < 320 && Math.hypot(point.x - last.x, point.y - last.y) < 30) {
+        lastTapRef.current = null
+        markGesture()
+        zoomAt(point, viewRef.current.scale > 1.05 ? 1 : DOUBLE_TAP_SCALE)
+        return
+      }
+      lastTapRef.current = { time: now, x: point.x, y: point.y }
+    }
+  }
+
+  // 切换图片时复位视图
+  useEffect(() => {
+    setView({ scale: 1, x: 0, y: 0 })
+  }, [current.src])
+
+  // 窗口尺寸 / 参数面板变化后重新约束平移
+  useEffect(() => {
+    const onResize = () => setView((value) => clampView(value))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [clampView])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setView((value) => clampView(value)), 320)
+    return () => window.clearTimeout(timer)
+  }, [panelOpen, clampView])
+
+  // 桌面滚轮缩放（需非 passive 监听才能 preventDefault）
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) {
+      return
+    }
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const rect = stage.getBoundingClientRect()
+      const point = { x: event.clientX - rect.left, y: event.clientY - rect.top }
+      const nextScale = viewRef.current.scale * Math.exp(-event.deltaY * 0.0015)
+      zoomAt(point, nextScale)
+    }
+    stage.addEventListener('wheel', onWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', onWheel)
+  }, [zoomAt])
+
   const hasMeta = !!(
     current.meta &&
     (current.meta.prompt || current.meta.negative_prompt || current.meta.model || current.meta.sampler)
@@ -265,14 +541,32 @@ export const ImageViewer = ({ image, onClose }: { image: ViewerImage; onClose: (
       aria-label={t('imageViewerLabel')}
     >
       <div
+        ref={stageRef}
         className={styles.stage}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
         onClick={(event) => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false
+            return
+          }
           if (event.target === event.currentTarget) {
             onClose()
           }
         }}
       >
-        <img className={styles.img} src={current.src} alt={t('imageViewerAlt')} />
+        <img
+          ref={imgRef}
+          className={styles.img}
+          src={current.src}
+          alt={t('imageViewerAlt')}
+          draggable={false}
+          style={{
+            transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})`,
+          }}
+        />
       </div>
 
       <div className={styles.topbar}>
