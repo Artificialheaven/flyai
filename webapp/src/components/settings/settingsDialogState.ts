@@ -20,6 +20,7 @@ export type SettingsSection =
   | 'deepseek'
   | 'email'
   | 'announcement'
+  | 'webdav'
 
 /** 设置弹窗：侧边栏底部、401 提示等都可以打开；section 为打开时选中的分组 */
 export const useSettingsDialog = create(() => ({

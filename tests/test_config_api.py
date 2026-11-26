@@ -1191,3 +1191,34 @@ def test_discover_saved_provider_models_uses_saved_credentials(tmp_path, monkeyp
     )
     assert out == {"models": ["m1", "m2"]}
     assert calls == [("openai", "https://api.deepseek.com/v1", CHAT_KEY)]
+
+
+def test_webdav_password_masked_and_credited(tmp_path):
+    state = _mkstate(tmp_path)
+    put_config(ConfigPayload(webdav={
+        "enabled": True,
+        "url": "https://dav.example/root/",
+        "username": "admin@example.com",
+        "password": "dav-secret",
+        "remote_dir": "FlyAI",
+        "keep": 3,
+    }), _req(state))
+    view = get_config(_req(state))
+    assert view["webdav"]["password_set"] is True
+    assert view["webdav"]["password"] != "dav-secret"
+    assert view["webdav"]["keep"] == 3
+
+    # 掩码回传不覆盖真实密码；空串同样保留
+    put_config(ConfigPayload(webdav={
+        "enabled": True,
+        "url": "https://dav.example/root/",
+        "password": mask_api_key("dav-secret"),
+        "keep": 2,
+    }), _req(state))
+    assert state.config.webdav.password == "dav-secret"
+    assert state.config.webdav.keep == 2
+
+    # 普通用户视图不包含 WebDAV 段
+    state.user_store.add("u10")
+    view = get_config(_req(state, "u10"))
+    assert "webdav" not in view

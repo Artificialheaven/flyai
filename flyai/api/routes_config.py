@@ -52,6 +52,7 @@ from ..config import (
     RegistrationSettings,
     SelfMemorySettings,
     WatcherSettings,
+    WebDavSettings,
     mask_api_key,
     save_config,
 )
@@ -167,6 +168,8 @@ class ConfigPayload(BaseModel):
     email: Optional[dict] = None
     # 爱发电自动发卡（含 API Token/webhook Token，仅 admin 可见/可改）
     afdian: Optional[dict] = None
+    # WebDAV 云备份（含密码，仅 admin 可见/可改）
+    webdav: Optional[dict] = None
 
 
 class TestPayload(BaseModel):
@@ -343,6 +346,13 @@ def _masked_config(state, uid: Optional[str] = None):
         af["webhook_token_set"] = bool(af.get("webhook_token"))
         af["webhook_token"] = af.get("webhook_token") or ""
         out["afdian"] = af
+        # WebDAV 备份：密码只给掩码 + 是否已设置
+        wd = cfg.webdav.dict()
+        wd["password_set"] = bool(wd.get("password"))
+        wd["password"] = (
+            mask_api_key(wd.get("password") or "") if wd.get("password") else ""
+        )
+        out["webdav"] = wd
     return out
 
 
@@ -574,6 +584,13 @@ def put_config(payload: ConfigPayload, request: Request):
             or secrets.token_urlsafe(24)
         )
         cfg.afdian = AfdianSettings.parse_obj(ad)
+
+    if payload.webdav is not None:
+        # 整段替换：密码留空/掩码=保留原值
+        wd = dict(payload.webdav)
+        wd["password"] = _credit_key(
+            wd.get("password", ""), cfg.webdav.password)
+        cfg.webdav = WebDavSettings.parse_obj(wd)
 
     _persist(state)
     if scheduler_changed:

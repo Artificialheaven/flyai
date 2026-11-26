@@ -399,6 +399,48 @@ class AfdianSettings(BaseModel):
         return number
 
 
+class WebDavSettings(BaseModel):
+    """WebDAV 云备份（仅管理员）：整库备份到坚果云/Nextcloud 等网盘。"""
+
+    enabled: bool = False
+    # 服务根地址，例如 https://dav.jianguoyun.com/dav/
+    url: str = ""
+    username: str = ""
+    # 秘密：只下发明文给保存回填，GET 配置时返回掩码
+    password: str = ""
+    # 相对服务根地址的目录；空表示直接放在根目录
+    remote_dir: str = "FlyAI"
+    # 备份是否包含 data/uploads 下的图片/音频等大文件
+    include_uploads: bool = False
+    # 远端保留的最近备份数量
+    keep: int = 5
+    # 自签证书的 NAS 可关闭校验
+    verify_tls: bool = True
+    timeout_seconds: int = 60
+
+    @validator("url", "username", "remote_dir", pre=True)
+    def _trim_webdav_text(cls, v):  # noqa: N805
+        return str(v or "").strip()[:500]
+
+    @validator("password", pre=True)
+    def _trim_webdav_password(cls, v):  # noqa: N805
+        return str(v or "")[:500]
+
+    @validator("keep", pre=True)
+    def _clamp_keep(cls, v):  # noqa: N805
+        try:
+            return max(1, min(50, int(v)))
+        except (TypeError, ValueError):
+            return 5
+
+    @validator("timeout_seconds", pre=True)
+    def _clamp_webdav_timeout(cls, v):  # noqa: N805
+        try:
+            return max(5, min(600, int(v)))
+        except (TypeError, ValueError):
+            return 60
+
+
 class HistorySettings(BaseModel):
     backend: Literal["memory", "json", "sqlite"] = "sqlite"
 
@@ -1346,6 +1388,7 @@ class AppConfig(BaseModel):
     announcement: AnnouncementSettings = AnnouncementSettings()
     email: EmailSettings = EmailSettings()
     afdian: AfdianSettings = AfdianSettings()
+    webdav: WebDavSettings = WebDavSettings()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     image_generation: ImageGenSettings = ImageGenSettings()
     image_models: List[ImageModelConfig] = []

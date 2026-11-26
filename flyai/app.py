@@ -25,6 +25,7 @@ import time
 from .config import (
     AppConfig,
     PROJECT_ROOT,
+    _env_config_path,
     get_active_provider,
     load_config,
     save_config,
@@ -497,12 +498,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        data_dir = Path(__file__).resolve().parent.parent / "data"
+        # WebDAV 恢复包在打开任何存储/读取配置之前落盘；失败则继续用现有数据
+        try:
+            from .webdav import apply_pending_restore
+
+            apply_pending_restore(config_path or _env_config_path(), data_dir)
+        except Exception:
+            logger.exception("应用 WebDAV 恢复包失败，继续使用现有数据")
         try:
             state = AppState(config=load_config(config_path), config_path=config_path)
         except ConfigError as exc:
             logger.error("启动失败: %s", exc)
             raise
-        data_dir = Path(__file__).resolve().parent.parent / "data"
         migrate_legacy(data_dir)
         state.data_dir = data_dir
         # 自定义工具运行时先于工具表重建：管理工具注册与请求级 extras 都靠它
@@ -700,6 +708,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_st import router as st_router
     from .api.routes_template import router as template_router
     from .api.routes_usage import router as usage_router
+    from .api.routes_webdav import router as webdav_router
 
     app.include_router(afdian_router)
     app.include_router(agentdb_router)
@@ -729,6 +738,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(st_router)
     app.include_router(template_router)
     app.include_router(usage_router)
+    app.include_router(webdav_router)
 
     # 静态资源与头像上传目录（挂载目录需先存在；各用户上传在 /uploads/<uid>/...）
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

@@ -124,6 +124,26 @@ export type EmailSettingsView = {
   hourly_limit: number
 }
 
+/** WebDAV 云备份（仅 admin 可见；password 为掩码，password_set 表示已保存密码） */
+export type WebDavSettingsView = {
+  enabled: boolean
+  url: string
+  username: string
+  password: string
+  password_set: boolean
+  remote_dir: string
+  include_uploads: boolean
+  keep: number
+  verify_tls: boolean
+  timeout_seconds: number
+}
+
+export type WebDavBackup = {
+  name: string
+  size: number
+  modified: string
+}
+
 /** 启动公告：每次打开应用（含登录页）弹出 */
 export type AnnouncementView = {
   enabled: boolean
@@ -218,6 +238,8 @@ export type AdminConfig = {
   email?: EmailSettingsView
   /** 爱发电自动发卡：仅 admin 视图包含 */
   afdian?: AfdianSettingsView
+  /** WebDAV 云备份：仅 admin 视图包含 */
+  webdav?: WebDavSettingsView
   [key: string]: unknown
 }
 
@@ -414,6 +436,43 @@ export const testEmail = (to: string): Promise<{ ok: boolean; message: string }>
     method: 'POST',
     body: JSON.stringify({ to }),
   })
+
+export const testWebDav = (): Promise<{ ok: boolean; message: string }> =>
+  request<{ ok: boolean; message: string }>('/api/webdav/test', { method: 'POST' })
+
+export const backupToWebDav = (): Promise<{
+  ok: boolean
+  name: string
+  size: number
+  entries: number
+  removed: string[]
+}> => request('/api/webdav/backup', { method: 'POST' })
+
+export const listWebDavBackups = (): Promise<{
+  remote_dir: string
+  backups: WebDavBackup[]
+}> => request('/api/webdav/backups')
+
+export const restoreFromWebDav = (
+  name: string
+): Promise<{
+  ok: boolean
+  name: string
+  files: number
+  bytes: number
+  restart_required: boolean
+}> =>
+  request('/api/webdav/restore', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+
+export const deleteWebDavBackup = (name: string): Promise<{ ok: boolean }> =>
+  request(`/api/webdav/backups/${encodeURIComponent(name)}`, { method: 'DELETE' })
+
+export const getWebDavPending = (): Promise<{
+  pending: { name?: string; staged_at?: string; files?: number; bytes?: number } | null
+}> => request('/api/webdav/pending')
 
 export const createProvider = (payload: ProviderPayload): Promise<ProviderView> =>
   request<ProviderView>('/api/models/providers', {

@@ -89,6 +89,7 @@ import { ShellPanel } from './admin/ShellPanel.js'
 import { SystemPanel } from './admin/SystemPanel.js'
 import { UsagePanel } from './admin/UsagePanel.js'
 import { UsersPanel } from './admin/UsersPanel.js'
+import { WebDavPanel } from './admin/WebDavPanel.js'
 import styles from './Settings.module.css'
 
 /**
@@ -206,6 +207,12 @@ const sections: {
     icon: <IconNoticeOutline16 />,
     adminOnly: true,
   },
+  {
+    value: 'webdav',
+    label: 'settingDialogAsideWebdavOptionLabel',
+    icon: <IconDownloadOutline16 />,
+    adminOnly: true,
+  },
 ]
 
 const SettingsContent = () => {
@@ -269,6 +276,8 @@ const SettingsContent = () => {
         return isAdmin ? <EmailPanel /> : null
       case 'announcement':
         return isAdmin ? <AnnouncementPanel /> : null
+      case 'webdav':
+        return isAdmin ? <WebDavPanel /> : null
       case 'users':
         return isAdmin ? <UsersPanel /> : null
       case 'system':
