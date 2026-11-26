@@ -695,6 +695,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     from .api.routes_proactor import router as proactor_router
     from .api.routes_room import router as room_router
     from .api.routes_session import router as session_router
+    from .api.routes_shell import router as shell_router
     from .api.routes_speech import router as speech_router
     from .api.routes_st import router as st_router
     from .api.routes_template import router as template_router
@@ -723,6 +724,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app.include_router(proactor_router)
     app.include_router(room_router)
     app.include_router(session_router)
+    app.include_router(shell_router)
     app.include_router(speech_router)
     app.include_router(st_router)
     app.include_router(template_router)

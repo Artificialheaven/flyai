@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 import httpx
 
+from ..net_retry import request_with_retry, send_with_retry
 from .engine import BrowserEngine
 
 logger = logging.getLogger("flyai.search")
@@ -126,7 +127,9 @@ class ChromiumSearcher:
         host = "www.bing.com" if proxy else "cn.bing.com"
         url = "https://%s/search?q=%s&format=rss" % (host, quote(query))
         async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
-            resp = await client.get(url, headers={"User-Agent": _UA})
+            resp = await request_with_retry(
+                client, "GET", url, headers={"User-Agent": _UA}
+            )
         if resp.status_code != 200:
             raise RuntimeError("Bing RSS HTTP %d" % resp.status_code)
         results = _parse_bing_rss(resp.text)
@@ -258,10 +261,12 @@ class ChromiumSearcher:
         ) as client:
             async def one(item: Dict[str, str]) -> None:
                 try:
-                    req = client.build_request(
-                        "GET", item["url"], headers={"User-Agent": _UA}
+                    resp = await send_with_retry(
+                        client,
+                        lambda: client.build_request(
+                            "GET", item["url"], headers={"User-Agent": _UA}
+                        ),
                     )
-                    resp = await client.send(req)
                     location = resp.headers.get("location")
                     if location:
                         item["url"] = str(

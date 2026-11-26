@@ -57,6 +57,9 @@ type PocWindow = Window & {
     applyOverlay?: (token: string) => string
     markReady?: (token: string) => string
     openInstallSettings?: (token: string) => string
+    getKeepAlive?: (token: string) => string
+    setKeepAlive?: (token: string, enabled: string) => string
+    requestOverlayPermission?: (token: string) => string
   }
 }
 
@@ -80,7 +83,8 @@ const call = (name: keyof NonNullable<PocWindow['FlyAIPoc']>): BridgeResult => {
   try {
     // 必须带接收者调用：WebView 的 Java 桥依赖 this 找到所属 WebView，
     // 解构后 fn(current) 会报 "non-injected object"。
-    const raw = bridge[name]!(current)
+    const fn = bridge[name] as (token: string) => string
+    const raw = fn.call(bridge, current)
     return raw ? (JSON.parse(raw) as BridgeResult) : { ok: false, error: 'empty' }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -109,6 +113,50 @@ export const cancelPocUpdate = (): BridgeResult => call('cancel')
 export const applyPocOverlay = (): BridgeResult => call('applyOverlay')
 export const markPocReady = (): BridgeResult => call('markReady')
 export const openPocInstallSettings = (): BridgeResult => call('openInstallSettings')
+
+/** 后台保活悬浮窗状态：是否已开启、系统是否已授予悬浮窗权限 */
+export type PocKeepAliveState = { enabled: boolean; permission: boolean }
+
+export const isPocKeepAliveSupported = (): boolean => {
+  const bridge = pocWindow()?.FlyAIPoc
+  return Boolean(bridge?.getKeepAlive && bridge?.setKeepAlive && token())
+}
+
+export const getPocKeepAlive = (): PocKeepAliveState | null => {
+  const bridge = pocWindow()?.FlyAIPoc
+  const current = token()
+  if (!bridge?.getKeepAlive || !current) {
+    return null
+  }
+  try {
+    const raw = bridge.getKeepAlive(current)
+    if (!raw) {
+      return null
+    }
+    const data = JSON.parse(raw) as Partial<PocKeepAliveState>
+    return { enabled: data.enabled === true, permission: data.permission === true }
+  } catch {
+    return null
+  }
+}
+
+export const setPocKeepAlive = (
+  enabled: boolean
+): BridgeResult & { permission?: boolean } => {
+  const bridge = pocWindow()?.FlyAIPoc
+  const current = token()
+  if (!bridge?.setKeepAlive || !current) {
+    return { ok: false, error: 'unsupported' }
+  }
+  try {
+    const raw = bridge.setKeepAlive(current, enabled ? '1' : '0')
+    return raw ? (JSON.parse(raw) as BridgeResult & { permission?: boolean }) : { ok: false, error: 'empty' }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export const requestPocOverlayPermission = (): BridgeResult => call('requestOverlayPermission')
 
 const EVENT_NAME = 'flyai-poc-update'
 const READY_EVENT = 'flyai-poc-ready'

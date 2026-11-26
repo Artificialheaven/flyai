@@ -6,14 +6,23 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowManager;
 
 import org.json.JSONObject;
 
@@ -40,6 +49,14 @@ public class BootService extends Service {
     private static final int NOTIFICATION_ID = 1001;
     private static final int PORT = 8000;
 
+    /** 设置页开关：显示 1×1 透明悬浮窗降低后台被清理概率 */
+    public static final String ACTION_APPLY_KEEPALIVE =
+            "top.eastcloud.flyai.poc.APPLY_KEEPALIVE";
+    public static final String PREFS_NAME = "flyai_poc";
+    public static final String KEY_KEEPALIVE_OVERLAY = "keepalive_overlay";
+    /** 用户点了开关但缺权限：授权页返回后自动补开 */
+    public static final String KEY_KEEPALIVE_PENDING = "keepalive_pending";
+
     /**
      * 打包时由 mobile/poc/build_poc.py 注入 rootfs 内容版本（哈希前 16 位）。
      * 设备上安装过的版本与当前 APK 不一致时，只更新代码目录，保留 .venv / config / data。
@@ -53,6 +70,12 @@ public class BootService extends Service {
     private volatile Process server;
     private PowerManager.WakeLock wakeLock;
     private volatile boolean starting;
+    /** 网络切换监听：开机只写一次 resolv.conf，切网后旧 DNS 不可达会解析失败 */
+    private volatile ConnectivityManager.NetworkCallback dnsCallback;
+    /** 保活悬浮窗（1×1 透明），未开启时为 null */
+    private View keepAliveView;
+    /** 上一次写入的 DNS 列表，网络回调重复触发时避免无谓重写 */
+    private volatile String lastDnsServers = "";
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -71,10 +94,19 @@ public class BootService extends Service {
         } catch (Exception ignored) {
         }
         startForegroundCompat("正在准备运行环境…");
+        applyKeepAliveFromPrefs();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_APPLY_KEEPALIVE.equals(intent.getAction())) {
+            if (intent.getBooleanExtra("enabled", false)) {
+                showKeepAliveOverlay();
+            } else {
+                hideKeepAliveOverlay();
+            }
+            // 不 return：服务可能是被这个 action 顺带拉起的，仍需继续拉起 Python
+        }
         if (!starting && (server == null || !server.isAlive())) {
             starting = true;
             new Thread(this::boot, "flyai-boot").start();
@@ -214,6 +246,7 @@ public class BootService extends Service {
             }
 
             prepareDns(rootfs);
+            startDnsWatcher(rootfs);
             notify("正在启动 FlyAI…");
             stage("启动 Python 服务（PRoot）…");
             startServer(files, rootfs, prootDir);
@@ -590,39 +623,158 @@ public class BootService extends Service {
      * 把设备当前 DNS 写进 rootfs 的 /etc/resolv.conf。
      * Android 没有 glibc 可用的 resolv.conf，PRoot 里的 Ubuntu 必须自带一份；
      * 构建机上的集群 DNS（如 10.x）在手机上不可达，会导致 httpx 名称解析失败。
+     *
+     * 优先设备当前网络（IPv4 在前，过滤环回/链路本地地址），再追加国内公共 DNS
+     * 兜底；同一份列表只写一次（网络回调可能重复触发）。
      */
-    private void prepareDns(File rootfs) {
-        List<String> servers = new ArrayList<>();
+    private synchronized void prepareDns(File rootfs) {
+        if (rootfs == null || !rootfs.isDirectory()) return;
+        List<String> v4 = new ArrayList<>();
+        List<String> v6 = new ArrayList<>();
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             Network network = cm == null ? null : cm.getActiveNetwork();
             LinkProperties props = network == null ? null : cm.getLinkProperties(network);
             if (props != null) {
                 for (InetAddress address : props.getDnsServers()) {
+                    if (address == null || address.isLoopbackAddress()
+                            || address.isLinkLocalAddress()) continue;
                     String ip = address.getHostAddress();
-                    if (ip != null && !ip.isEmpty() && !servers.contains(ip)) servers.add(ip);
+                    if (ip == null || ip.isEmpty()) continue;
+                    List<String> bucket = ip.indexOf(':') >= 0 ? v6 : v4;
+                    if (!bucket.contains(ip)) bucket.add(ip);
                 }
             }
         } catch (Exception ignored) {
         }
-        if (servers.isEmpty()) {
-            servers.add("223.5.5.5");
-            servers.add("119.29.29.29");
+        List<String> servers = new ArrayList<>(v4);
+        servers.addAll(v6);
+        for (String fallback : new String[]{"223.5.5.5", "119.29.29.29"}) {
+            if (!servers.contains(fallback)) servers.add(fallback);
         }
+        String joined = String.join(", ", servers);
+        File etc = new File(rootfs, "etc");
+        File target = new File(etc, "resolv.conf");
+        // rootfs 刚解包时文件不存在，即使 DNS 列表没变也要补写
+        if (joined.equals(lastDnsServers) && target.isFile()) return;
         try {
-            File etc = new File(rootfs, "etc");
             if (!etc.isDirectory()) etc.mkdirs();
-            try (PrintWriter out = new PrintWriter(new File(new File(rootfs, "etc"), "resolv.conf"), "UTF-8")) {
+            // 先写临时文件再替换，避免 PRoot 里的进程读到半截文件
+            File tmp = new File(etc, "resolv.conf.tmp");
+            try (PrintWriter out = new PrintWriter(tmp, "UTF-8")) {
                 for (String server : servers) out.println("nameserver " + server);
-                out.println("options timeout:2 attempts:2");
+                out.println("options timeout:1 attempts:2");
+            }
+            if (!tmp.renameTo(target)) {
+                copyIfExists(tmp, target);
+                if (!tmp.delete()) tmp.deleteOnExit();
             }
             try (PrintWriter out = new PrintWriter(new File(etc, "hosts"), "UTF-8")) {
                 out.println("127.0.0.1 localhost");
                 out.println("::1 localhost");
             }
-            stage("DNS 已写入：" + String.join(", ", servers));
+            lastDnsServers = joined;
+            stage("DNS 已写入：" + joined);
         } catch (Exception e) {
             stage("写入 DNS 失败：" + e);
+        }
+    }
+
+    /** 监听网络切换：可用网络或链路属性变化时重写 rootfs 的 DNS。 */
+    private synchronized void startDnsWatcher(File rootfs) {
+        stopDnsWatcher();
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    prepareDns(rootfs);
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(Network network, LinkProperties props) {
+                    prepareDns(rootfs);
+                }
+            };
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            cm.registerNetworkCallback(request, callback);
+            dnsCallback = callback;
+        } catch (Exception e) {
+            Log.w(TAG, "注册 DNS 网络监听失败", e);
+        }
+    }
+
+    private synchronized void stopDnsWatcher() {
+        ConnectivityManager.NetworkCallback callback = dnsCallback;
+        dnsCallback = null;
+        if (callback == null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) cm.unregisterNetworkCallback(callback);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 服务启动时按已保存的开关恢复悬浮窗（进程被系统重建后也能自动恢复）。 */
+    private void applyKeepAliveFromPrefs() {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            if (prefs.getBoolean(KEY_KEEPALIVE_OVERLAY, false)) {
+                showKeepAliveOverlay();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * 1×1 透明悬浮窗：部分 ROM 会因此把进程当作「有前台可见窗口」而减少后台清理。
+     * 只是保活辅助手段，不能保证一定存活；仍需系统电池优化白名单配合。
+     */
+    private synchronized void showKeepAliveOverlay() {
+        if (keepAliveView != null) return;
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+            Log.w(TAG, "未授予悬浮窗权限，跳过保活悬浮窗");
+            return;
+        }
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (wm == null) return;
+            View view = new View(this);
+            view.setBackgroundColor(Color.TRANSPARENT);
+            int type = Build.VERSION.SDK_INT >= 26
+                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_PHONE;
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                    1, 1, type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            params.gravity = Gravity.TOP | Gravity.START;
+            params.x = 0;
+            params.y = 0;
+            // 个别 ROM 会移除完全透明的窗口，留 1% 不透明度更稳
+            params.alpha = 0.01f;
+            wm.addView(view, params);
+            keepAliveView = view;
+            Log.i(TAG, "保活悬浮窗已开启");
+        } catch (Exception e) {
+            Log.w(TAG, "添加保活悬浮窗失败", e);
+        }
+    }
+
+    private synchronized void hideKeepAliveOverlay() {
+        View view = keepAliveView;
+        keepAliveView = null;
+        if (view == null) return;
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (wm != null) wm.removeView(view);
+        } catch (Exception ignored) {
         }
     }
 
@@ -782,6 +934,8 @@ public class BootService extends Service {
 
     @Override
     public void onDestroy() {
+        hideKeepAliveOverlay();
+        stopDnsWatcher();
         stopServer();
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();

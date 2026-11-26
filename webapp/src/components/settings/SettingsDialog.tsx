@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   IconBoltOutline16,
   IconChartOutline16,
@@ -31,12 +31,18 @@ import {
   downloadPocFullApk,
   downloadPocOverlay,
   getPocInfo,
+  getPocKeepAlive,
+  isPocKeepAliveSupported,
   isPocUpdateSupported,
   onPocReady,
   onPocUpdateEvent,
+  requestPocOverlayPermission,
+  setPocKeepAlive,
   type PocInfo,
+  type PocKeepAliveState,
   type PocUpdateEvent,
 } from '../../services/pocUpdate.js'
+import { Toggle } from './admin/AdminCommon.js'
 import {
   saveDeviceBackground,
   setLocalBackground,
@@ -79,6 +85,7 @@ import { ExtensionPanel } from './ExtensionPanel.js'
 import { IntegrationPanel } from './admin/IntegrationPanel.js'
 import { MemoryPanel } from './admin/MemoryPanel.js'
 import { ModelsPanel } from './admin/ModelsPanel.js'
+import { ShellPanel } from './admin/ShellPanel.js'
 import { SystemPanel } from './admin/SystemPanel.js'
 import { UsagePanel } from './admin/UsagePanel.js'
 import { UsersPanel } from './admin/UsersPanel.js'
@@ -149,6 +156,12 @@ const sections: {
     value: 'system',
     label: 'settingDialogAsideSystemOptionLabel',
     icon: <IconPanelLeftOutline16 />,
+    adminOnly: true,
+  },
+  {
+    value: 'shell',
+    label: 'settingDialogAsideShellOptionLabel',
+    icon: <IconDataOutline16 />,
     adminOnly: true,
   },
   {
@@ -260,6 +273,8 @@ const SettingsContent = () => {
         return isAdmin ? <UsersPanel /> : null
       case 'system':
         return isAdmin ? <SystemPanel /> : null
+      case 'shell':
+        return isAdmin ? <ShellPanel /> : null
       case 'data':
         return renderData()
       case 'invite':
@@ -274,6 +289,7 @@ const SettingsContent = () => {
             <LocationSetting />
             <GitHubSetting />
             <PocUpdateSetting />
+            <PocKeepAliveSetting />
           </>
         )
     }
@@ -684,6 +700,91 @@ const PocUpdateSetting = () => {
       description={description}
       status={null}
       action={action}
+    />
+  )
+}
+
+/** POC 后台保活：1×1 透明悬浮窗开关（仅 all-in-one APK 可见） */
+const PocKeepAliveSetting = () => {
+  const t = useTranslate()
+  const [supported, setSupported] = useState(() => isPocKeepAliveSupported())
+  const [state, setState] = useState<PocKeepAliveState | null>(() => getPocKeepAlive())
+  const [busy, setBusy] = useState(false)
+  const pendingEnable = useRef(false)
+
+  const refresh = useCallback(() => {
+    const nextSupported = isPocKeepAliveSupported()
+    setSupported(nextSupported)
+    setState(nextSupported ? getPocKeepAlive() : null)
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      const current = isPocKeepAliveSupported() ? getPocKeepAlive() : null
+      // 从系统授权页返回：权限已授予则自动补上刚才无法开启的开关
+      if (pendingEnable.current && current?.permission) {
+        pendingEnable.current = false
+        if (setPocKeepAlive(true).ok) {
+          showToast({ key: 'pocKeepAliveEnabled' })
+        }
+      }
+      refresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [refresh])
+
+  if (!supported) {
+    return null
+  }
+
+  const enabled = state?.enabled ?? false
+  const permission = state?.permission ?? false
+
+  const toggle = (next: boolean) => {
+    if (busy) {
+      return
+    }
+    setBusy(true)
+    const result = setPocKeepAlive(next)
+    setBusy(false)
+    if (result.ok) {
+      showToast({ key: next ? 'pocKeepAliveEnabled' : 'pocKeepAliveDisabled' })
+    } else if (result.error === 'permission') {
+      pendingEnable.current = next
+      requestPocOverlayPermission()
+      showToast({ key: 'pocKeepAliveGrantHint' })
+    } else {
+      showToast({
+        key: 'pocKeepAliveFailed',
+        params: { message: result.error || '' },
+        type: 'error',
+      })
+    }
+    refresh()
+  }
+
+  return (
+    <SettingCell
+      label={t('pocKeepAliveTitle')}
+      description={permission ? t('pocKeepAliveDesc') : t('pocKeepAliveNoPermission')}
+      status={null}
+      action={
+        <Toggle
+          checked={enabled && permission}
+          label={t('pocKeepAliveTitle')}
+          disabled={busy}
+          onChange={toggle}
+        />
+      }
     />
   )
 }

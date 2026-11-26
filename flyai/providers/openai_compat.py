@@ -12,6 +12,7 @@ from typing import AsyncIterator, Dict, List, Optional
 import httpx
 
 from ..errors import ProviderError
+from ..net_retry import stream_with_retry
 from ..schemas import Message, ToolCall
 from .base import (
     OPENCODE_THINKING_OFF_EFFORT,
@@ -185,7 +186,9 @@ class OpenAICompatProvider(BaseProvider):
         req_body = dict(body)
         if include_usage:
             req_body["stream_options"] = {"include_usage": True}
-        async with self._client.stream("POST", url, json=req_body, headers=headers) as resp:
+        async with stream_with_retry(
+            self._client, "POST", url, json=req_body, headers=headers
+        ) as resp:
             if resp.status_code >= 400:
                 detail = await resp.aread()
                 err_text = detail.decode("utf-8", errors="replace")[:800]

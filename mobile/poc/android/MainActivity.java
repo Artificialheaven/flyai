@@ -8,6 +8,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
@@ -16,6 +17,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Message;
+import android.provider.Settings;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
@@ -618,6 +620,103 @@ public class MainActivity extends Activity {
                 startActivity(intent);
             }
             return "{\"ok\":true}";
+        }
+
+        @JavascriptInterface
+        public String getKeepAlive(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            boolean enabled = keepAlivePrefs()
+                    .getBoolean(BootService.KEY_KEEPALIVE_OVERLAY, false);
+            JSONObject out = new JSONObject();
+            try {
+                out.put("ok", true);
+                out.put("enabled", enabled);
+                out.put("permission", hasOverlayPermission());
+            } catch (Exception ignored) {
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
+        public String setKeepAlive(String token, String value) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            boolean enabled = "1".equals(value) || "true".equalsIgnoreCase(value);
+            if (enabled && !hasOverlayPermission()) {
+                return "{\"ok\":false,\"error\":\"permission\",\"permission\":false}";
+            }
+            keepAlivePrefs().edit()
+                    .putBoolean(BootService.KEY_KEEPALIVE_OVERLAY, enabled)
+                    .putBoolean(BootService.KEY_KEEPALIVE_PENDING, false)
+                    .apply();
+            applyKeepAlive(enabled);
+            return "{\"ok\":true,\"enabled\":" + enabled + ",\"permission\":true}";
+        }
+
+        @JavascriptInterface
+        public String requestOverlayPermission(String token) {
+            if (!updateToken.equals(token)) return errorJson("forbidden");
+            if (hasOverlayPermission()) return "{\"ok\":true,\"permission\":true}";
+            // 记下「用户想开」：WebView 不一定会派发 visibilitychange，
+            // 授权页返回时由 onResume 兜底补开
+            keepAlivePrefs().edit()
+                    .putBoolean(BootService.KEY_KEEPALIVE_PENDING, true).apply();
+            openOverlaySettings();
+            return "{\"ok\":true,\"permission\":false}";
+        }
+    }
+
+    private SharedPreferences keepAlivePrefs() {
+        return getSharedPreferences(BootService.PREFS_NAME, MODE_PRIVATE);
+    }
+
+    private boolean hasOverlayPermission() {
+        return Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
+    }
+
+    private void applyKeepAlive(boolean enabled) {
+        try {
+            Intent intent = new Intent(this, BootService.class);
+            intent.setAction(BootService.ACTION_APPLY_KEEPALIVE);
+            intent.putExtra("enabled", enabled);
+            startService(intent);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void openOverlaySettings() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception e) {
+            try {
+                Intent fallback = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(fallback);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** 从悬浮窗授权页返回后立即应用已保存的开关 */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        try {
+            SharedPreferences prefs = keepAlivePrefs();
+            boolean pending = prefs.getBoolean(BootService.KEY_KEEPALIVE_PENDING, false);
+            boolean enabled = prefs.getBoolean(BootService.KEY_KEEPALIVE_OVERLAY, false);
+            if ((pending || enabled) && hasOverlayPermission()) {
+                if (pending) {
+                    prefs.edit()
+                            .putBoolean(BootService.KEY_KEEPALIVE_OVERLAY, true)
+                            .putBoolean(BootService.KEY_KEEPALIVE_PENDING, false)
+                            .apply();
+                }
+                applyKeepAlive(true);
+            }
+        } catch (Exception ignored) {
         }
     }
 

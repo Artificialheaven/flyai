@@ -30,6 +30,7 @@ from ..config import WebSearchSettings
 from ..deepseek_tools import DeepSeekToolsClient, usable
 from ..errors import DeepSeekError
 from ..metering import per_success_cost
+from ..net_retry import request_with_retry, send_with_retry
 from ..netguard import (
     BlockedHost,
     is_blocked_host,
@@ -472,7 +473,9 @@ async def _search_bing(
     # ensearch=1 走国际版通道：可绕开国内市场对部分查询的过滤降级
     if international:
         params["ensearch"] = "1"
-    resp = await client.get(
+    resp = await request_with_retry(
+        client,
+        "GET",
         f"https://{host}/search",
         params=params,
         headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
@@ -590,12 +593,15 @@ async def _fetch_with_redirect_checks(
         except BlockedHost as exc:
             raise RuntimeError(str(exc))
         # 连接钉到已校验 IP，保留原 Host 头与 TLS SNI（防解析后 rebinding）
-        req = client.build_request(
-            "GET", url,
-            headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
-        )
-        pin_request(req, ips[0])
-        resp = await client.send(req)
+        def make_request() -> httpx.Request:
+            req = client.build_request(
+                "GET", url,
+                headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+            pin_request(req, ips[0])
+            return req
+
+        resp = await send_with_retry(client, make_request)
         location = resp.headers.get("location") if resp.status_code in _REDIRECT_CODES else ""
         if not location:
             return resp, url

@@ -1,0 +1,83 @@
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.statusOk {
+  color: var(--dsw-alias-brand-text, #4f9d69);
+}
+
+.statusBad {
+  color: var(--dsw-alias-label-warning, #c2554f);
+}
+
+/* 终端始终用深色底，保证 ANSI 去除后的输出可读 */
+.terminal {
+  box-sizing: border-box;
+  height: 42vh;
+  min-height: 240px;
+  max-height: 460px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: #0b0f14;
+  color: #d6e2f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.placeholder {
+  color: #6b7a8c;
+}
+
+.inputRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--dsw-alias-button-primary-fill);
+}
+
+.input:disabled {
+  opacity: 0.6;
+}
+
+@media not all and (min-width: 768px) {
+  .terminal {
+    height: 38vh;
+    min-height: 200px;
+  }
+}

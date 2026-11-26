@@ -19,6 +19,7 @@ import httpx
 
 from ..config import EmbeddingsConfig
 from ..errors import ProviderError
+from ..net_retry import request_with_retry
 
 _MAX_INPUTS = 512            # 单次请求最多向量化的文本数
 _CACHE_MAX = 20000           # 磁盘缓存最多保留的条目数
@@ -109,7 +110,9 @@ class EmbeddingClient:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         async with self._lock:
             try:
-                resp = await self._client.post(url, json=body, headers=headers)
+                resp = await request_with_retry(
+                    self._client, "POST", url, json=body, headers=headers
+                )
                 if resp.status_code >= 400:
                     detail = (await resp.aread()).decode("utf-8", errors="replace")[:500]
                     raise ProviderError(

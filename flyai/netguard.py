@@ -88,14 +88,26 @@ def is_blocked_host(hostname: str) -> bool:
     return is_blocked_ip(ip)
 
 
+# DNS 瞬时失败重试次数（弱网/POC/PRoot 下常见 "Temporary failure in name resolution"）
+_RESOLVE_ATTEMPTS = 3
+
+
 async def resolve_ips(hostname: str) -> List[IPAddress]:
     """DNS 解析域名（A + AAAA），去重返回。NXDOMAIN / 无地址抛 BlockedHost。"""
     h = _norm(hostname)
     loop = asyncio.get_event_loop()
-    try:
-        infos = await loop.getaddrinfo(h, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise BlockedHost("DNS 解析失败: %s" % h) from exc
+    infos = None
+    for attempt in range(_RESOLVE_ATTEMPTS):
+        try:
+            infos = await loop.getaddrinfo(h, None, type=socket.SOCK_STREAM)
+            break
+        except socket.gaierror as exc:
+            # 域名不存在（NXDOMAIN）重试没有意义；临时性失败退避后重试
+            noname = getattr(socket, "EAI_NONAME", None)
+            transient = getattr(exc, "errno", None) != noname
+            if not transient or attempt + 1 >= _RESOLVE_ATTEMPTS:
+                raise BlockedHost("DNS 解析失败: %s" % h) from exc
+            await asyncio.sleep(0.2 * (2 ** attempt))
     out: List[IPAddress] = []
     seen = set()
     for _fam, _typ, _proto, _canon, sockaddr in infos:

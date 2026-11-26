@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from .errors import DeepSeekError
+from .net_retry import request_with_retry
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 SERVICE_FLAGS = {
@@ -117,8 +118,9 @@ class DeepSeekToolsClient:
             hdrs.update(headers)
         try:
             async with self._client() as client:
-                resp = await client.post(url, json=json_body, files=files,
-                                         headers=hdrs)
+                resp = await request_with_retry(
+                    client, "POST", url, json=json_body, files=files, headers=hdrs
+                )
         except httpx.HTTPError as exc:
             raise DeepSeekError("DeepSeek 接口请求失败: %s" % exc) from exc
         if resp.status_code >= 400:

@@ -10,6 +10,7 @@ import json
 from typing import AsyncIterator, Dict, List, Optional
 
 from ..errors import ProviderError
+from ..net_retry import stream_with_retry
 from ..schemas import Message, ToolCall
 from .base import BaseProvider, StreamEvent, StreamEventType
 
@@ -72,7 +73,9 @@ class AnthropicProvider(BaseProvider):
             headers["x-api-key"] = self.cfg.api_key
         headers.update(self._gateway_headers(session_id))
 
-        async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+        async with stream_with_retry(
+            self._client, "POST", url, json=body, headers=headers
+        ) as resp:
             if resp.status_code >= 400:
                 detail = await resp.aread()
                 err_text = detail.decode("utf-8", errors="replace")[:800]
