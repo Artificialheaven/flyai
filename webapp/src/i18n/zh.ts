@@ -276,6 +276,8 @@ export const zh = {
   pocUpdateRestartHint: '重新打开应用即可；聊天记录与 API Key 不受影响',
   pocUpdateApplyNow: '应用并退出',
   pocUpdateFull: '需要完整安装包',
+  pocUpdateCached: '安装包已下载',
+  pocUpdateInstallCached: '直接安装',
   pocUpdateFullDownload: '下载完整包',
   pocUpdateInstalling: '正在打开系统安装器…',
   pocUpdateApplying: '正在应用更新，请重新打开应用…',

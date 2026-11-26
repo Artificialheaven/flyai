@@ -41,6 +41,8 @@ export type PocUpdateEvent = {
   notes?: string
   error?: string
   staged?: boolean
+  /** 下载目录里已有校验通过的安装包/增量包，可直接复用 */
+  cached?: boolean
 }
 
 type BridgeResult = { ok?: boolean; error?: string }

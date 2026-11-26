@@ -282,6 +282,8 @@ export const en = {
   pocUpdateRestartHint: 'Reopen the app to apply. Chats and API keys are preserved',
   pocUpdateApplyNow: 'Apply and exit',
   pocUpdateFull: 'Full package required',
+  pocUpdateCached: 'package already downloaded',
+  pocUpdateInstallCached: 'Install now',
   pocUpdateFullDownload: 'Download full APK',
   pocUpdateInstalling: 'Opening the system installer…',
   pocUpdateApplying: 'Applying update, reopen the app…',

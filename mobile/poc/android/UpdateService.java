@@ -212,6 +212,22 @@ public class UpdateService extends Service {
             broadcastStatus("uptodate", null, null);
             return;
         }
+        if ("overlay".equals(choice.optString("kind"))) {
+            // 上次下载完成但还没重启应用：直接复用固定目录里的包，不再重下
+            File cached = cachedDownload(
+                    manifest.json.optJSONObject("overlay"), "poc-overlay.tar.gz");
+            if (cached != null) {
+                stageOverlay(manifest.raw, cached, choice);
+                return;
+            }
+        } else if ("full".equals(choice.optString("kind"))) {
+            // 上次 APK 下载完成但安装被取消：标记出来，点击后直接安装
+            File cached = cachedDownload(
+                    manifest.json.optJSONObject("full"), "FlyAI-POC-update.apk");
+            if (cached != null) {
+                choice.put("cached", true);
+            }
+        }
         broadcastStatus("available", choice, null);
     }
 
@@ -280,22 +296,27 @@ public class UpdateService extends Service {
         long size = overlay.optLong("size", 0);
         String sha = overlay.optString("sha256", "");
 
-        File dir = new File(getFilesDir(), "update/download");
-        if (!dir.isDirectory() && !dir.mkdirs()) throw new RuntimeException("无法创建下载目录");
-        File part = new File(dir, "overlay.tar.gz.part");
-        broadcastStatus("downloading", choice, null);
-        download(url, part, MAX_OVERLAY, size, sha, "代码增量包");
+        File cached = cachedDownload(overlay, "poc-overlay.tar.gz");
+        if (cached == null) {
+            File dir = downloadDir();
+            File archive = new File(dir, fileNameOf(url, "poc-overlay.tar.gz"));
+            broadcastStatus("downloading", choice, null);
+            download(url, archive, MAX_OVERLAY, size, sha, "代码增量包");
+            cached = archive;
+        }
+        stageOverlay(manifest.raw, cached, choice);
+    }
 
+    /** 把已下载并校验过的 overlay 放进 pending，重启后由 BootService 应用。 */
+    private void stageOverlay(String manifestRaw, File source, JSONObject choice)
+            throws Exception {
         File pending = new File(getFilesDir(), "update/pending");
         OtaState.deleteRecursive(pending);
         if (!pending.mkdirs()) throw new RuntimeException("无法创建待生效目录");
         File payload = new File(pending, "payload.tar.gz");
-        if (!part.renameTo(payload)) {
-            copyFile(part, payload);
-            //noinspection ResultOfMethodCallIgnored
-            part.delete();
-        }
-        writeText(new File(pending, "manifest.json"), manifest.raw);
+        // 保留下载目录里的原件，下次重启前若 pending 丢失还能复用
+        copyFile(source, payload);
+        writeText(new File(pending, "manifest.json"), manifestRaw);
         writeText(new File(pending, "ready"), "");
         broadcastStatus("staged", choice, null);
     }
@@ -311,17 +332,64 @@ public class UpdateService extends Service {
         }
         String url = full.optString("url", "");
         if (url.isEmpty()) throw new IllegalStateException("完整 APK 下载地址为空");
-        File dir = new File(getFilesDir(), "update/apk");
-        if (!dir.isDirectory() && !dir.mkdirs()) throw new RuntimeException("无法创建下载目录");
-        String name = url.substring(url.lastIndexOf('/') + 1);
-        if (name.isEmpty() || !name.endsWith(".apk")) name = "FlyAI-POC-update.apk";
-        File apk = new File(dir, name);
         JSONObject data = summary(manifest.json, "full");
         data.put("size", full.optLong("size", 0));
-        broadcastStatus("downloading", data, null);
-        download(url, apk, MAX_APK, full.optLong("size", 0), full.optString("sha256", ""), "完整 APK");
+        File apk = cachedDownload(full, "FlyAI-POC-update.apk");
+        if (apk == null) {
+            File dir = downloadDir();
+            apk = new File(dir, fileNameOf(url, "FlyAI-POC-update.apk"));
+            broadcastStatus("downloading", data, null);
+            download(url, apk, MAX_APK, full.optLong("size", 0), full.optString("sha256", ""), "完整 APK");
+        }
+        data.put("cached", true);
         broadcastStatus("installing", data, null);
         installApk(apk);
+    }
+
+    /** 所有下载统一放在 filesDir/update/download，文件名取自远端 URL。 */
+    private File downloadDir() {
+        File dir = new File(getFilesDir(), "update/download");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new RuntimeException("无法创建下载目录");
+        }
+        return dir;
+    }
+
+    private static String fileNameOf(String url, String fallback) {
+        String name = url.substring(url.lastIndexOf('/') + 1);
+        int cut = name.indexOf('?');
+        if (cut >= 0) name = name.substring(0, cut);
+        name = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (name.isEmpty() || name.startsWith(".")) name = fallback;
+        return name;
+    }
+
+    /**
+     * 下载目录里已有大小/SHA-256 都对得上的文件时直接复用；
+     * 校验失败的文件删除，避免下次继续误用。
+     */
+    private File cachedDownload(JSONObject item, String fallbackName) {
+        if (item == null) return null;
+        String url = item.optString("url", "");
+        if (url.isEmpty()) return null;
+        File file = new File(downloadDir(), fileNameOf(url, fallbackName));
+        if (!file.isFile()) return null;
+        long size = item.optLong("size", 0);
+        String sha = item.optString("sha256", "");
+        boolean ok = size <= 0 || file.length() == size;
+        if (ok && !sha.isEmpty()) {
+            try {
+                ok = OtaManifest.sha256(file).equalsIgnoreCase(sha);
+            } catch (Exception e) {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+            return null;
+        }
+        return file;
     }
 
     private Manifest fetchManifest() throws Exception {

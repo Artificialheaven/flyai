@@ -634,7 +634,7 @@ const PocUpdateSetting = () => {
   } else if (state === 'available') {
     const size = event?.size ? ` · ${formatSize(event.size)}` : ''
     description = event?.kind === 'full'
-      ? `${t('pocUpdateFull')}${size}`
+      ? `${t('pocUpdateFull')}${size}${event?.cached ? ` · ${t('pocUpdateCached')}` : ''}`
       : `${t('pocUpdateAvailable', { version: event?.version || info?.versionName || '' })}${size}`
   } else if (state === 'downloading') {
     const percent = event?.percent ?? 0
@@ -677,7 +677,11 @@ const PocUpdateSetting = () => {
         className={styles.cellButton}
         onClick={() => run(event?.kind === 'full' ? downloadPocFullApk : downloadPocOverlay)}
       >
-        {event?.kind === 'full' ? t('pocUpdateFullDownload') : t('pocUpdateDownload')}
+        {event?.kind === 'full'
+          ? event?.cached
+            ? t('pocUpdateInstallCached')
+            : t('pocUpdateFullDownload')
+          : t('pocUpdateDownload')}
       </Button>
     )
   } else if (state === 'downloading') {
