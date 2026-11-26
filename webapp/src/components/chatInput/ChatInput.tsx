@@ -34,6 +34,7 @@ import { ACCEPT, useUploads } from '../../services/attachments.js'
 import { isGallerySupported } from '../../services/pocGallery.js'
 import { DraftAttachments } from './DraftAttachments.js'
 import { GalleryPicker } from './GalleryPicker.js'
+import { resolveEnterAction } from './enterKey.js'
 import { useVoiceInput } from './useVoiceInput.js'
 import { VoiceButton } from './VoiceButton.js'
 import { Spectrum } from './Spectrum.js'
@@ -51,6 +52,18 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const draft = useDrafts((state) => state.drafts.get(sessionId) ?? EMPTY_DRAFT)
   const { text, attachments } = draft
   const setText = (value: string) => setDraftText(sessionId, value)
+  /** Ctrl/Cmd+Enter 在 textarea 里不会自动换行，需要手动插入并移动光标 */
+  const insertNewline = () => {
+    const textarea = textareaRef.current
+    const current = getDraft(sessionId).text
+    const start = textarea?.selectionStart ?? current.length
+    const end = textarea?.selectionEnd ?? current.length
+    setText(current.slice(0, start) + '\n' + current.slice(end))
+    requestAnimationFrame(() => {
+      textarea?.focus({ preventScroll: true })
+      textarea?.setSelectionRange(start + 1, start + 1)
+    })
+  }
   const draftReady = useUploads((state) => prepareDraftMessage(draft, state.tasks) !== null)
   const streaming = useChatStore(
     (state) => sessionId !== null && Object.hasOwn(state.streaming, sessionId)
@@ -59,6 +72,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const importingHistory = useChatStore((state) => state.importingHistory)
   const isMobile = useIsMobile()
   const search = useSettings((state) => state.search)
+  const enterToSend = useSettings((state) => state.enterToSend)
   // 群聊窗口：点名与随机发言顺序开关
   const group = useChatStore(
     (state) => sessionId !== null && state.sessionCache[sessionId]?.threadKind === 'group'
@@ -248,9 +262,22 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
             }
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            const action = resolveEnterAction(
+              {
+                key: event.key,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey,
+                isComposing: event.nativeEvent.isComposing,
+              },
+              enterToSend
+            )
+            if (action === 'send') {
               event.preventDefault()
-              send()
+              void send()
+            } else if (action === 'newline') {
+              event.preventDefault()
+              insertNewline()
             }
           }}
           onPaste={(event) => {

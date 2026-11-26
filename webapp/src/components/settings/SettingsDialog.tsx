@@ -57,6 +57,7 @@ import {
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
 import {
   isChineseBrowser,
+  setEnterToSend,
   setLocale,
   setLocation,
   setThemePreference,
@@ -295,6 +296,7 @@ const SettingsContent = () => {
             <BackgroundSetting />
             <LocaleSetting />
             <TtsVoiceSetting />
+            <EnterToSendSetting />
             <LocationSetting />
             <GitHubSetting />
             <PocUpdateSetting />
@@ -796,6 +798,28 @@ const PocKeepAliveSetting = () => {
           label={t('pocKeepAliveTitle')}
           disabled={busy}
           onChange={toggle}
+        />
+      }
+    />
+  )
+}
+
+/** 回车发送：桌面可切换为「Enter 换行、Ctrl+Enter 发送」；手机可关闭回车发送 */
+const EnterToSendSetting = () => {
+  const t = useTranslate()
+  const enterToSend = useSettings((state) => state.enterToSend)
+  return (
+    <SettingCell
+      label={t('settingsEnterToSend')}
+      description={t(
+        enterToSend ? 'settingsEnterToSendDescOn' : 'settingsEnterToSendDescOff'
+      )}
+      status={null}
+      action={
+        <Toggle
+          checked={enterToSend}
+          label={t('settingsEnterToSend')}
+          onChange={setEnterToSend}
         />
       }
     />

@@ -18,6 +18,8 @@ type Settings = {
   siderCollapsed: boolean
   /** 「我的模型」里选中使用的提供商 id；空 = 跟随服务器默认 */
   activeProviderId: string | null
+  /** 回车发送：开=Enter 发送、Ctrl/Shift+Enter 换行；关=Enter 换行、Ctrl/Shift+Enter 发送 */
+  enterToSend: boolean
 }
 
 const KEYS = {
@@ -29,6 +31,7 @@ const KEYS = {
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
   activeProviderId: 'chat-demo:active-provider',
+  enterToSend: 'chat-demo:enter-to-send',
 } as const
 
 const read = (key: string) => {
@@ -104,6 +107,8 @@ export const useSettings = create<Settings>(() => ({
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
   activeProviderId: read(KEYS.activeProviderId),
+  // 未保存过时默认开启，保持现有 Enter 发送习惯
+  enterToSend: read(KEYS.enterToSend) !== 'false',
 }))
 
 export const setLocale = (locale: Locale) => {
@@ -146,4 +151,9 @@ export const setSiderCollapsed = (siderCollapsed: boolean) => {
 export const setActiveProviderId = (activeProviderId: string | null) => {
   write(KEYS.activeProviderId, activeProviderId || null)
   useSettings.setState({ activeProviderId })
+}
+
+export const setEnterToSend = (enterToSend: boolean) => {
+  write(KEYS.enterToSend, String(enterToSend))
+  useSettings.setState({ enterToSend })
 }
