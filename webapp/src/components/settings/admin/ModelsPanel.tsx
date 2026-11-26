@@ -1265,6 +1265,7 @@ const ImageForm = ({
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
       model: 'gemini-2.5-flash-image',
     },
+    localdream: { baseUrl: 'http://127.0.0.1:8081', model: '' },
   }
 
   const changeType = (next: ImageModelType) => {
@@ -1281,7 +1282,7 @@ const ImageForm = ({
     if (busy) {
       return
     }
-    if (!name.trim() || !modelName.trim()) {
+    if (!name.trim() || (type !== 'localdream' && !modelName.trim())) {
       setError(t('modelsImageRequired'))
       return
     }
@@ -1352,7 +1353,11 @@ const ImageForm = ({
         <input
           className={styles.input}
           value={modelName}
-          placeholder={typeDefaults[type].model}
+          placeholder={
+            type === 'localdream'
+              ? t('modelsImageLocalDreamModelPlaceholder')
+              : typeDefaults[type].model
+          }
           onChange={(event) => setModelName(event.target.value)}
         />
       </label>
@@ -1365,6 +1370,7 @@ const ImageForm = ({
             { value: 'ark', label: t('modelsImageTypeArk') },
             { value: 'openai', label: t('modelsImageTypeOpenai') },
             { value: 'google', label: t('modelsImageTypeGoogle') },
+            { value: 'localdream', label: t('modelsImageTypeLocalDream') },
           ]}
           onChange={changeType}
         />
@@ -1377,6 +1383,9 @@ const ImageForm = ({
           placeholder={typeDefaults[type].baseUrl}
           onChange={(event) => setBaseUrl(event.target.value)}
         />
+        {type === 'localdream' ? (
+          <span className={styles.rowDesc}>{t('modelsImageLocalDreamHint')}</span>
+        ) : null}
       </label>
       <label className={styles.field}>
         <span className={styles.fieldLabel}>{t('modelsFieldApiKey')}</span>

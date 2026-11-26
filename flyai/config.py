@@ -168,7 +168,8 @@ class ImageModelConfig(BaseModel):
 
     与 ProviderConfig 同样支持归属与权限共享。``type`` 选择调用协议：
     ark（默认，seedream 风格）、openai（/images/generations 与 /images/edits）、
-    google（generateContent 或 Imagen predict）。API Key 可留空（本地/免鉴权网关）。
+    google（generateContent 或 Imagen predict）、localdream（安卓 Local Dream
+    的 8081 生成端 + 8808 控制面）。API Key 可留空（本地/免鉴权网关）。
     """
 
     id: str
@@ -184,7 +185,7 @@ class ImageModelConfig(BaseModel):
     @validator("type")
     def _norm_type(cls, v):  # noqa: N805
         value = str(v or "ark").strip().lower()
-        return value if value in ("ark", "openai", "google") else "ark"
+        return value if value in ("ark", "openai", "google", "localdream") else "ark"
 
     @validator("min_level")
     def _clamp_min_level(cls, v):  # noqa: N805

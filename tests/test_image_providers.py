@@ -109,3 +109,85 @@ def test_openai_edit_uses_multipart_and_returns_b64():
     assert req.url.path == "/v1/images/edits"
     assert req.headers["content-type"].startswith("multipart/form-data")
     assert b'name="model"' in req.content and b"gpt-image-1" in req.content
+
+
+# ---- Local Dream（手机端 8081 生成 + 8808 控制面） ----
+
+def _sse(payload):
+    body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in payload)
+    return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+
+def test_localdream_selects_model_then_generates_png():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, request.content))
+        path = request.url.path
+        if path == "/models":
+            return httpx.Response(200, json={
+                "models": [{
+                    "id": "sd15", "name": "SD1.5", "generation_size": 512,
+                    "dit_kind": "", "is_anima": False,
+                    "defaults": {"steps": 20, "cfg": 7.0, "scheduler": "dpm",
+                                 "negative_prompt": "lowres"},
+                }],
+            })
+        if path == "/select":
+            return httpx.Response(200, json={"ok": True})
+        if path == "/status":
+            return httpx.Response(200, json={"state": "running", "serving_model_id": "sd15"})
+        if path == "/generate":
+            return _sse([{"type": "complete", "image": PNG_B64, "format": "png",
+                          "width": 512, "height": 512, "channels": 3}])
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="sd15", api_key="")
+    content, ext, media = _run(httpx.MockTransport(handler), cfg, size="2K")
+    assert content == PNG and (ext, media) == (".png", "image/png")
+    paths = [p for _, p, _ in calls]
+    assert "/select" in paths
+    select = [c for _, p, c in calls if p == "/select"][0]
+    select_body = json.loads(select)
+    assert select_body == {"model_id": "sd15", "width": 512, "height": 512}
+    gen = json.loads([c for _, p, c in calls if p == "/generate"][0])
+    assert gen["width"] == 512 and gen["steps"] == 20 and gen["output_format"] == "png"
+    assert "image" not in gen
+
+
+def test_localdream_raw_rgb_fallback_becomes_png():
+    raw = bytes([255, 0, 0] * 16)  # 4x4 RGB 红图
+
+    def handler(request):
+        if request.url.path == "/models":
+            return httpx.Response(200, json={"models": []})
+        if request.url.path == "/generate":
+            return _sse([{"type": "complete", "image": base64.b64encode(raw).decode(),
+                          "format": "raw", "width": 4, "height": 4, "channels": 3}])
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="", api_key="")
+    content, ext, media = _run(httpx.MockTransport(handler), cfg)
+    assert content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert (ext, media) == (".png", "image/png")
+
+
+def test_localdream_without_control_plane_uses_manual_model():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/models":
+            return httpx.Response(404, json={})
+        if request.url.path == "/generate":
+            return _sse([{"type": "complete", "image": PNG_B64, "format": "png",
+                          "width": 512, "height": 512, "channels": 3}])
+        return httpx.Response(404, json={})
+
+    cfg = ImageModelConfig(id="ld", type="localdream",
+                           base_url="http://127.0.0.1:8081", model="", api_key="")
+    content, _, _ = _run(httpx.MockTransport(handler), cfg)
+    assert content == PNG
+    assert "/select" not in calls

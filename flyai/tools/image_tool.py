@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import json
 import logging
+import random
 import time
 import uuid
 from pathlib import Path
@@ -207,6 +210,8 @@ async def ark_generate(
     (图片字节, 扩展名, media_type)。
     """
     fmt = _model_format(model_cfg)
+    if fmt == "localdream":
+        return await _localdream_generate(model_cfg, prompt, size, ref_images)
     if fmt == "google":
         return await google_generate(
             model_cfg, prompt, size, ref_images=ref_images
@@ -220,7 +225,7 @@ async def ark_generate(
 
 def _model_format(model_cfg: ImageModelConfig) -> str:
     fmt = str(getattr(model_cfg, "type", "") or "ark").strip().lower()
-    return fmt if fmt in ("ark", "openai", "google") else "ark"
+    return fmt if fmt in ("ark", "openai", "google", "localdream") else "ark"
 
 
 def _auth_headers(model_cfg: ImageModelConfig) -> Dict[str, str]:
@@ -512,6 +517,214 @@ async def google_generate(
     raise RuntimeError(
         "Google 未返回图片（可能被安全策略拦截）: " + (text[:300] or str(data)[:300])
     )
+
+
+# ---- Local Dream（安卓本地生图 App，自带 8081 生成端 + 8808 控制面） ----
+
+_LOCAL_DREAM_DEFAULT_BASE = "http://127.0.0.1:8081"
+_LOCAL_DREAM_CONTROL_PORT = 8808
+# 手机端模型默认 512/1024；仅 DiT 模型对尺寸敏感（512..2024，24 像素步进）
+_LOCAL_DREAM_SIZE_PX = {"1K": 1024, "2K": 1024, "4K": 1536}
+
+
+def _localdream_urls(model_cfg: ImageModelConfig) -> Tuple[str, str]:
+    """从 base_url 推出生图端与控制面地址（同主机，控制面固定 8808）。"""
+    base = (model_cfg.base_url or _LOCAL_DREAM_DEFAULT_BASE).rstrip("/")
+    parsed = urlsplit(base)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "127.0.0.1"
+    control = f"{scheme}://{host}:{_LOCAL_DREAM_CONTROL_PORT}"
+    return base, control
+
+
+async def _localdream_catalog(
+    client: httpx.AsyncClient, control: str
+) -> Optional[Dict[str, Any]]:
+    """控制面不可达时返回 None（用户可能已在 App 里手动加载了模型）。"""
+    try:
+        resp = await client.get(control + "/models", timeout=2.0)
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _localdream_pick_model(
+    catalog: Optional[Dict[str, Any]], requested: str
+) -> Optional[Dict[str, Any]]:
+    models = (catalog or {}).get("models") or []
+    if not isinstance(models, list):
+        return None
+    wanted = (requested or "").strip()
+    if wanted:
+        for item in models:
+            if str(item.get("id") or "") == wanted:
+                return item
+        raise RuntimeError(
+            f"Local Dream 里没有模型 {wanted}；请先在手机 App 下载该模型，或把模型名留空自动选择"
+        )
+    return models[0] if models else None
+
+
+def _localdream_resolution(model: Optional[Dict[str, Any]], size: str) -> int:
+    """手机端分辨率：优先模型自带的 generation_size，DiT 才按 1K/2K/4K 放大。"""
+    try:
+        base = int((model or {}).get("generation_size") or 512)
+    except (TypeError, ValueError):
+        base = 512
+    base = max(256, min(2048, base))
+    is_dit = bool(model and (model.get("dit_kind") or model.get("is_anima")))
+    if not is_dit:
+        return base
+    px = _LOCAL_DREAM_SIZE_PX.get((size or "").strip().upper(), base)
+    # DiT 要求 512..2048 且为 24 的倍数
+    px = max(512, min(2024, px - px % 24))
+    return px
+
+
+async def _localdream_select(
+    client: httpx.AsyncClient,
+    control: str,
+    model_id: str,
+    width: int,
+    height: int,
+) -> None:
+    """经 8808 控制面加载模型，轮询 /status 直到 running（SDXL/DiT 加载可达数十秒）。"""
+    try:
+        resp = await client.post(
+            control + "/select",
+            json={"model_id": model_id, "width": width, "height": height},
+            timeout=10.0,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Local Dream 控制面连接失败：{exc}") from exc
+    if resp.status_code == 404:
+        raise RuntimeError("Local Dream 不认识该模型（/select 返回 404）")
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Local Dream 启动模型失败 HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+
+    deadline = time.monotonic() + 120.0
+    last_state = ""
+    while time.monotonic() < deadline:
+        try:
+            info = (await client.get(control + "/status", timeout=5.0)).json()
+        except Exception:
+            info = {}
+        last_state = str(info.get("state") or "")
+        if last_state == "error":
+            raise RuntimeError("Local Dream 加载模型失败：" + str(info.get("message") or "未知错误"))
+        if last_state == "running":
+            serving = str(info.get("serving_model_id") or "")
+            if not serving or serving == model_id:
+                return
+        await asyncio.sleep(0.8)
+    raise RuntimeError(f"等待 Local Dream 模型就绪超时（最后状态：{last_state or '未知'}）")
+
+
+def _localdream_png_from_raw(event: Dict[str, Any]) -> bytes:
+    """默认 output_format=raw 时返回裸 RGB(A)，转成 PNG 再落盘。"""
+    raw = base64.b64decode(str(event.get("image") or ""))
+    width = int(event.get("width") or 0)
+    height = int(event.get("height") or 0)
+    channels = int(event.get("channels") or 3)
+    if width <= 0 or height <= 0 or not raw:
+        raise RuntimeError("Local Dream 返回的图片数据不完整")
+    mode = {1: "L", 3: "RGB", 4: "RGBA"}.get(channels)
+    if mode is None:
+        raise RuntimeError(f"Local Dream 返回了不支持的通道数：{channels}")
+    if len(raw) < width * height * channels:
+        raise RuntimeError("Local Dream 返回的图片字节数不足")
+    from PIL import Image  # 延迟导入：只有旧版 raw 回退才需要
+
+    image = Image.frombytes(mode, (width, height), raw)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _localdream_generate(
+    model_cfg: ImageModelConfig,
+    prompt: str,
+    size: str,
+    ref_images: Optional[List[Tuple[str, str]]] = None,
+) -> Tuple[bytes, str, str]:
+    """调用手机上的 Local Dream：控制面选模型 → /generate SSE → 拿图。
+
+    与 POC APK 同机时 base_url 用 http://127.0.0.1:8081 即可（PRoot 与
+    Android 共享网络命名空间，能直接访问 App 的 loopback 端口）。
+    """
+    base, control = _localdream_urls(model_cfg)
+    timeout = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        catalog = await _localdream_catalog(client, control)
+        model = _localdream_pick_model(catalog, model_cfg.model)
+        model_id = str((model or {}).get("id") or model_cfg.model or "").strip()
+        px = _localdream_resolution(model, size)
+        if catalog is not None and model_id:
+            await _localdream_select(client, control, model_id, px, px)
+
+        defaults = (model or {}).get("defaults") or {}
+        body: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": str(defaults.get("negative_prompt") or ""),
+            "steps": int(defaults.get("steps") or 20),
+            "cfg": float(defaults.get("cfg") or 7.5),
+            "scheduler": str(defaults.get("scheduler") or "dpm"),
+            "width": px,
+            "height": px,
+            "seed": random.randint(1, 2**31 - 1),
+            # 请求 PNG 省掉裸 RGB 转换；服务端不支持时仍按 raw 回退
+            "output_format": "png",
+            "preview_format": "raw",
+        }
+        if ref_images:
+            body["image"] = ref_images[0][1]
+            body["denoise_strength"] = 0.6
+
+        try:
+            async with client.stream("POST", base + "/generate", json=body) as resp:
+                if resp.status_code >= 400:
+                    detail = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"Local Dream 生图失败 HTTP {resp.status_code}: {detail[:300]}"
+                    )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    kind = event.get("type")
+                    if kind == "error":
+                        raise RuntimeError(
+                            "Local Dream 生图失败：" + str(event.get("message") or "未知错误")
+                        )
+                    if kind != "complete":
+                        continue
+                    fmt = str(event.get("format") or "raw").lower()
+                    raw_b64 = str(event.get("image") or "")
+                    if not raw_b64:
+                        raise RuntimeError("Local Dream 没有返回图片数据")
+                    if fmt == "png":
+                        return base64.b64decode(raw_b64), ".png", "image/png"
+                    if fmt == "jpeg":
+                        return base64.b64decode(raw_b64), ".jpg", "image/jpeg"
+                    return _localdream_png_from_raw(event), ".png", "image/png"
+        except httpx.ConnectError as exc:
+            raise RuntimeError(
+                "无法连接 Local Dream（"
+                + base
+                + "）：请确认手机端 App 已启动并加载模型；POC 同机可用 127.0.0.1:8081"
+            ) from exc
+    raise RuntimeError("Local Dream 没有返回图片（SSE 流结束）")
+
 
 
 async def _guarded_image_get(

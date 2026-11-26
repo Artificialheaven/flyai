@@ -47,7 +47,7 @@ export type ProviderView = {
   pricing?: TokenPricing | null
 }
 
-export type ImageModelType = 'ark' | 'openai' | 'google'
+export type ImageModelType = 'ark' | 'openai' | 'google' | 'localdream'
 
 export type ImageModelView = {
   id: string

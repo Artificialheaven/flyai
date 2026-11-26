@@ -1162,6 +1162,7 @@ def create_image_model(payload: ImageModelPayload, request: Request):
         "ark": ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seedream-5-0-260128"),
         "openai": ("https://api.openai.com/v1", "gpt-image-1"),
         "google": ("https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash-image"),
+        "localdream": ("http://127.0.0.1:8081", ""),
     }.get(kind, ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seedream-5-0-260128"))
     item = ImageModelConfig(
         id=mid,
