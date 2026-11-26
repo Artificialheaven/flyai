@@ -148,3 +148,29 @@ def test_manifest_signature_roundtrip(tmp_path):
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_load_full_from_manifest_reuses_apk_info(tmp_path):
+    manifest = {
+        "version": "1.18",
+        "version_code": 18,
+        "full": {
+            "url": "https://github.com/x/y/releases/download/poc-v1.18-29/FlyAI.apk",
+            "size": 123,
+            "sha256": "d" * 64,
+            "version": "1.18",
+            "version_code": 18,
+        },
+    }
+    path = tmp_path / "poc-update.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    full = build_overlay.load_full_from_manifest(path, 18)
+    assert full is not None
+    assert full["url"].endswith("/FlyAI.apk")
+    assert full["version_code"] == 18
+    assert full["sha256"] == "d" * 64
+
+    # 版本不一致 / 没有 full 段都不应被复用
+    assert build_overlay.load_full_from_manifest(path, 17) is None
+    path.write_text(json.dumps({"version_code": 18, "full": None}), encoding="utf-8")
+    assert build_overlay.load_full_from_manifest(path, 18) is None

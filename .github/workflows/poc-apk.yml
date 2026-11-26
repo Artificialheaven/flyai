@@ -154,6 +154,7 @@ jobs:
         env:
           POC_OTA_SIGNING_KEY: ${{ secrets.POC_OTA_SIGNING_KEY }}
           OVERLAY_ONLY: ${{ inputs.overlay_only }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -z "$POC_OTA_SIGNING_KEY" ]; then
@@ -166,6 +167,32 @@ jobs:
             APK=$(ls release/FlyAI-POC-arm64-v*.apk | head -1)
             APK_ARGS=(--apk "$APK")
           fi
+
+          # 纯 overlay 构建没有 APK：复用同版本最近一份带 full 的清单，
+          # 让 1.17 等老客户端先升级到 1.18 完整 APK，再检测 overlay。
+          FULL_ARGS=()
+          FULL_MANIFEST=""
+          if [ "$OVERLAY_ONLY" = "true" ]; then
+            for TAG in $(gh release list --limit 50 --json tagName \
+                --jq '.[].tagName' | grep -E "^poc-v${POC_VERSION_NAME}-" || true); do
+              CANDIDATE="$RUNNER_TEMP/full-$TAG.json"
+              if ! gh release download "$TAG" -p poc-update.json \
+                  -O "$CANDIDATE" --clobber >/dev/null 2>&1; then
+                continue
+              fi
+              if python -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); f=d.get("full"); raise SystemExit(0 if isinstance(f,dict) and int(f.get("version_code") or 0)==int(sys.argv[2]) else 1)' "$CANDIDATE" "$POC_VERSION_CODE"; then
+                FULL_MANIFEST="$CANDIDATE"
+                break
+              fi
+            done
+          fi
+          if [ -n "$FULL_MANIFEST" ]; then
+            echo "复用完整 APK 清单：$FULL_MANIFEST"
+            FULL_ARGS=(--full-manifest "$FULL_MANIFEST")
+          elif [ "$OVERLAY_ONLY" = "true" ]; then
+            echo "::warning::未找到同版本带 APK 的旧清单，老版本客户端无法先升级 APK"
+          fi
+
           python mobile/poc/build_overlay.py \
             --version-code "$POC_VERSION_CODE" \
             --version-name "$POC_VERSION_NAME" \
@@ -173,6 +200,7 @@ jobs:
             --tag "$POC_TAG" \
             --repo-url "https://github.com/${{ github.repository }}" \
             "${APK_ARGS[@]}" \
+            "${FULL_ARGS[@]}" \
             --key "$RUNNER_TEMP/poc-ota.key"
 
       - name: Write job summary

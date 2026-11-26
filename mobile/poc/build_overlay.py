@@ -210,6 +210,44 @@ def sign_manifest(manifest, key_path):
         return base64.b64encode(sig_file.read_bytes()).decode("ascii")
 
 
+def load_full_from_manifest(path, version_code):
+    """从旧版（带完整 APK 的）清单里取出 full 段，供纯 overlay 清单复用。
+
+    旧版本客户端（例如 1.17）看到 full 会先升级到同版本的完整 APK，
+    装好后再检测 overlay，避免「只有 overlay、老版本永远升不上来」。
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail("读取 full 清单失败: %s" % exc)
+    full = data.get("full")
+    if not isinstance(full, dict):
+        warn("清单里没有 full 段，忽略: %s" % path)
+        return None
+    try:
+        code = int(full.get("version_code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code != int(version_code):
+        warn(
+            "清单 full.version_code=%s 与本次 %s 不一致，忽略: %s"
+            % (code, version_code, path)
+        )
+        return None
+    url = str(full.get("url") or "").strip()
+    sha = str(full.get("sha256") or "").strip()
+    if not url or not sha:
+        warn("清单 full 段缺少 url/sha256，忽略: %s" % path)
+        return None
+    return {
+        "url": url,
+        "size": int(full.get("size") or 0),
+        "sha256": sha,
+        "version": str(full.get("version") or data.get("version") or ""),
+        "version_code": code,
+    }
+
+
 def apk_info(path, version_name, version_code, repo_url, tag):
     path = Path(path)
     if not path.is_file():
@@ -279,6 +317,10 @@ def build_manifest(args):
         manifest["full"] = apk_info(
             args.apk, args.version_name, args.version_code, args.repo_url, args.tag
         )
+    elif getattr(args, "full_manifest", None):
+        manifest["full"] = load_full_from_manifest(
+            args.full_manifest, args.version_code
+        )
     if not args.no_sign:
         manifest["signature"] = sign_manifest(manifest, Path(args.key))
     return manifest, overlay_path
@@ -311,6 +353,10 @@ def parse_args():
         "--repo-url", default="https://github.com/Artificialheaven/flyai"
     )
     parser.add_argument("--apk", help="同版本完整 APK（填入 full 字段）")
+    parser.add_argument(
+        "--full-manifest",
+        help="旧版带 APK 的 poc-update.json；纯 overlay 构建时复用其 full 段",
+    )
     parser.add_argument("--notes", default="")
     parser.add_argument("--key", default=str(DEFAULT_KEY), help="OTA RSA 私钥（PEM）")
     parser.add_argument("--key-id", default="poc-ota-2026")
