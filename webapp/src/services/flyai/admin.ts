@@ -193,7 +193,7 @@ export type AdminConfig = {
     mes_example_chars?: number
     pinned_chars?: number
   }
-  image_generation: { enabled: boolean; default_size: string }
+  image_generation: { enabled: boolean; default_size: string; image_model_id?: string }
   pixiv: { enabled: boolean; r18_allowed: boolean; candidate_num: number; api_base?: string; proxy?: string }
   web_search: { enabled: boolean; results_num?: number; max_page_chars?: number; engine?: string }
   browser: { enabled: boolean; headless?: boolean; proxy?: string }
@@ -415,6 +415,12 @@ export const getConfig = (): Promise<AdminConfig> => request<AdminConfig>('/api/
 /** 管理员切换全局默认模型；普通用户的后端仅做可见性校验，选择由前端本地保存 */
 export const activateProvider = (providerId: string): Promise<{ ok: boolean }> =>
   request<{ ok: boolean }>(`/api/config/activate/${encodeURIComponent(providerId)}`, {
+    method: 'POST',
+  })
+
+/** 管理员设定全局默认生图模型；普通用户只在前端本地选择 */
+export const activateImageModel = (modelId: string): Promise<{ ok: boolean }> =>
+  request<{ ok: boolean }>(`/api/config/activate_image/${encodeURIComponent(modelId)}`, {
     method: 'POST',
   })
 

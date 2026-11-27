@@ -2411,12 +2411,13 @@ const streamReply = async (
     for (const image of request.images) {
       images.push({ media_type: image.mediaType, data: await blobToBase64(image.blob) })
     }
-    const { thinking, search, activeProviderId } = useSettings.getState()
+    const { thinking, search, activeProviderId, activeImageModelId } = useSettings.getState()
     const payload: ChatSendPayload = {
       message: request.text,
       session_id: sessionId,
       thread_id: getSession(sessionId)?.threadId,
       provider_id: activeProviderId || undefined,
+      image_model_id: activeImageModelId || undefined,
       tools_enabled: true,
       images,
       deep_thinking: thinking,

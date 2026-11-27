@@ -1422,7 +1422,9 @@ async def submit_chat(state, sc, req: ChatRequest, run_manager=None):
     services["upload_url_base"] = f"/uploads/{getattr(sc, 'uid', '')}"
     # 当前用户可见的生图模型
     services["image_models"] = visible_image_models(state.config, sc.uid, sc.level)
-    services["image_model_id"] = getattr(req, "image_model_id", None)
+    services["image_model_id"] = getattr(req, "image_model_id", None) or getattr(
+        getattr(state.config, "image_generation", None), "image_model_id", ""
+    )
     # 生图引擎选择（输入区「SD」开关）；子 AI 用当前 LLM 提供商生成 SD 参数
     services["image_engine"] = str(getattr(req, "image_engine", "") or "").strip()
     services["llm_provider"] = provider
@@ -2354,7 +2356,13 @@ async def _chat_in_thread(state, sc, session, req: ChatRequest, provider=None,
                 services["image_models"] = visible_image_models(
                     state.config, sc.uid, sc.level
                 )
-                services["image_model_id"] = getattr(req, "image_model_id", None)
+                services["image_model_id"] = getattr(
+                    req, "image_model_id", None
+                ) or getattr(
+                    getattr(state.config, "image_generation", None),
+                    "image_model_id",
+                    "",
+                )
                 # 生图引擎选择；子 AI 用当前 LLM 提供商生成 SD 参数
                 services["image_engine"] = str(
                     getattr(req, "image_engine", "") or ""

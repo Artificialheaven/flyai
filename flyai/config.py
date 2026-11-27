@@ -543,10 +543,12 @@ class EmbeddingsConfig(BaseModel):
 
 
 class ImageGenSettings(BaseModel):
-    """AI 生图全局开关与默认尺寸。具体模型在 image_models 列表中，可自建/共享。"""
+    """AI 生图全局开关、默认尺寸与默认生图模型。具体模型在 image_models 列表中，可自建/共享。"""
 
     enabled: bool = True
     default_size: str = "2K"  # 1K / 2K / 4K
+    # 管理员选定的默认生图模型；空 = 使用第一个可用模型。用户可随请求覆盖。
+    image_model_id: str = ""
 
 
 class PixivSettings(BaseModel):

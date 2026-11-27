@@ -439,6 +439,9 @@ def put_config(payload: ConfigPayload, request: Request):
         cfg.image_generation = ImageGenSettings(
             enabled=igd.get("enabled", old.enabled),
             default_size=igd.get("default_size") or old.default_size,
+            image_model_id=(
+                str(igd.get("image_model_id", old.image_model_id) or "").strip()
+            ),
         )
 
     if payload.image_models is not None:
@@ -597,6 +600,18 @@ def put_config(payload: ConfigPayload, request: Request):
         # 调度器开关/周期/时区热生效：在运行循环内安排重启
         state.reconfigure_scheduler()
     return _masked_config(state, ADMIN_UID)
+
+
+@router.post("/config/activate_image/{model_id}")
+def activate_image_model(model_id: str, request: Request):
+    """管理员设定全局默认生图模型；普通用户只在前端本地选择。"""
+    _require_admin(request)
+    state = request.app.state.flyai
+    if not any(m.id == model_id for m in state.config.image_models):
+        raise HTTPException(404, "生图模型不存在")
+    state.config.image_generation.image_model_id = model_id
+    save_config(state.config, state.config_path)
+    return {"ok": True}
 
 
 @router.post("/config/activate/{provider_id}")
@@ -1226,6 +1241,9 @@ def delete_image_model(mid: str, request: Request):
     state = request.app.state.flyai
     item = _require_item(_find_image_model(state.config, mid))
     state.config.image_models.remove(item)
+    # 删掉默认生图模型时清空指针，避免配置里留下悬空 id
+    if state.config.image_generation.image_model_id == mid:
+        state.config.image_generation.image_model_id = ""
     _persist(state)
     return {"ok": True}
 

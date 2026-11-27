@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import {
+  activateImageModel,
   activateProvider,
   cloneProviderModels,
   createImageModel,
@@ -26,7 +27,11 @@ import {
   type TokenPricing,
 } from '../../../services/flyai/admin.js'
 import { useAuth } from '../../../services/flyai/auth.js'
-import { setActiveProviderId, useSettings } from '../../../services/settings.js'
+import {
+  setActiveImageModelId,
+  setActiveProviderId,
+  useSettings,
+} from '../../../services/settings.js'
 import { Button } from '../../base/Button.js'
 import { Modal } from '../../base/Modal.js'
 import { Select } from '../../base/Select.js'
@@ -43,10 +48,12 @@ export const ModelsPanel = () => {
   const t = useTranslate()
   const isAdmin = useAuth((state) => state.user?.role === 'admin')
   const activeProviderId = useSettings((state) => state.activeProviderId)
+  const activeImageModelId = useSettings((state) => state.activeImageModelId)
   const [tab, setTab] = useState<Tab>('llm')
   const [providers, setProviders] = useState<ProviderView[]>([])
   const [imageModels, setImageModels] = useState<ImageModelView[]>([])
   const [globalActive, setGlobalActive] = useState('')
+  const [globalImageActive, setGlobalImageActive] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState('')
@@ -126,6 +133,7 @@ export const ModelsPanel = () => {
       setProviders(nextProviders)
       setImageModels(config.image_models ?? [])
       setGlobalActive(config.active_provider ?? '')
+      setGlobalImageActive(config.image_generation?.image_model_id ?? '')
       // 本地选择可能指向已被隐藏/删除的模型：清空，避免发送时 403
       const current = useSettings.getState().activeProviderId
       if (current && !nextProviders.some((p) => p.id === current)) {
@@ -156,6 +164,27 @@ export const ModelsPanel = () => {
       if (isAdmin) {
         setGlobalActive(provider.id)
       }
+    } catch (err) {
+      setError(t('adminSaveFailed', { message: errorText(err) }))
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  const activateImage = async (model: ImageModelView) => {
+    if (busyId) {
+      return
+    }
+    setBusyId(model.id)
+    setError('')
+    try {
+      // 管理员改全局默认；普通用户只需本地保存，请求里随 image_model_id 下发
+      if (isAdmin) {
+        await activateImageModel(model.id)
+        setGlobalImageActive(model.id)
+      }
+      setActiveImageModelId(model.id)
+      showToast({ key: 'modelsActiveToast' })
     } catch (err) {
       setError(t('adminSaveFailed', { message: errorText(err) }))
     } finally {
@@ -202,6 +231,16 @@ export const ModelsPanel = () => {
     }
   }
 
+
+  useEffect(() => {
+    if (
+      activeImageModelId &&
+      imageModels.length > 0 &&
+      !imageModels.some((model) => model.id === activeImageModelId)
+    ) {
+      setActiveImageModelId(null)
+    }
+  }, [activeImageModelId, imageModels])
 
   const renderProviderItem = (provider: ProviderView) => {
     const active = provider.id === activeProviderId
@@ -467,10 +506,22 @@ export const ModelsPanel = () => {
       ) : (
         <div className={styles.list}>
           {imageModels.map((model) => (
-            <div key={model.id} className={styles.item}>
+            <div
+              key={model.id}
+              className={clsx(styles.item, model.id === activeImageModelId && styles.itemActive)}
+            >
               <div className={styles.itemMain}>
                 <div className={styles.itemName}>
                   <span>{model.name || model.id}</span>
+                  {model.id === activeImageModelId ? (
+                    <span className={clsx(styles.badge, styles.badgeBrand)}>
+                      {t('adminActive')}
+                    </span>
+                  ) : globalImageActive === model.id ? (
+                    <span className={clsx(styles.badge, styles.badgeBrand)}>
+                      {t('modelsGlobalDefault')}
+                    </span>
+                  ) : null}
                   {model.shared ? (
                     <span className={styles.badge}>{t('adminShared')}</span>
                   ) : null}
@@ -491,6 +542,14 @@ export const ModelsPanel = () => {
                 </div>
               </div>
               <div className={styles.itemActions}>
+                <Button
+                  size="s"
+                  variant={model.id === activeImageModelId ? 'outlined' : 'primary'}
+                  disabled={model.id === activeImageModelId || busyId === model.id}
+                  onClick={() => void activateImage(model)}
+                >
+                  {t(model.id === activeImageModelId ? 'adminActive' : 'adminUse')}
+                </Button>
                 {isAdmin ? (
                   <>
                     <Button

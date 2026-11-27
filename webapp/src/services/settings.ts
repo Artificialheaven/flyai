@@ -18,6 +18,8 @@ type Settings = {
   siderCollapsed: boolean
   /** 「我的模型」里选中使用的提供商 id；空 = 跟随服务器默认 */
   activeProviderId: string | null
+  /** 「我的模型」里选中使用的生图模型 id；空 = 使用第一个可用生图模型 */
+  activeImageModelId: string | null
   /** 回车发送：开=Enter 发送、Ctrl/Shift+Enter 换行；关=Enter 换行、Ctrl/Shift+Enter 发送 */
   enterToSend: boolean
 }
@@ -31,6 +33,7 @@ const KEYS = {
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
   activeProviderId: 'chat-demo:active-provider',
+  activeImageModelId: 'chat-demo:active-image-model',
   enterToSend: 'chat-demo:enter-to-send',
 } as const
 
@@ -107,6 +110,7 @@ export const useSettings = create<Settings>(() => ({
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
   activeProviderId: read(KEYS.activeProviderId),
+  activeImageModelId: read(KEYS.activeImageModelId),
   // 未保存过时默认开启，保持现有 Enter 发送习惯
   enterToSend: read(KEYS.enterToSend) !== 'false',
 }))
@@ -151,6 +155,11 @@ export const setSiderCollapsed = (siderCollapsed: boolean) => {
 export const setActiveProviderId = (activeProviderId: string | null) => {
   write(KEYS.activeProviderId, activeProviderId || null)
   useSettings.setState({ activeProviderId })
+}
+
+export const setActiveImageModelId = (activeImageModelId: string | null) => {
+  write(KEYS.activeImageModelId, activeImageModelId || null)
+  useSettings.setState({ activeImageModelId })
 }
 
 export const setEnterToSend = (enterToSend: boolean) => {

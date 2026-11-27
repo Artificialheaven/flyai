@@ -14,6 +14,7 @@ from flyai.api.routes_config import (
     ImageModelPayload,
     ProviderPayload,
     SharePayload,
+    activate_image_model,
     activate_provider,
     create_image_model,
     create_provider_model,
@@ -536,6 +537,39 @@ def test_activate_visibility_check(tmp_path):
     with pytest.raises(HTTPException) as ei:
         activate_provider("gated", _req(state, "u10"))
     assert ei.value.status_code == 404
+
+
+# ---- 默认生图模型 ----
+
+def test_activate_image_model_admin_only(tmp_path):
+    state = _mkstate(tmp_path)
+    assert activate_image_model("img-open", _req(state))["ok"] is True
+    assert state.config.image_generation.image_model_id == "img-open"
+    assert load_config(state.config_path).image_generation.image_model_id == "img-open"
+
+    # 删除默认模型时指针一并清空，避免悬空 id
+    delete_image_model("img-open", _req(state))
+    assert state.config.image_generation.image_model_id == ""
+
+    state.user_store.add("u10", level=10)
+    with pytest.raises(HTTPException) as ei:
+        activate_image_model("img-open", _req(state, "u10"))
+    assert ei.value.status_code == 403
+
+    with pytest.raises(HTTPException) as ei:
+        activate_image_model("missing", _req(state))
+    assert ei.value.status_code == 404
+
+
+def test_config_update_preserves_image_model_id(tmp_path):
+    state = _mkstate(tmp_path)
+    state.config.image_generation.image_model_id = "img-open"
+    put_config(
+        ConfigPayload(image_generation={"enabled": True, "default_size": "4K"}),
+        _req(state),
+    )
+    assert state.config.image_generation.image_model_id == "img-open"
+    assert state.config.image_generation.default_size == "4K"
 
 
 def test_user_seat_provider_must_be_visible(tmp_path):
